@@ -95,6 +95,7 @@ def main(args):
             save_parquet=save_parquet,
             save_root=save_root and args.save_root,
             filetag=f"{args.starti}-{args.endi}",
+            batch_size=args.batch_size,
         )
 
 
