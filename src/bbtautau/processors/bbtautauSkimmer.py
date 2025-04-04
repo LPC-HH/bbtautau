@@ -427,9 +427,11 @@ class bbtautauSkimmer(SkimmerABC):
         #########################
         print("starting object selection", f"{time.time() - start:.2f}")
 
-        # # Leptons
-        # veto_muon_sel = veto_muons(events.Muon)
-        # veto_electron_sel = veto_electrons(events.Electron)
+        # Leptons
+        electrons = objects.good_electrons(events, events.Electron)  # noqa: F841
+        muons = objects.good_muons(events, events.Muon)  # noqa: F841
+        taus = objects.good_taus(events, events.Tau)  # noqa: F841
+        boosted_taus = objects.boosted_taus(events, events.boostedTau)  # noqa: F841
 
         # AK4 Jets
         num_ak4_jets = 4

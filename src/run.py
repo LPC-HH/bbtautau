@@ -94,7 +94,8 @@ def main(args):
             skipbadfiles=skipbadfiles,
             save_parquet=save_parquet,
             save_root=save_root and args.save_root,
-            filetag=f"{args.starti}-{args.endi}",
+            filetag=f"{args.starti}-{args.endi}" if args.file_tag is None else args.file_tag,
+            batch_size=args.batch_size,
         )
 
 

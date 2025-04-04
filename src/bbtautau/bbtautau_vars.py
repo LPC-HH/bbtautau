@@ -27,6 +27,7 @@ HLT_dict = {
         "HLT_IsoMu24",
         "HLT_Mu50",
     ],
+    # These are in Muon
     "MuonTau": [
         "HLT_IsoMu20_eta2p1_LooseDeepTauPFTauHPS27_eta2p1_CrossL1",
         "HLT_IsoMu24_eta2p1_LooseDeepTauPFTauHPS180_eta2p1",
@@ -43,6 +44,7 @@ HLT_dict = {
         "HLT_Ele50_CaloIdVT_GsfTrkIdT_PFJet165",
         "HLT_Photon200",
     ],
+    # This is in EGamma
     "ETau": [
         "HLT_Ele24_eta2p1_WPTight_Gsf_LooseDeepTauPFTauHPS30_eta2p1_CrossL1",
         "HLT_Ele24_eta2p1_WPTight_Gsf_TightChargedIsoPFTauHPS30_eta2p1_CrossL1",
@@ -51,8 +53,14 @@ HLT_dict = {
 
 # combine into a single list
 HLT_list = [hlt for sublist in HLT_dict.values() for hlt in sublist]
+
+# HLTs per dataset
 HLT_jets = [hlt for key in ["PNet", "PFJet", "QuadJet"] for hlt in HLT_dict[key]]
 HLT_taus = [hlt for key in ["DiTau", "SingleTau"] for hlt in HLT_dict[key]]
+HLT_egammas = [hlt for key in ["EGamma", "ETau"] for hlt in HLT_dict[key]]
+HLT_muons = [hlt for key in ["Muon", "MuonTau"] for hlt in HLT_dict[key]]
+
+# HLTs per channel
 HLT_hh = [
     hlt for key in ["PNet", "PFJet", "QuadJet", "DiTau", "SingleTau"] for hlt in HLT_dict[key]
 ]
@@ -66,3 +74,9 @@ HLT_he = [
     for key in ["PNet", "PFJet", "EGamma", "ETau", "DiTau", "SingleTau"]
     for hlt in HLT_dict[key]
 ]
+
+HLT_channels = {
+    "hh": HLT_hh,
+    "he": HLT_he,
+    "hm": HLT_hmu,
+}
