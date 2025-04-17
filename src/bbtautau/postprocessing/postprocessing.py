@@ -56,10 +56,61 @@ control_plot_vars = (
         ShapeVar(
             var=f"ak8FatJetPNetmassLegacy{i}",
             label=rf"PNet Legacy $m_{{reg}}^{{j{i + 1}}}$",
+            bins=[20, 50, 300],
+        )
+        for i in range(3)
+    ]
+    + [
+        ShapeVar(
+            var=f"ak8FatJetParTmassResApplied{i}",
+            label=rf"ParT Resonance $m_{{reg}}^{{j{i + 1}}}$",
+            bins=[20, 50, 300],
+        )
+        for i in range(3)
+    ]
+    + [
+        ShapeVar(
+            var=f"ak8FatJetParTmassVisApplied{i}",
+            label=rf"ParT Visable $m_{{reg}}^{{j{i + 1}}}$",
+            bins=[20, 50, 300],
+        )
+        for i in range(3)
+    ]
+    # ak8FatJetParTXbbvsQCD
+    + [
+        ShapeVar(
+            var=f"ak8FatJetParTXbbvsQCD{i}",
+            label=r"ParT XbbvsQCD$",
             bins=[20, 0, 1],
         )
         for i in range(3)
     ]
+    # ak8FatJetParTXbbvsQCDTop
+    + [
+        ShapeVar(
+            var=f"ak8FatJetParTXbbvsQCDTop{i}",
+            label=r"ParT XbbvsQCDTop$",
+            bins=[20, 0, 1],
+        )
+        for i in range(3)
+    ]
+    # ak8FatJetPNetXbbvsQCDLegacy
+    + [
+        ShapeVar(
+            var=f"ak8FatJetPNetXbbvsQCDLegacy{i}",
+            label=r"PNet Legacy XbbvsQCD$",
+            bins=[20, 0, 1],
+        )
+        for i in range(3)
+    ]
+    #  nElectrons
+    + [ShapeVar(var="nElectrons", label=r"Number of Electrons", bins=[3, 0, 2])]
+    #  nMuons
+    + [ShapeVar(var="nMuons", label=r"Number of Muons", bins=[3, 0, 2])]
+    #  nTaus
+    + [ShapeVar(var="nTaus", label=r"Number of Taus", bins=[3, 0, 2])]
+    #  nBoostedTaus
+    + [ShapeVar(var="nBoostedTaus", label=r"Number of Boosted Taus", bins=[3, 0, 2])]
 )
 
 
