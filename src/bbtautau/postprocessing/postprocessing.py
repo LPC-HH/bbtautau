@@ -6,32 +6,45 @@ Authors: Raghav Kansal, Ludovico Mori
 
 from __future__ import annotations
 
+import argparse
 import copy
+import json
+import logging
 import pickle
 import warnings
+from copy import deepcopy
 from pathlib import Path
+from pprint import pprint
 
 import hist
+import matplotlib as mpl
 import numpy as np
 import pandas as pd
-from boostedhh import utils
+from boostedhh import hh_vars, utils
 from boostedhh.hh_vars import data_key
-from boostedhh.utils import Sample, ShapeVar
+from boostedhh.utils import Sample, ShapeVar, add_bool_arg
 from hist import Hist
 
 import bbtautau.postprocessing.utils as putils
 from bbtautau.bbtautau_utils import Channel
 from bbtautau.HLTs import HLTs
 from bbtautau.postprocessing import Regions, Samples, plotting
+from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES, SIGNALS
 from bbtautau.postprocessing.utils import LoadedSample
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("boostedhh.utils")
+
+
 base_filters_default = [
-    ("('ak8FatJetPt', '0')", ">=", 250),
-    ("('ak8FatJetPNetmassLegacy', '0')", ">=", 50),
-    ("('ak8FatJetPt', '1')", ">=", 200),
-    # ("('ak8FatJetMsd', '0')", ">=", msd_cut),
-    # ("('ak8FatJetMsd', '1')", ">=", msd_cut),
-    # ("('ak8FatJetPNetXbb', '0')", ">=", 0.8),
+    [
+        ("('ak8FatJetPt', '0')", ">=", 250),
+        ("('ak8FatJetPNetmassLegacy', '0')", ">=", 50),
+        ("('ak8FatJetPt', '1')", ">=", 200),
+        # ("('ak8FatJetMsd', '0')", ">=", msd_cut),
+        # ("('ak8FatJetMsd', '1')", ">=", msd_cut),
+        # ("('ak8FatJetPNetXbb', '0')", ">=", 0.8),
+    ]
 ]
 
 
@@ -135,11 +148,113 @@ shape_vars = [
 ]
 
 
-def bb_filters(num_fatjets: int = 3, bb_cut: float = 0.3):
+def main(args: argparse.Namespace):
+    CHANNEL = CHANNELS[args.channel]
+
+    data_paths = {
+        "signal": args.signal_data_dirs,
+        "data": args.data_dir,
+        "bg": args.bg_data_dirs,
+    }
+
+    if args.sigs is None:
+        args.sigs = {s + CHANNEL.key: SAMPLES[s + CHANNEL.key] for s in SIGNALS}
+
+    if args.bgs is None:
+        args.bgs = {bkey: b for bkey, b in SAMPLES.items() if b.get_type() == "bg"}
+
+    if args.templates:
+        filters = bb_filters(num_fatjets=3, bb_cut=0.3)
+        filters = tt_filters(CHANNEL, filters, num_fatjets=3, tt_cut=0.3)
+    else:
+        filters = None
+
+    print("Loading samples")
+    print("Filters:")
+    pprint(filters)
+    print()
+    # dictionary that will contain all information (from all samples)
+    events_dict = load_samples(
+        args.year,
+        CHANNEL,
+        data_paths,
+        load_data=True,
+        load_bgs=True,
+        filters_dict=filters,
+        loaded_samples=True,
+    )
+
+    cutflow = utils.Cutflow(samples=events_dict)
+    cutflow.add_cut(events_dict, "Preselection", "finalWeight")
+    print(cutflow.cutflow)
+
+    print("\nTriggers")
+    apply_triggers(events_dict, args.year, CHANNEL)
+    cutflow.add_cut(events_dict, "Triggers", "finalWeight")
+    print(cutflow.cutflow)
+
+    derive_variables(events_dict, CHANNEL)
+
+    print("\nbbtautau assignment")
+    bbtautau_assignment(events_dict, CHANNEL)
+
+    print("\nTemplates")
+    templates = get_templates(
+        events_dict,
+        args.year,
+        args.sigs,
+        args.bgs,
+        CHANNEL,
+        shape_vars,
+        {},  # TODO: systematics
+        # pass_ylim=150,
+        # fail_ylim=1e5,
+        sig_scale_dict={f"bbtt{CHANNEL.key}": 300, f"vbfbbtt-k2v0{CHANNEL.key}": 40},
+        template_dir=args.template_dir,
+        plot_dir=args.plot_dir,
+        show=False,
+    )
+
+    print("\nSaving templates")
+    save_templates(
+        templates, args.template_dir / f"{args.year}_templates.pkl", args.blinded, shape_vars
+    )
+
+
+def bb_filters(in_filters: list[tuple] = None, num_fatjets: int = 3, bb_cut: float = 0.3):
+    """
+    0.3 corresponds to roughly, 85% signal efficiency, 2% QCD efficiency (pT: 250-400, mSD:0-250, mRegLegacy:40-250)
+    """
+    if in_filters is None:
+        in_filters = base_filters_default
+
     filters = [
-        # roughly, 85% signal efficiency, 2% QCD efficiency (pT: 250-400, mSD:0-250, mRegLegacy:40-250)
-        base_filters_default + [(f"('ak8FatJetPNetXbbLegacy', '{n}')", ">=", bb_cut)]
+        ifilter + [(f"('ak8FatJetParTXbbvsQCD', '{n}')", ">=", bb_cut)]
         for n in range(num_fatjets)
+        for ifilter in in_filters
+    ]
+    return filters
+
+
+def tt_filters(
+    channel: Channel, in_filters: list[tuple] = None, num_fatjets: int = 3, tt_cut: float = 0.9
+):
+    if in_filters is None:
+        in_filters = base_filters_default
+
+    if channel.key == "hm":
+        warnings.warn(
+            "Temporarily applying vsQCD filter only for tauhtaum due to missing keys!", stacklevel=2
+        )
+        tt_cut = 0.05
+        vslabel = "vsQCD"
+    else:
+        vslabel = "vsQCDTop"
+
+    filters = [
+        ifilter + [(f"('ak8FatJetParTX{channel.tagger_label}{vslabel}', '{n}')", ">=", tt_cut)]
+        for n in range(num_fatjets)
+        for ifilter in in_filters
     ]
     return filters
 
@@ -159,7 +274,8 @@ def trigger_filter(
         base_filters = copy.deepcopy(base_filters_default)
 
     if fast_mode:
-        base_filters += [("('ak8FatJetPNetXbbLegacy', '0')", ">=", 0.95)]
+        for i in range(len(base_filters)):
+            base_filters[i] += [("('ak8FatJetPNetXbbLegacy', '0')", ">=", 0.95)]
 
     filters_dict = {}
 
@@ -168,15 +284,18 @@ def trigger_filter(
         skip = []
         for name in skip_names:
             skip += HLTs.hlts_by_type(year, name)
-        triggers["data"] = [
-            trigger for trigger in triggers["data"] if trigger not in skip
-        ]  # exclude from filtering since they change mid-2023 and have dype as bool instead of int
+
+        # exclude from filtering since they change mid-2023 and have dype as bool instead of int
+        triggers["data"] = [trigger for trigger in triggers["data"] if trigger not in skip]
 
     if not isinstance(triggers, dict):
         print(triggers, year, "triggers should be a dictionary")
+
     for dtype, trigger_list in triggers.items():
         filters_dict[dtype] = [
-            base_filters + [(f"('{trigger}', '0')", "==", 1)] for trigger in trigger_list
+            ifilter + [(f"('{trigger}', '0')", "==", 1)]
+            for trigger in trigger_list
+            for ifilter in base_filters
         ]
 
     if PNetXbb_cut is not None:
@@ -499,6 +618,27 @@ def delete_columns(
                 )
             )
     return events_dict
+
+
+def derive_variables(events_dict: dict[str, LoadedSample], channel: Channel, num_fatjets: int = 3):
+    """Derive variables for each event."""
+    for sample in events_dict.values():
+        if "ak8FatJetPNetXbbvsQCDLegacy" not in sample.events:
+            Xbb = sample.get_var("ak8FatJetPNetXbbLegacy")
+            QCD = sample.get_var("ak8FatJetPNetQCDLegacy")
+            Xbb_vs_QCD = Xbb / (Xbb + QCD)
+
+            for n in range(num_fatjets):
+                sample.events[("ak8FatJetPNetXbbvsQCDLegacy", str(n))] = Xbb_vs_QCD[:, n]
+
+        if channel.key == "hm" and "ak8FatJetParTXtauhtaumvsQCDTop" not in sample.events:
+            tauhtaum = sample.get_var("ak8FatJetParTXtauhtaum")
+            qcd = sample.get_var("ak8FatJetParTQCD")
+            top = sample.get_var("ak8FatJetParTTop")
+            tauhtaum_vs_QCDTop = tauhtaum / (tauhtaum + qcd + top)
+
+            for n in range(num_fatjets):
+                sample.events[("ak8FatJetParTXtauhtaumvsQCDTop", str(n))] = tauhtaum_vs_QCDTop[:, n]
 
 
 def bbtautau_assignment_old(events_dict: dict[str, pd.DataFrame], channel: Channel):
@@ -923,6 +1063,7 @@ def get_templates(
                     "year": year,
                     "ylim": pass_ylim if pass_region else fail_ylim,
                     "plot_data": (not (rname == "pass" and blind_pass)) and plot_data,
+                    "leg_args": {"fontsize": 22, "ncol": 2},
                 }
 
                 plot_name = (
@@ -974,3 +1115,167 @@ def get_templates(
                         )
 
     return templates
+
+
+def save_templates(
+    templates: dict[str, Hist],
+    template_file: Path,
+    blind: bool,
+    shape_vars: list[ShapeVar],
+):
+    """Creates blinded copies of each region's templates and saves a pickle of the templates"""
+
+    if blind:
+        from copy import deepcopy
+
+        blind_window = shape_vars[0].blind_window
+
+        for label, template in list(templates.items()):
+            blinded_template = deepcopy(template)
+            utils.blindBins(blinded_template, blind_window)
+            templates[f"{label}MCBlinded"] = blinded_template
+
+    with template_file.open("wb") as f:
+        pickle.dump(templates, f)
+
+    print("Saved templates to", template_file)
+
+
+def parse_args(parser=None):
+    if parser is None:
+        parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--channel",
+        required=True,
+        choices=list(Samples.CHANNELS.keys()),
+        help="channel",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--data-dir",
+        default=None,
+        help="path to skimmed parquet",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--bg-data-dirs",
+        default=[],
+        help="path to skimmed background parquets, if different from other data",
+        nargs="*",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--signal-data-dirs",
+        default=[],
+        help="path to skimmed signal parquets, if different from other data",
+        nargs="*",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--year",
+        required=True,
+        choices=hh_vars.years,
+        type=str,
+    )
+
+    parser.add_argument(
+        "--plot-dir",
+        help="If making control or template plots, path to directory to save them in",
+        default="",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--template-dir",
+        help="If saving templates, path to file to save them in. If scanning, directory to save in.",
+        default="",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--templates-name",
+        help="If saving templates, optional name for folder (comes under cuts directory if scanning).",
+        default="",
+        type=str,
+    )
+
+    add_bool_arg(parser, "control-plots", "make control plots", default=False)
+
+    add_bool_arg(parser, "blinded", "blind the data in the Higgs mass window", default=True)
+    add_bool_arg(parser, "templates", "save m_bb templates", default=False)
+    add_bool_arg(
+        parser, "overwrite-template", "if template file already exists, overwrite it", default=False
+    )
+    add_bool_arg(parser, "do-jshifts", "Do JEC/JMC variations", default=True)
+    add_bool_arg(parser, "plot-shifts", "Plot systematic variations as well", default=False)
+    add_bool_arg(
+        parser, "override-systs", "Override saved systematics file if it exists", default=False
+    )
+
+    parser.add_argument(
+        "--sigs",
+        help="specify signal samples. By default, will use the samples defined in `hh_vars`.",
+        nargs="*",
+        default=None,
+        type=str,
+    )
+
+    parser.add_argument(
+        "--bgs",
+        help="specify background samples",
+        nargs="*",
+        default=None,
+        type=str,
+    )
+
+    add_bool_arg(parser, "read-sig-samples", "read signal samples from directory", default=False)
+    add_bool_arg(parser, "data", "include data", default=True)
+    add_bool_arg(parser, "filters", "apply filters", default=True)
+
+    parser.add_argument(
+        "--control-plot-vars",
+        help="Specify control plot variables to plot. By default plots all.",
+        default=[],
+        nargs="*",
+        type=str,
+    )
+
+    args = parser.parse_args()
+
+    if args.control_plots:
+        raise NotImplementedError("Control plots not implemented")
+
+    if not args.signal_data_dirs and args.data_dir:
+        args.signal_data_dirs = [args.data_dir]
+
+    if not args.bg_data_dirs and args.data_dir:
+        args.bg_data_dirs = [args.data_dir]
+
+    save_args = deepcopy(args)
+
+    # save args in args.plot_dir and args.template_dir if they exit
+    if args.plot_dir:
+        args.plot_dir = Path(args.plot_dir) / args.channel / args.year
+        args.plot_dir.mkdir(parents=True, exist_ok=True)
+        with (args.plot_dir / "args.json").open("w") as f:
+            json.dump(save_args.__dict__, f, indent=4)
+
+    if args.template_dir:
+        args.template_dir = Path(args.template_dir) / args.channel
+        (args.template_dir / "cutflows" / args.year).mkdir(parents=True, exist_ok=True)
+        with (args.template_dir / "args.json").open("w") as f:
+            json.dump(save_args.__dict__, f, indent=4)
+
+    print(args)
+    return args
+
+
+if __name__ == "__main__":
+    mpl.use("Agg")
+    args = parse_args()
+    main(args)

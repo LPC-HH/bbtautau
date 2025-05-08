@@ -21,7 +21,7 @@ def get_selection_regions(channel: Channel):
                 "ttFatJetPt": [200, CUT_MAX_VAL],
                 f"ttFatJet{channel.tt_mass_cut[0]}": channel.tt_mass_cut[1],
                 "bbFatJetParTXbbvsQCD": [channel.txbb_cut, CUT_MAX_VAL],
-                f"ttFatJetParTX{channel.tagger_label}vsQCD": [channel.txtt_cut, CUT_MAX_VAL],
+                f"ttFatJetParTX{channel.tagger_label}vsQCDTop": [channel.txtt_cut, CUT_MAX_VAL],
             },
             signal=True,
             label="Pass",
@@ -32,10 +32,11 @@ def get_selection_regions(channel: Channel):
                 "ttFatJetPt": [200, CUT_MAX_VAL],
                 f"ttFatJet{channel.tt_mass_cut[0]}": channel.tt_mass_cut[1],
                 # invert at least one of the cuts
-                f"bbFatJetParTXbbvsQCD+ttFatJetParTX{channel.tagger_label}vsQCD": [
+                f"bbFatJetParTXbbvsQCD+ttFatJetParTX{channel.tagger_label}vsQCDTop": [
                     [-CUT_MAX_VAL, channel.txbb_cut],
                     [-CUT_MAX_VAL, channel.txtt_cut],
                 ],
+                f"ttFatJetParTX{channel.tagger_label}vsQCDTop": [0.3, CUT_MAX_VAL],
             },
             signal=False,
             label="Fail",

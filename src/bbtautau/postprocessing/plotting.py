@@ -56,6 +56,7 @@ def ratioHistPlot(
     plot_ratio: bool = True,
     plot_significance: bool = False,
     cutlabel: str = "",
+    region_label: str = "",
     name: str = "",
     show: bool = False,
     **kwargs,
@@ -99,7 +100,7 @@ def ratioHistPlot(
     ax.text(
         0.03,
         0.92,
-        channel.label,
+        region_label if region_label else channel.label,
         transform=ax.transAxes,
         fontsize=24,
         fontproperties="Tex Gyre Heros:bold",

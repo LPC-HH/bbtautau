@@ -13,21 +13,9 @@ CHANNELS = {
         data_samples=["jetmet", "tau"],
         isLepton=False,
         tagger_label="tauhtauh",
-        txbb_cut=0.8,
-        txtt_cut=0.9,
-        tt_mass_cut=("PNetmassLegacy", [70, 150]),
-    ),
-    "he": Channel(
-        key="he",
-        label=r"$\tau_h e$",
-        hlt_types=["PNet", "PFJet", "EGamma", "ETau", "DiTau", "DitauJet", "SingleTau"],
-        data_samples=["jetmet", "tau", "egamma"],
-        lepton_dataset="egamma",
-        isLepton=True,
-        tagger_label="tauhtaue",
-        txbb_cut=0.8,
-        txtt_cut=0.95,
-        tt_mass_cut=("ParTmassResApplied", [80, 210]),
+        txbb_cut=0.907,
+        txtt_cut=0.990,
+        tt_mass_cut=("PNetmassLegacy", [50, 150]),
     ),
     "hm": Channel(
         key="hm",
@@ -37,9 +25,21 @@ CHANNELS = {
         lepton_dataset="muon",
         isLepton=True,
         tagger_label="tauhtaum",
-        txbb_cut=0.8,
-        txtt_cut=0.9,
-        tt_mass_cut=("ParTmassResApplied", [80, 210]),
+        txbb_cut=0.731,
+        txtt_cut=0.979,
+        tt_mass_cut=("ParTmassResApplied", [70, 210]),
+    ),
+    "he": Channel(
+        key="he",
+        label=r"$\tau_h e$",
+        hlt_types=["PNet", "PFJet", "EGamma", "ETau", "DiTau", "DitauJet", "SingleTau"],
+        data_samples=["jetmet", "tau", "egamma"],
+        lepton_dataset="egamma",
+        isLepton=True,
+        tagger_label="tauhtaue",
+        txbb_cut=0.855,
+        txtt_cut=0.99,
+        tt_mass_cut=("ParTmassResApplied", [70, 210]),
     ),
 }
 
@@ -125,6 +125,9 @@ SAMPLES = {
 SIGNALS = ["bbtt", "vbfbbtt", "vbfbbtt-k2v0"]
 SIGNALS_CHANNELS = SIGNALS.copy()
 
+sig_keys_ggf = ["bbtt"]
+sig_keys_vbf = ["vbfbbtt-k2v0"]
+
 # add individual bbtt channels
 for signal in SIGNALS.copy():
     for channel, CHANNEL in CHANNELS.items():
@@ -146,6 +149,9 @@ BGS = [
     "zjets",
     "hbb",
 ]
+
+single_h_keys = ["hbb"]
+ttbar_keys = ["ttbarhad", "ttbarsl", "ttbarll"]
 
 qcdouts = ["QCD0HF", "QCD1HF", "QCD2HF"]
 topouts = ["TopW", "TopbW", "TopbWev", "TopbWmv", "TopbWtauhv", "TopbWq", "TopbWqq"][:2]
