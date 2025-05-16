@@ -51,7 +51,6 @@ class HLTs:
                 dataset="JetMET",
             ),
         ],
-        # TODO: do we need QuadJet after removing Parking?
         "quadjet": [
             # 2022 + 6fb-1 of 2023 (moves to Parking after this)
             HLT(
@@ -60,7 +59,7 @@ class HLTs:
                 data_years=years_2022,
                 dataset="JetMET",
             ),
-            # HLT( #This should be there but is not in 25Apr17 samples. For now just ignore
+            # HLT( #This should be there but is not in 25Apr16 samples. For now just ignore
             #     name="HLT_QuadPFJet70_50_40_35_PNet2BTagMean0p65",
             #     mc_years=[],
             #     data_years=["2023"],
@@ -130,7 +129,6 @@ class HLTs:
                 years=years,
                 dataset="EGamma",
             ),
-            # TODO: check sensitivity without below triggers
             HLT(
                 name="HLT_Ele115_CaloIdVT_GsfTrkIdT",
                 years=years,
@@ -154,7 +152,7 @@ class HLTs:
                 dataset="EGamma",
             ),
         ],
-        "met": [  # need to comment out ot make it work in 25Mar data samples
+        "met": [
             HLT(
                 name="HLT_PFMET120_PFMHT120_IDTight",
                 years=years,
@@ -249,7 +247,7 @@ class HLTs:
             **hlt_kwargs: additional kwargs to pass to the hlt_dict function.
 
         Returns:
-            list[HLT | str]: list of HLTs
+            list[HLT | str]: list of HLTs. Returns strings if as_str=True is passed in hlt_kwargs, otherwise returns HLT objects.
         """
         hlts = cls.hlt_dict(year, **hlt_kwargs)
 
@@ -326,3 +324,11 @@ class HLTs:
                 for hlt in sublist
             ],
         }
+
+    @classmethod
+    def get_hlt(cls, name: str) -> HLT:
+        for cat in cls.HLTs.values():
+            for hlt in cat:
+                if hlt.get_name() == name:
+                    return hlt
+        raise ValueError(f"HLT {name} not found in HLTs")

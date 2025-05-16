@@ -27,38 +27,25 @@ hep.style.use("CMS")
 MAIN_DIR = Path("/home/users/lumori/bbtautau/")
 SIG_KEYS = {"hh": "bbtthh", "he": "bbtthe", "hm": "bbtthm"}  # We should get rid of this
 
+data_dir_2022 = "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr17bbpresel_v12_private_signal"
+data_dir_otheryears = "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr24Fix_v12_private_signal"
+
 data_paths = {
     "2022": {
-        "data": Path(
-            "/ceph/cms/store/user/rkansal/bbtautau/skimmer/24Nov21ParTMass_v12_private_signal/"
-        ),
-        "signal": Path(
-            "/ceph/cms/store/user/rkansal/bbtautau/skimmer/24Nov21ParTMass_v12_private_signal/"
-        ),
+        "data": Path(data_dir_2022),
+        "signal": Path(data_dir_2022),
     },
     "2022EE": {
-        "data": Path(
-            "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Jan22AddYears_v12_private_signal/"
-        ),
-        "signal": Path(
-            "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Jan22AddYears_v12_private_signal/"
-        ),
+        "data": Path(data_dir_otheryears),
+        "signal": Path(data_dir_otheryears),
     },
     "2023": {
-        "data": Path(
-            "/ceph/cms/store/user/lumori/bbtautau/skimmer/25Mar7Signal_v12_private_signal/"
-        ),
-        "signal": Path(
-            "/ceph/cms/store/user/lumori/bbtautau/skimmer/25Mar7Signal_v12_private_signal/"
-        ),
+        "data": Path(data_dir_otheryears),
+        "signal": Path(data_dir_otheryears),
     },
     "2023BPix": {
-        "data": Path(
-            "/ceph/cms/store/user/lumori/bbtautau/skimmer/25Mar7Signal_v12_private_signal/"
-        ),
-        "signal": Path(
-            "/ceph/cms/store/user/lumori/bbtautau/skimmer/25Mar7Signal_v12_private_signal/"
-        ),
+        "data": Path(data_dir_otheryears),
+        "signal": Path(data_dir_otheryears),
     },
 }
 
@@ -68,7 +55,7 @@ class Analyser:
         self.channel = CHANNELS[channel_key]
         self.years = years
         self.test_mode = test_mode
-        self.plot_dir = MAIN_DIR / f"plots/SensitivityStudy/25Mar7{channel_key}"
+        self.plot_dir = MAIN_DIR / f"plots/SensitivityStudy/25Apr25{channel_key}"
         self.plot_dir.mkdir(parents=True, exist_ok=True)
 
         # we should get rid of these two lines
@@ -78,11 +65,13 @@ class Analyser:
         self.events_dict = {year: {} for year in years}
 
     def load_year(self, year):
-
         # This could be improved by adding channel-by-channel granularity
         # Now filter just requires that any trigger in that year fires
         filters_dict = postprocessing.trigger_filter(
-            HLTs.hlts_list_by_dtype(year), year, fast_mode=self.test_mode, PNetXbb_cut=0.8
+            HLTs.hlts_list_by_dtype(year),
+            year,
+            fast_mode=self.test_mode,
+            PNetXbb_cut=0.8 if not self.test_mode else None,
         )  # = {"data": [(...)], "signal": [(...)], ...}
 
         columns = postprocessing.get_columns(year, self.channel)
@@ -94,6 +83,7 @@ class Analyser:
             filters_dict=filters_dict,
             load_columns=columns,
             load_just_bbtt=True,
+            loaded_samples=True,
         )
         self.events_dict[year] = postprocessing.apply_triggers(
             self.events_dict[year], year, self.channel
@@ -104,37 +94,41 @@ class Analyser:
         return
 
     def build_tagger_dict(self):
-
-        # print(self.events_dict)
-
         self.taggers_dict = {year: {} for year in self.years}
         for year in self.years:
-            for key, events in self.events_dict[year].items():
+            for key, sample in self.events_dict[year].items():
                 tvars = {}
 
-                tvars["PQCD"] = sum([events[f"ak8FatJetParT{k}"] for k in qcdouts]).to_numpy()
-                tvars["PTop"] = sum([events[f"ak8FatJetParT{k}"] for k in topouts]).to_numpy()
+                tvars["PQCD"] = sum(
+                    [sample.events[f"ak8FatJetParT{k}"] for k in qcdouts]
+                ).to_numpy()
+                tvars["PTop"] = sum(
+                    [sample.events[f"ak8FatJetParT{k}"] for k in topouts]
+                ).to_numpy()
 
                 for disc in ["Xbb", self.taukey]:
                     tvars[f"{disc}vsQCD"] = np.nan_to_num(
-                        events[f"ak8FatJetParT{disc}"]
-                        / (events[f"ak8FatJetParT{disc}"] + tvars["PQCD"]),
+                        sample.events[f"ak8FatJetParT{disc}"]
+                        / (sample.events[f"ak8FatJetParT{disc}"] + tvars["PQCD"]),
                         nan=PAD_VAL,
                     )
                     tvars[f"{disc}vsQCDTop"] = np.nan_to_num(
-                        events[f"ak8FatJetParT{disc}"]
-                        / (events[f"ak8FatJetParT{disc}"] + tvars["PQCD"] + tvars["PTop"]),
+                        sample.events[f"ak8FatJetParT{disc}"]
+                        / (sample.events[f"ak8FatJetParT{disc}"] + tvars["PQCD"] + tvars["PTop"]),
                         nan=PAD_VAL,
                     )
 
                     # make sure not to choose padded jets below by accident
-                    nojet3 = events["ak8FatJetPt"][2] == PAD_VAL
+                    nojet3 = sample.events["ak8FatJetPt"][2] == PAD_VAL
                     tvars[f"{disc}vsQCD"][:, 2][nojet3] = PAD_VAL
                     tvars[f"{disc}vsQCDTop"][:, 2][nojet3] = PAD_VAL
 
                 tvars["PNetXbbvsQCD"] = np.nan_to_num(
-                    events["ak8FatJetPNetXbbLegacy"]
-                    / (events["ak8FatJetPNetXbbLegacy"] + events["ak8FatJetPNetQCDLegacy"]),
+                    sample.events["ak8FatJetPNetXbbLegacy"]
+                    / (
+                        sample.events["ak8FatJetPNetXbbLegacy"]
+                        + sample.events["ak8FatJetPNetQCDLegacy"]
+                    ),
                     nan=PAD_VAL,
                 )
 
@@ -191,7 +185,7 @@ class Analyser:
                 )
                 bg_weights = np.concatenate(
                     [
-                        self.events_dict[year][key]["finalWeight"]
+                        self.events_dict[year][key].events["finalWeight"]
                         for key in self.channel.data_samples
                         for year in years
                     ]
@@ -207,7 +201,7 @@ class Analyser:
                     ]
                 )
                 sig_weights = np.concatenate(
-                    [self.events_dict[year][self.sig_key]["finalWeight"] for year in years]
+                    [self.events_dict[year][self.sig_key].events["finalWeight"] for year in years]
                 )
 
                 fpr, tpr, thresholds = roc_curve(
@@ -252,11 +246,11 @@ class Analyser:
         for key, label in zip(["hhbbtt", "data"], ["HHbbtt", "Data"]):
             print(f"Plotting mass for {label}")
             if key == "hhbbtt":
-                events = pd.concat([self.events_dict[year][self.sig_key] for year in years])
+                events = pd.concat([self.events_dict[year][self.sig_key].events for year in years])
             else:
                 events = pd.concat(
                     [
-                        self.events_dict[year][dkey]
+                        self.events_dict[year][dkey].events
                         for dkey in self.channel.data_samples
                         for year in years
                     ]
@@ -373,15 +367,15 @@ class Analyser:
                     self.taggers_dict[year][key]["tautau_mask"],
                 )
                 self.masstt[year][key] = self.get_jet_vals(
-                    self.events_dict[year][key][f"ak8FatJet{mttk}"],
+                    self.events_dict[year][key].events[f"ak8FatJet{mttk}"],
                     self.taggers_dict[year][key]["tautau_mask"],
                 )
                 self.massbb[year][key] = self.get_jet_vals(
-                    self.events_dict[year][key][f"ak8FatJet{mbbk}"],
+                    self.events_dict[year][key].events[f"ak8FatJet{mbbk}"],
                     self.taggers_dict[year][key]["bb_mask"],
                 )
                 self.ptbb[year][key] = self.get_jet_vals(
-                    self.events_dict[year][key]["ak8FatJetPt"],
+                    self.events_dict[year][key].events["ak8FatJetPt"],
                     self.taggers_dict[year][key]["bb_mask"],
                 )
 
@@ -400,7 +394,7 @@ class Analyser:
                         & (self.massbb[year][key] < mbb2)
                         & (self.ptbb[year][key] > 250)
                     )
-                    sig_yield += np.sum(self.events_dict[year][key]["finalWeight"][cut])
+                    sig_yield += np.sum(self.events_dict[year][key].events["finalWeight"][cut])
                 else:
                     cut = (
                         (self.txbbs[year][key] > txbbcut)
@@ -415,12 +409,88 @@ class Analyser:
                     msb2 = (self.massbb[year][key] > mbb2) & (
                         self.massbb[year][key] < (mbb2 + mbbw2)
                     )
-                    bg_yield += np.sum(self.events_dict[year][key]["finalWeight"][cut & msb1])
-                    bg_yield += np.sum(self.events_dict[year][key]["finalWeight"][cut & msb2])
-        return sig_yield, bg_yield
+                    bg_yield += np.sum(
+                        self.events_dict[year][key].events["finalWeight"][cut & msb1]
+                    )
+                    bg_yield += np.sum(
+                        self.events_dict[year][key].events["finalWeight"][cut & msb2]
+                    )
+        return sig_yield, bg_yield, 1
+
+    def compute_sig_bkg_abcd(self, years, txbbcut, txttcut, mbb1, mbb2, mbbw2, mtt1, mtt2):
+        # pass/fail from taggers
+        sig_pass = 0  # resonant region pass
+        sig_fail = 0  # resonant region fail
+        bg_pass = 0  # sidebands pass
+        bg_fail = 0  # sidebands fail
+        for year in years:
+            for key in [self.sig_key] + self.channel.data_samples:
+                if key == self.sig_key:
+                    cut = (
+                        (self.txbbs[year][key] > txbbcut)
+                        & (self.txtts[year][key] > txttcut)
+                        & (self.masstt[year][key] > mtt1)
+                        & (self.masstt[year][key] < mtt2)
+                        & (self.massbb[year][key] > mbb1)
+                        & (self.massbb[year][key] < mbb2)
+                        & (self.ptbb[year][key] > 250)
+                    )
+                    sig_pass += np.sum(self.events_dict[year][key].events["finalWeight"][cut])
+                else:  # compute background
+                    cut_bg_pass = (
+                        (self.txbbs[year][key] > txbbcut)
+                        & (self.txtts[year][key] > txttcut)
+                        & (self.masstt[year][key] > mtt1)
+                        & (self.masstt[year][key] < mtt2)
+                        & (self.ptbb[year][key] > 250)
+                    )
+                    msb1 = (self.massbb[year][key] > (mbb1 - mbbw2)) & (
+                        self.massbb[year][key] < mbb1
+                    )
+                    msb2 = (self.massbb[year][key] > mbb2) & (
+                        self.massbb[year][key] < (mbb2 + mbbw2)
+                    )
+                    bg_pass += np.sum(
+                        self.events_dict[year][key].events["finalWeight"][cut_bg_pass & msb1]
+                    )
+                    bg_pass += np.sum(
+                        self.events_dict[year][key].events["finalWeight"][cut_bg_pass & msb2]
+                    )
+                    cut_bg_fail = (
+                        ((self.txbbs[year][key] < txbbcut) | (self.txtts[year][key] < txttcut))
+                        & (self.masstt[year][key] > mtt1)
+                        & (self.masstt[year][key] < mtt2)
+                        & (self.ptbb[year][key] > 250)
+                    )
+                    bg_fail += np.sum(
+                        self.events_dict[year][key].events["finalWeight"][cut_bg_fail & msb1]
+                    )
+                    bg_fail += np.sum(
+                        self.events_dict[year][key].events["finalWeight"][cut_bg_fail & msb2]
+                    )
+                    cut_sig_fail = (
+                        ((self.txbbs[year][key] < txbbcut) | (self.txtts[year][key] < txttcut))
+                        & (self.masstt[year][key] > mtt1)
+                        & (self.masstt[year][key] < mtt2)
+                        & (self.massbb[year][key] > mbb1)
+                        & (self.massbb[year][key] < mbb2)
+                        & (self.ptbb[year][key] > 250)
+                    )
+                    sig_fail += np.sum(
+                        self.events_dict[year][key].events["finalWeight"][cut_sig_fail]
+                    )
+
+        return sig_pass, bg_pass, sig_fail / bg_fail
 
     def sig_bkg_opt(
-        self, years, gridsize=10, gridlims=(0.7, 1), B=1, normalize_sig=True, plot=False
+        self,
+        years,
+        gridsize=10,
+        gridlims=(0.7, 1),
+        B=1,
+        normalize_sig=True,
+        plot=False,
+        use_abcd=False,
     ):
         """
         Will have to improve definition of global params
@@ -442,9 +512,11 @@ class Analyser:
 
         BBcut, TTcut = np.meshgrid(bbcut, ttcut)
 
+        sig_bkg_f = self.compute_sig_bkg_abcd if use_abcd else self.compute_sig_bg
+
         # scalar function, must be vectorized
         def sig_bg(bbcut, ttcut):
-            return self.compute_sig_bg(
+            return sig_bkg_f(
                 years=years,
                 txbbcut=bbcut,
                 txttcut=ttcut,
@@ -455,31 +527,37 @@ class Analyser:
                 mtt2=mtt2,
             )
 
-        sigs, bgs = np.vectorize(sig_bg)(BBcut, TTcut)
+        sigs, bgs, tfs = np.vectorize(sig_bg)(BBcut, TTcut)
+        bgs_scaled = bgs * tfs
         if normalize_sig:
             tot_sig_weight = np.sum(
                 np.concatenate(
-                    [self.events_dict[year][self.sig_key]["finalWeight"] for year in years]
+                    [self.events_dict[year][self.sig_key].events["finalWeight"] for year in years]
                 )
             )
             sigs = sigs / tot_sig_weight
 
-        sel = (bgs >= 1) & (bgs <= B)
+        sel = (bgs_scaled > 0) & (bgs_scaled <= B)
+        B_initial = B
         if np.sum(sel) == 0:
-            B_initial = B
             while np.sum(sel) == 0 and B < 100:
                 B += 1
-                sel = (bgs >= 1) & (bgs <= B)
+                sel = (bgs_scaled > 0) & (bgs_scaled <= B)
             print(
                 f"Need a finer grid, no region with B={B_initial}. I'm extending the region to B in [1,{B}].",
-                bgs,
+                bgs_scaled,
             )
         sel_idcs = np.argwhere(sel)
         opt_i = np.argmax(sigs[sel])
         max_sig_idx = tuple(sel_idcs[opt_i])
         bbcut_opt, ttcut_opt = BBcut[max_sig_idx], TTcut[max_sig_idx]
 
-        significance = np.divide(sigs, np.sqrt(bgs), out=np.zeros_like(sigs), where=(bgs > 0))
+        significance = np.divide(
+            sigs,
+            np.sqrt(bgs_scaled + (bgs_scaled / np.sqrt(bgs)) ** 2),
+            out=np.zeros_like(sigs),
+            where=(bgs_scaled > 0),
+        )
 
         # significance = np.where(bgs > 0, sigs / np.sqrt(bgs), 0)
         max_significance_i = np.unravel_index(np.argmax(significance), significance.shape)
@@ -525,19 +603,21 @@ class Analyser:
             handles.append(proxy)
             ax.legend(handles=handles, loc="lower left")
             plt.savefig(
-                self.plot_dir / f"sig_bkg_opt_{'_'.join(years)}_B={B}.pdf",
+                self.plot_dir
+                / f"sig_bkg_opt_{'_'.join(years)}_B={B_initial}{'_abcd' if use_abcd else ''}.pdf",
                 bbox_inches="tight",
             )
             plt.savefig(
-                self.plot_dir / f"sig_bkg_opt_{'_'.join(years)}_B={B}.png",
+                self.plot_dir
+                / f"sig_bkg_opt_{'_'.join(years)}_B={B_initial}{'_abcd' if use_abcd else ''}.png",
                 bbox_inches="tight",
             )
             plt.show()
 
         return (
-            [sigs[max_sig_idx], bgs[max_sig_idx]],
+            [sigs[max_sig_idx], bgs[max_sig_idx], tfs[max_sig_idx]],
             [bbcut_opt, ttcut_opt],
-            [sigs[max_significance_i], bgs[max_significance_i]],
+            [sigs[max_significance_i], bgs[max_significance_i], tfs[max_significance_i]],
             [bbcut_opt_significance, ttcut_opt_significance],
         )
 
@@ -602,39 +682,34 @@ class Analyser:
         return
 
     @staticmethod
-    def as_df(cut_bb, cut_tt, sig_yield, bg_yield, years):
+    def as_df(cut_bb, cut_tt, sig_yield, bg_yield, tf, years):
         limits = {}
         limits["Cut_Xbb"] = cut_bb
         limits["Cut_Xtt"] = cut_tt
         limits["Sig_Yield"] = sig_yield
-        limits["BG_Yield"] = bg_yield
-        limits["Limit"] = 2 * np.sqrt(bg_yield) / sig_yield
+        limits["BG_Yield_scaled"] = bg_yield * tf
+        limits["TF"] = tf
+
+        def fom1(b, s):
+            return 2 * np.sqrt(b) / s
+
+        def fom2(b, s, _tf):
+            return 2 * np.sqrt(b * _tf + (b * _tf / np.sqrt(b)) ** 2) / s
+
+        limits[r"Limit, 2$\sqrt{b}/s$"] = fom1(bg_yield, sig_yield)
+        limits[r"Limit, 2$\sqrt{b + (b * \sigma_b)^2}/s$"] = fom2(bg_yield, sig_yield, tf)
 
         if "2023" not in years and "2023BPix" not in years:
-            limits["Limit_scaled_22_23"] = (
-                2
-                * np.sqrt(bg_yield)
-                / sig_yield
-                / np.sqrt(
-                    hh_vars.LUMI["2022-2023"] / np.sum([hh_vars.LUMI[year] for year in years])
-                )
+            limits["Limit_scaled_22_23"] = fom2(bg_yield, sig_yield, tf) / np.sqrt(
+                hh_vars.LUMI["2022-2023"] / np.sum([hh_vars.LUMI[year] for year in years])
             )
 
-        limits["Limit_scaled_22_24"] = (
-            2
-            * np.sqrt(bg_yield)
-            / sig_yield
-            / np.sqrt(
-                (124000 + hh_vars.LUMI["2022-2023"])
-                / np.sum([hh_vars.LUMI[year] for year in years])
-            )
+        limits["Limit_scaled_22_24"] = fom2(bg_yield, sig_yield, tf) / np.sqrt(
+            (124000 + hh_vars.LUMI["2022-2023"]) / np.sum([hh_vars.LUMI[year] for year in years])
         )
 
-        limits["Limit_scaled_Run3"] = (
-            2
-            * np.sqrt(bg_yield)
-            / sig_yield
-            / np.sqrt((360000) / np.sum([hh_vars.LUMI[year] for year in years]))
+        limits["Limit_scaled_Run3"] = fom2(bg_yield, sig_yield, tf) / np.sqrt(
+            (360000) / np.sum([hh_vars.LUMI[year] for year in years])
         )
 
         df_out = pd.DataFrame([limits])
@@ -645,6 +720,7 @@ if __name__ == "__main__":
 
     years = ["2022", "2022EE", "2023", "2023BPix"]  # "2022","2022EE","2023","2023BPix"
     test_mode = False  # reduces size of data to run all quickly
+    use_abcd = True
 
     for c in [
         "hh",
@@ -657,32 +733,33 @@ if __name__ == "__main__":
             analyser.load_year(year)
 
         analyser.build_tagger_dict()
-        analyser.compute_rocs(years)
-        analyser.plot_rocs(years, test_mode=test_mode)
-        print("ROCs computed for channel ", c)
-        analyser.plot_mass(years, test_mode=test_mode)
+        # analyser.compute_rocs(years)
+        # analyser.plot_rocs(years, test_mode=test_mode)
+        # print("ROCs computed for channel ", c)
+        # analyser.plot_mass(years, test_mode=test_mode)
         analyser.prepare_sensitivity(years)
 
         results = {}
         for B in [1, 2, 8]:
             yields_B, cuts_B, yields_max_significance, cuts_max_significance = analyser.sig_bkg_opt(
-                years, gridsize=30, B=B, plot=True
+                years, gridlims=(0.8, 1), gridsize=40, B=B, plot=True, use_abcd=use_abcd
             )
-            sig_yield, bkg_yield = yields_B
+            sig_yield, bkg_yield, tf = yields_B
             cut_bb, cut_tt = cuts_B
-            sig_yield_max_sig, bkg_yield_max_sig = (
+            sig_yield_max_sig, bkg_yield_max_sig, tf_max_sig = (
                 yields_max_significance  # not very clean rn, can be improved but should be the same
             )
             cut_bb_max_sig, cut_tt_max_sig = cuts_max_significance
-            results[f"B={B}"] = analyser.as_df(cut_bb, cut_tt, sig_yield, bkg_yield, years)
+            results[f"B={B}"] = analyser.as_df(cut_bb, cut_tt, sig_yield, bkg_yield, tf, years)
             print("done with B=", B)
         results["Max_significance"] = analyser.as_df(
-            cut_bb_max_sig, cut_tt_max_sig, sig_yield_max_sig, bkg_yield_max_sig, years
+            cut_bb_max_sig, cut_tt_max_sig, sig_yield_max_sig, bkg_yield_max_sig, tf_max_sig, years
         )
         results_df = pd.concat(results, axis=0)
         results_df.index = results_df.index.droplevel(1)
         print(c, "\n", results_df.T.to_markdown())
         results_df.T.to_csv(
-            analyser.plot_dir / f"{'_'.join(years)}-results{'_fast' * test_mode}.csv"
+            analyser.plot_dir
+            / f"{'_'.join(years)}-results{'_fast' * test_mode}{'_abcd' if use_abcd else ''}.csv"
         )
         del analyser
