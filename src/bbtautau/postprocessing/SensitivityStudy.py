@@ -11,7 +11,7 @@ import postprocessing
 from boostedhh import hh_vars, plotting
 from boostedhh.utils import PAD_VAL
 from matplotlib.lines import Line2D
-from Samples import CHANNELS, qcdouts, topouts
+from Samples import CHANNELS
 from sklearn.metrics import roc_curve
 
 from bbtautau.HLTs import HLTs
@@ -99,12 +99,8 @@ class Analyser:
             for key, sample in self.events_dict[year].items():
                 tvars = {}
 
-                tvars["PQCD"] = sum(
-                    [sample.events[f"ak8FatJetParT{k}"] for k in qcdouts]
-                ).to_numpy()
-                tvars["PTop"] = sum(
-                    [sample.events[f"ak8FatJetParT{k}"] for k in topouts]
-                ).to_numpy()
+                tvars["PQCD"] = sample.events["ak8FatJetParTQCD"].to_numpy()
+                tvars["PTop"] = sample.events["ak8FatJetParTTop"].to_numpy()
 
                 for disc in ["Xbb", self.taukey]:
                     tvars[f"{disc}vsQCD"] = np.nan_to_num(

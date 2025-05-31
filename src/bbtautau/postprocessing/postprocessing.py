@@ -310,14 +310,19 @@ def trigger_filter(
 
 def get_columns(
     year: str,
-    channel: Channel,
-    triggers: bool = True,
+    triggers_in_channel: Channel = None,
     legacy_taggers: bool = True,
     ParT_taggers: bool = True,
+    other: bool = True,
     num_fatjets: int = 3,
 ):
 
-    columns_data = [("weight", 1), ("ak8FatJetPt", num_fatjets)]
+    columns_data = [
+        ("weight", 1),
+        ("ak8FatJetPt", num_fatjets),
+        ("ak8FatJetEta", num_fatjets),
+        ("ak8FatJetPhi", num_fatjets),
+    ]
 
     # common columns
     if legacy_taggers:
@@ -331,17 +336,26 @@ def get_columns(
         ]
 
     if ParT_taggers:
-        for branch in [
-            f"ak8FatJetParT{key}" for key in Samples.qcdouts + Samples.topouts + Samples.sigouts
-        ]:
+        for branch in (
+            [f"ak8FatJetParT{key}" for key in Samples.qcdouts + Samples.topouts + Samples.sigouts]
+            + [f"ak8FatJetParT{key}vsQCD" for key in Samples.sigouts if key != "Xtauhtaum"]
+            + [f"ak8FatJetParT{key}vsQCDTop" for key in Samples.sigouts if key != "Xtauhtaum"]
+        ):
             columns_data.append((branch, num_fatjets))
+
+    if other:
+        columns_data += [
+            ("nFatJets", 1),
+            ("METPt", 1),
+            ("METPhi", 1),
+        ]
 
     columns_mc = copy.deepcopy(columns_data)
 
-    if triggers:
-        for branch in channel.triggers(year, data_only=True):
+    if triggers_in_channel is not None:
+        for branch in triggers_in_channel.triggers(year, data_only=True):
             columns_data.append((branch, 1))
-        for branch in channel.triggers(year, mc_only=True):
+        for branch in triggers_in_channel.triggers(year, mc_only=True):
             columns_mc.append((branch, 1))
 
     # signal-only columns
@@ -626,7 +640,7 @@ def derive_variables(events_dict: dict[str, LoadedSample], channel: Channel, num
         if "ak8FatJetPNetXbbvsQCDLegacy" not in sample.events:
             Xbb = sample.get_var("ak8FatJetPNetXbbLegacy")
             QCD = sample.get_var("ak8FatJetPNetQCDLegacy")
-            Xbb_vs_QCD = Xbb / (Xbb + QCD)
+            Xbb_vs_QCD = np.divide(Xbb, Xbb + QCD, out=np.zeros_like(Xbb), where=(Xbb + QCD) != 0)
 
             for n in range(num_fatjets):
                 sample.events[("ak8FatJetPNetXbbvsQCDLegacy", str(n))] = Xbb_vs_QCD[:, n]
@@ -635,10 +649,22 @@ def derive_variables(events_dict: dict[str, LoadedSample], channel: Channel, num
             tauhtaum = sample.get_var("ak8FatJetParTXtauhtaum")
             qcd = sample.get_var("ak8FatJetParTQCD")
             top = sample.get_var("ak8FatJetParTTop")
-            tauhtaum_vs_QCDTop = tauhtaum / (tauhtaum + qcd + top)
+            tauhtaum_vs_QCDTop = np.divide(
+                tauhtaum,
+                tauhtaum + qcd + top,
+                out=np.zeros_like(tauhtaum),
+                where=(tauhtaum + qcd + top) != 0,
+            )
 
             for n in range(num_fatjets):
                 sample.events[("ak8FatJetParTXtauhtaumvsQCDTop", str(n))] = tauhtaum_vs_QCDTop[:, n]
+
+        if channel.key == "hm" and "ak8FatJetParTXtauhtaumvsQCD" not in sample.events:
+            tauhtaum_vs_QCD = np.divide(
+                tauhtaum, tauhtaum + qcd, out=np.zeros_like(tauhtaum), where=(tauhtaum + qcd) != 0
+            )
+            for n in range(num_fatjets):
+                sample.events[("ak8FatJetParTXtauhtaumvsQCD", str(n))] = tauhtaum_vs_QCD[:, n]
 
 
 def bbtautau_assignment_old(events_dict: dict[str, pd.DataFrame], channel: Channel):
@@ -672,10 +698,20 @@ def bbtautau_assignment_old(events_dict: dict[str, pd.DataFrame], channel: Chann
     return bbtt_masks
 
 
-def bbtautau_assignment(events_dict: dict[str, pd.DataFrame | LoadedSample], channel: Channel):
+def bbtautau_assignment(
+    events_dict: dict[str, pd.DataFrame | LoadedSample],
+    channel: Channel = None,
+    agnostic: bool = False,
+):
     """Assign bb and tautau jets per each event."""
 
+    # if channel is none but agnostic is false raise an error
+    if channel is None and not agnostic:
+        raise ValueError("Channel is required if agnostic is False")
+
     if not isinstance(next(iter(events_dict.values())), LoadedSample):
+        if agnostic:
+            raise ValueError("Need to work with LoadedSample if agnostic is True")
         warnings.warn(
             "Deprecation warning: Should switch to using the LoadedSample class in the future!",
             stacklevel=1,
@@ -689,9 +725,20 @@ def bbtautau_assignment(events_dict: dict[str, pd.DataFrame | LoadedSample], cha
         }
 
         # assign tautau jet as the one with the highest ParTtautauvsQCD score
-        tautau_pick = np.argmax(
-            sample.get_var(f"ak8FatJetParTX{channel.tagger_label}vsQCD"), axis=1
-        )
+        if agnostic:
+            sig_labels = [ch.tagger_label for ch in CHANNELS.values()]
+            num = (
+                sample.get_var(f"ak8FatJetParTX{sig_labels[0]}")
+                + sample.get_var(f"ak8FatJetParTX{sig_labels[1]}")
+                + sample.get_var(f"ak8FatJetParTX{sig_labels[2]}")
+            )
+            denom = num + sample.get_var("ak8FatJetParTQCD") + sample.get_var("ak8FatJetParTTop")
+            combined_score = np.divide(num, denom, out=np.zeros_like(num), where=(num + denom) != 0)
+            tautau_pick = np.argmax(combined_score, axis=1)
+        else:
+            tautau_pick = np.argmax(
+                sample.get_var(f"ak8FatJetParTX{channel.tagger_label}vsQCD"), axis=1
+            )
 
         # assign bb jet as the one with the highest ParTXbbvsQCD score, but prioritize tautau
         bb_sorted = np.argsort(sample.get_var("ak8FatJetParTXbbvsQCD"), axis=1)
@@ -705,6 +752,100 @@ def bbtautau_assignment(events_dict: dict[str, pd.DataFrame | LoadedSample], cha
 
         sample.bb_mask = bbtt_masks["bb"]
         sample.tt_mask = bbtt_masks["tt"]
+
+
+def _add_bdt_scores(
+    events: pd.DataFrame,
+    sample_bdt_preds: np.ndarray,
+    multiclass: bool,
+    all_outs: bool = True,
+    jshift: str = "",
+):
+    """
+    Assumes map to be
+    Class 0: bbtthe
+    Class 1: bbtthh
+    Class 2: bbtthm
+    Class 3: dyjets
+    Class 4: qcd
+    Class 5: ttbarhad
+    Class 6: ttbarll
+    Class 7: ttbarsl
+    """
+
+    if jshift != "":
+        jshift = "_" + jshift
+
+    if not multiclass:
+        events[f"BDTScore{jshift}"] = sample_bdt_preds
+    else:
+        bg_tot = np.sum(sample_bdt_preds[:, 3:], axis=1)
+        hh_score = sample_bdt_preds[:, 0]  # TODO could be de-hardcoded
+        hm_score = sample_bdt_preds[:, 1]
+        he_score = sample_bdt_preds[:, 2]
+
+        events[f"BDTScorehh{jshift}"] = hh_score / (hh_score + bg_tot)
+        events[f"BDTScorehm{jshift}"] = hm_score / (hm_score + bg_tot)
+        events[f"BDTScorehe{jshift}"] = he_score / (he_score + bg_tot)
+
+        if all_outs:
+            events[f"BDTScoreDY{jshift}"] = sample_bdt_preds[:, 3]
+            events[f"BDTScoreQCD{jshift}"] = sample_bdt_preds[:, 4]
+            events[f"BDTScoreTThad{jshift}"] = sample_bdt_preds[:, 5]
+            events[f"BDTScoreTTll{jshift}"] = sample_bdt_preds[:, 6]
+            events[f"BDTScoreTTSL{jshift}"] = sample_bdt_preds[:, 7]
+
+
+def load_bdt_preds(
+    events_dict: dict[str, pd.DataFrame],
+    year: str,
+    bdt_preds_dir: Path,
+    # jec_jmsr_shifts: bool = False,
+    all_outs: bool = False,
+):
+    """
+    Loads the BDT scores for each event and saves in the dataframe in the "BDTScore" column.
+    If ``jec_jmsr_shifts``, also loads BDT preds for every JEC / JMSR shift in MC.
+
+    Args:
+        bdt_preds (str): Path to the bdt_preds .npy file.
+        bdt_sample_order (List[str]): Order of samples in the predictions file.
+
+    """
+    with (bdt_preds_dir / year / "sample_order.txt").open() as f:
+        sample_order_dict = eval(f.read())
+
+    bdt_preds = np.load(f"{bdt_preds_dir}/{year}/preds.npy")
+
+    multiclass = len(bdt_preds.shape) > 1
+
+    # if jec_jmsr_shifts:
+    #     shift_preds = {
+    #         jshift: np.load(f"{bdt_preds_dir}/{year}/preds_{jshift}.npy")
+    #         for jshift in jec_shifts + jmsr_shifts
+    #     }
+
+    i = 0
+    for sample, num_events in sample_order_dict.items():
+        if sample in events_dict:
+            events = events_dict[sample]
+            assert num_events == len(
+                events
+            ), f"# of BDT predictions does not match # of events for sample {sample}"
+
+            sample_bdt_preds = bdt_preds[i : i + num_events]
+            _add_bdt_scores(events, sample_bdt_preds, multiclass, all_outs)
+
+            # if jec_jmsr_shifts and sample != data_key:
+            #     for jshift in jec_shifts + jmsr_shifts:
+            #         sample_bdt_preds = shift_preds[jshift][i : i + num_events]
+            #         _add_bdt_scores(
+            #             events, sample_bdt_preds, multiclass, multisig, all_outs, jshift=jshift
+            #         )
+
+        i += num_events
+
+    assert i == len(bdt_preds), f"# events {i} != # of BDT preds {len(bdt_preds)}"
 
 
 def control_plots(
