@@ -145,11 +145,82 @@ python boostedhh/condor/check_jobs.py --analysis bbtautau --tag 25Apr24_v12_priv
 
 ### Sensitivity study
 
-@Ludo - add instructions here.
+```python SensitivityStudy.py --actions compute_rocs plot_rocs --years 2022 2023 --channels hh hm```
+# Arguments
+```
+| Argument      | Type      | Default                   | Description                                                                                         |
+|---------------|-----------|---------------------------|-----------------------------------------------------------------------------------------------------|
+| `--years`     | list      | 2022 2022EE 2023 2023BPix | List of years to include in the analysis                                                            |
+| `--channels`  | list      | hh hm he                  | List of channels to run (default: all)                                                              |
+| `--test-mode` | flag      | False                     | Run in test mode (reduced data size)                                                                |
+| `--use-abcd`  | flag      | False                     | Use ABCD background estimation                                                                      |
+| `--actions`   | list      | (Required)                | Actions to perform. Choose one or more: `compute_rocs`, `plot_rocs`, `plot_mass`, `sensitivity`     |
+| `--b-vals`    | list(int) | 1 2 8                     | B values for significance scan                                                                      |
+| `--plot-dir`  | str       | Current directory         | Directory to save results and CSVs                                                                  |
+```
+
+Example Commands
+
+*Run a full analysis for all years and all channels:*
+
+`python SensitivityStudy.py --actions compute_rocs plot_rocs plot_mass sensitivity`
+
+*Run only on selected years/channels in test mode:*
+
+`python SensitivityStudy.py --actions sensitivity --years 2022 2023 --channels hh --test-mode`
+
+*Use ABCD background estimation and save plots to a specific directory:*
+
+`python SensitivityStudy.py --actions plot_mass --use-abcd --plot-dir results/`
 
 ### Control plots
 
 @Billy - convert into script and add instructions here
+
+### BDT
+
+This script provides a command-line interface to train, load, and evaluate a multiclass Boosted Decision Tree (BDT) model on data from one or more years. It includes options for studying rescaling effects, evaluating BDT predictions, and managing data reloading.
+
+Data paths defined in `Trainer.__init__` in `Trainer.data_path` by year and sample type.
+
+```
+python bdt.py [options]
+```
+
+Options:
+
+`--years`
+Specify which years of data to store in Trainer object. This establishes which years of data are loaded for training/evaluation.
+Examples: `--years 2022 2022EE 2023BPix` or `--years all`
+`--model`
+Model configuration name (e.g. "test"). Names are keys in /home/users/lumori/bbtautau/src/bbtautau/postprocessing/bdt_config.py configuration dictionaries
+`--save-dir`
+Name to save the trained model and generated plots in `"/home/users/lumori/bbtautau/src/bbtautau/postprocessing/classifier/{model_dir}"`. Defaults to `"/home/users/lumori/bbtautau/src/bbtautau/postprocessing/classifier/trained_models/{self.modelname}_{('-'.join(self.years) if not self.years == hh_vars.years else 'all')}"`
+`--force-reload`
+Force reloading of data, even if cache/files exist.
+`--samples`
+List of sample names to use for training or evaluation. Defaults to [ggf signals, QCD, ttbar, DY]
+`--train`
+Train a new model (mutually exclusive with --load).
+`--load`
+Load a previously trained model (default if neither is specified).
+`--study-rescaling`
+Script to study the impact of different weight and rescaling rules on BDT performance.
+`--eval-bdt-preds`
+Evaluate BDT predictions on the given data samples and years. Outputs are stored in the data directory as .npy files, and can later be handled through `postprocessing.load_bdt_preds`.
+
+**Example: train a new model ``mymodel''**
+```
+python bdt.py --train --years all --model mymodel
+```
+Models are stored in global `CLASSIFIER_PATH` defined on top of file.
+
+
+** Run predictions **
+Note: define global variable `DATA_PATH` in `bdt.py` for default prediction output directory, or provide a full path in input as .
+
+```
+
 
 ### Templates
 

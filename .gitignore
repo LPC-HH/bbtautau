@@ -160,6 +160,7 @@ Thumbs.db
 
 
 *.root
+*.buffer
 *.parquet
 *.txt
 test.ipynb

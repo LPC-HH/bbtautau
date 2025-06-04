@@ -125,6 +125,7 @@ SAMPLES = {
 SIGNALS = ["bbtt", "vbfbbtt", "vbfbbtt-k2v0"]
 SIGNALS_CHANNELS = SIGNALS.copy()
 
+# TODO Check this
 sig_keys_ggf = ["bbtt"]
 sig_keys_vbf = ["vbfbbtt-k2v0"]
 
@@ -153,6 +154,6 @@ BGS = [
 single_h_keys = ["hbb"]
 ttbar_keys = ["ttbarhad", "ttbarsl", "ttbarll"]
 
-qcdouts = ["QCD0HF", "QCD1HF", "QCD2HF"]
-topouts = ["TopW", "TopbW", "TopbWev", "TopbWmv", "TopbWtauhv", "TopbWq", "TopbWqq"][:2]
+qcdouts = ["QCD", "QCD0HF", "QCD1HF", "QCD2HF"]
+topouts = ["Top", "TopW", "TopbW", "TopbWev", "TopbWmv", "TopbWtauhv", "TopbWq", "TopbWqq"]
 sigouts = ["Xtauhtauh", "Xtauhtaue", "Xtauhtaum", "Xbb"]
