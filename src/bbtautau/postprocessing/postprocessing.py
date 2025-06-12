@@ -11,6 +11,7 @@ import copy
 import json
 import logging
 import pickle
+import time
 import warnings
 from copy import deepcopy
 from pathlib import Path
@@ -20,10 +21,13 @@ import hist
 import matplotlib as mpl
 import numpy as np
 import pandas as pd
+import xgboost as xgb
+from bdt_config import bdt_config
 from boostedhh import hh_vars, utils
 from boostedhh.hh_vars import data_key
-from boostedhh.utils import Sample, ShapeVar, add_bool_arg
+from boostedhh.utils import PAD_VAL, Sample, ShapeVar, add_bool_arg
 from hist import Hist
+from joblib import Parallel, delayed
 
 import bbtautau.postprocessing.utils as putils
 from bbtautau.bbtautau_utils import Channel
@@ -31,6 +35,8 @@ from bbtautau.HLTs import HLTs
 from bbtautau.postprocessing import Regions, Samples, plotting
 from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES, SIGNALS
 from bbtautau.postprocessing.utils import LoadedSample
+
+# from bbtautau.postprocessing.bdt import eval_bdt_preds
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("boostedhh.utils")
@@ -157,6 +163,8 @@ def main(args: argparse.Namespace):
         "bg": args.bg_data_dirs,
     }
 
+    print(data_paths)
+
     if args.sigs is None:
         args.sigs = {s + CHANNEL.key: SAMPLES[s + CHANNEL.key] for s in SIGNALS}
 
@@ -176,12 +184,13 @@ def main(args: argparse.Namespace):
     # dictionary that will contain all information (from all samples)
     events_dict = load_samples(
         args.year,
-        CHANNEL,
         data_paths,
+        [CHANNEL],
         load_data=True,
         load_bgs=True,
         filters_dict=filters,
         loaded_samples=True,
+        multithread=True,
     )
 
     cutflow = utils.Cutflow(samples=events_dict)
@@ -198,6 +207,19 @@ def main(args: argparse.Namespace):
     print("\nbbtautau assignment")
     bbtautau_assignment(events_dict, CHANNEL)
 
+    if args.use_bdt:
+        print("Predict BDT at inference")
+        time_start = time.time()
+        compute_bdt_preds(
+            data={
+                args.year: events_dict
+            },  # TODO: rationalize the various functions to work either by year or over set of years
+            modelname=args.model,
+            model_dir=args.model_dir,
+        )
+        time_end = time.time()
+        print(f"Time taken to predict BDT: {time_end - time_start} seconds")
+
     print("\nTemplates")
     templates = get_templates(
         events_dict,
@@ -209,6 +231,7 @@ def main(args: argparse.Namespace):
         {},  # TODO: systematics
         # pass_ylim=150,
         # fail_ylim=1e5,
+        use_bdt=args.use_bdt,
         sig_scale_dict={f"bbtt{CHANNEL.key}": 300, f"vbfbbtt-k2v0{CHANNEL.key}": 40},
         template_dir=args.template_dir,
         plot_dir=args.plot_dir,
@@ -217,30 +240,58 @@ def main(args: argparse.Namespace):
 
     print("\nSaving templates")
     save_templates(
-        templates, args.template_dir / f"{args.year}_templates.pkl", args.blinded, shape_vars
+        templates,
+        args.template_dir / f"{args.year}_templates{'_bdt' if args.use_bdt else ''}.pkl",
+        args.blinded,
+        shape_vars,
     )
 
 
-def bb_filters(in_filters: list[tuple] = None, num_fatjets: int = 3, bb_cut: float = 0.3):
+def base_filter(fast_mode: bool = False):
+    """
+    Returns the base filters for the data, signal, and background samples.
+    """
+
+    base_filters = copy.deepcopy(base_filters_default)
+    if fast_mode:
+        for i in range(len(base_filters)):
+            base_filters[i] += [("('ak8FatJetPNetXbbLegacy', '0')", ">=", 0.95)]
+
+    return {"data": base_filters, "signal": base_filters, "bg": base_filters}
+
+
+def bb_filters(
+    in_filters: dict[str, list[tuple]] = None, num_fatjets: int = 3, bb_cut: float = 0.3
+):
     """
     0.3 corresponds to roughly, 85% signal efficiency, 2% QCD efficiency (pT: 250-400, mSD:0-250, mRegLegacy:40-250)
     """
     if in_filters is None:
-        in_filters = base_filters_default
+        in_filters = {
+            "data": base_filters_default,
+            "signal": base_filters_default,
+            "bg": base_filters_default,
+        }
 
-    filters = [
-        ifilter + [(f"('ak8FatJetParTXbbvsQCD', '{n}')", ">=", bb_cut)]
-        for n in range(num_fatjets)
-        for ifilter in in_filters
-    ]
+    filters = {}
+    for dtype, ifilters_bydtype in in_filters.items():
+        filters[dtype] = [
+            ifilter + [(f"('ak8FatJetParTXbbvsQCD', '{n}')", ">=", bb_cut)]
+            for n in range(num_fatjets)
+            for ifilter in ifilters_bydtype
+        ]
+
     return filters
 
 
 def tt_filters(
-    channel: Channel, in_filters: list[tuple] = None, num_fatjets: int = 3, tt_cut: float = 0.9
+    channel: Channel,
+    in_filters: dict[str, list[tuple]] = None,
+    num_fatjets: int = 3,
+    tt_cut: float = 0.9,
 ):
     if in_filters is None:
-        in_filters = base_filters_default
+        in_filters = base_filter()
 
     if channel.key == "hm":
         warnings.warn(
@@ -251,11 +302,14 @@ def tt_filters(
     else:
         vslabel = "vsQCDTop"
 
-    filters = [
-        ifilter + [(f"('ak8FatJetParTX{channel.tagger_label}{vslabel}', '{n}')", ">=", tt_cut)]
-        for n in range(num_fatjets)
-        for ifilter in in_filters
-    ]
+    filters = {}
+    for dtype, ifilters_bydtype in in_filters.items():
+        filters[dtype] = [
+            ifilter + [(f"('ak8FatJetParTX{channel.tagger_label}{vslabel}', '{n}')", ">=", tt_cut)]
+            for n in range(num_fatjets)
+            for ifilter in ifilters_bydtype
+        ]
+
     return filters
 
 
@@ -268,7 +322,7 @@ def trigger_filter(
     num_fatjets: int = 3,
 ) -> dict[str, dict[str, list[list[tuple]]]]:
     """
-    creates a list of filters for each trigger in the list of triggers. It is granular to triggers = {"data": { [...] , ...}, "signal": { [...]}.
+    creates a list of filters for each trigger in the list of triggers. It is granular to triggers = {"data": { [...] , ...}, "signal": { [...]}, "bg": { [...]}}.
     """
     if base_filters is None:
         base_filters = copy.deepcopy(base_filters_default)
@@ -310,14 +364,19 @@ def trigger_filter(
 
 def get_columns(
     year: str,
-    channel: Channel,
-    triggers: bool = True,
+    triggers_in_channel: Channel = None,
     legacy_taggers: bool = True,
     ParT_taggers: bool = True,
+    other: bool = True,
     num_fatjets: int = 3,
 ):
 
-    columns_data = [("weight", 1), ("ak8FatJetPt", num_fatjets)]
+    columns_data = [
+        ("weight", 1),
+        ("ak8FatJetPt", num_fatjets),
+        ("ak8FatJetEta", num_fatjets),
+        ("ak8FatJetPhi", num_fatjets),
+    ]
 
     # common columns
     if legacy_taggers:
@@ -331,17 +390,26 @@ def get_columns(
         ]
 
     if ParT_taggers:
-        for branch in [
-            f"ak8FatJetParT{key}" for key in Samples.qcdouts + Samples.topouts + Samples.sigouts
-        ]:
+        for branch in (
+            [f"ak8FatJetParT{key}" for key in Samples.qcdouts + Samples.topouts + Samples.sigouts]
+            + [f"ak8FatJetParT{key}vsQCD" for key in Samples.sigouts if key != "Xtauhtaum"]
+            + [f"ak8FatJetParT{key}vsQCDTop" for key in Samples.sigouts if key != "Xtauhtaum"]
+        ):
             columns_data.append((branch, num_fatjets))
+
+    if other:
+        columns_data += [
+            ("nFatJets", 1),
+            ("METPt", 1),
+            ("METPhi", 1),
+        ]
 
     columns_mc = copy.deepcopy(columns_data)
 
-    if triggers:
-        for branch in channel.triggers(year, data_only=True):
+    if triggers_in_channel is not None:
+        for branch in triggers_in_channel.triggers(year, data_only=True):
             columns_data.append((branch, 1))
-        for branch in channel.triggers(year, mc_only=True):
+        for branch in triggers_in_channel.triggers(year, mc_only=True):
             columns_mc.append((branch, 1))
 
     # signal-only columns
@@ -364,79 +432,202 @@ def get_columns(
 
 def load_samples(
     year: str,
-    channel: Channel,
     paths: dict[str],
+    channels: list[Channel],
+    samples: dict[str, Sample] = None,
+    restrict_data_to_channel: bool = True,
     filters_dict: dict[str, list[list[tuple]]] = None,
     load_columns: dict[str, list[tuple]] = None,
     load_bgs: bool = False,
     load_data: bool = True,
-    load_just_bbtt: bool = False,
+    load_just_ggf: bool = False,
     loaded_samples: bool = False,
+    multithread: bool = False,
 ) -> dict[str, LoadedSample | pd.DataFrame]:
+    """
+    Loads and preprocesses physics event samples for a given year and analysis channel.
+
+    This function is designed to flexibly load datasets for different physics samples (signal, background, data)
+    according to user-specified filters, columns, and channel restrictions. It supports returning results either
+    as plain DataFrames (legacy behavior) or as `LoadedSample` objects for enhanced data encapsulation.
+
+    Parameters
+    ----------
+    year : str
+        The data-taking year for which to load the samples (e.g., "2018").
+    channels : list[Channel]
+        The analysis channel definition, containing metadata and configuration. Indicates which signal channel samples are desired in the output. Can affect the data loading if restrict_data_to_channel is True.
+    paths : dict[str]
+        Dictionary mapping sample names to input file paths. First level keys are "data", "signal", "bg". Second level keys are years.
+    samples : dict[str, Sample], optional
+        Dictionary of sample objects to load. If None, uses the default `Samples.SAMPLES`. If samples are provided, the flags load_bgs, load_data, restrict_data_to_channel are ignored.
+    restrict_data_to_channel : bool, optional
+        If True, restricts data loading to samples associated only with the specified channels (default: True). Practical to be used without providing samples.
+    filters_dict : dict[str, list[list[tuple]]], optional
+        Dictionary of filter definitions to be applied per sample type. If not provided or not a dictionary, no filters are applied.
+    load_columns : dict[str, list[tuple]], optional
+        Specifies which columns to load for each sample type. If provided, limits data loading to these columns.
+    load_bgs : bool, optional
+        If True, includes background samples in the loading process (default: False).
+    load_data : bool, optional
+        If True, includes data samples in the loading process (default: True).
+    load_just_ggf : bool, optional
+        If True, loads only the "ggf" signal samples, excluding "vbf" (default: False). Used for specialized studies.
+    loaded_samples : bool, optional
+        If True, returns results as `LoadedSample` objects. If False, returns plain DataFrames (deprecated).
+
+    Returns
+    -------
+    dict[str, LoadedSample | pd.DataFrame]
+        Dictionary mapping sample names (or signal-channel keys) to either `LoadedSample` objects
+        or pandas DataFrames, depending on `loaded_samples`.
+
+    Notes
+    -----
+    - **Deprecation warning:** The legacy DataFrame-based output (when `loaded_samples=False`) is deprecated and will be removed in the future. It is recommended to use `LoadedSample` outputs for better compatibility.
+    - If filtering or column selection is not provided, the function loads all available data for the relevant samples.
+    - When `restrict_to_channel` is True, only channel-specific samples are loaded.
+    - The function automatically adjusts for specific study types, such as restricting to GGF-only signals.
+    - Signal samples are remapped by channel at the end of the function for downstream compatibility.
+
+
+    """
+
+    # Legacy check from when samples was a single channel
+    if not isinstance(channels, list):
+        warnings.warn(
+            "Deprecation warning: Should switch to using a list of channels in the future!",
+            stacklevel=1,
+        )
+        channels = [channels]
+
     if not loaded_samples:
         warnings.warn(
             "Deprecation warning: Should switch to using the LoadedSample class in the future, by setting loaded_samples=True!",
             stacklevel=1,
         )
 
+    if not isinstance(filters_dict, dict):
+        print("Warning: filters_dict is not a dictionary. Not applying filters.")
+        filters_dict = None
+
     events_dict = {}
 
-    samples = Samples.SAMPLES.copy()
+    if samples is None:
+        samples = Samples.SAMPLES.copy()
+
+        if not load_bgs:
+            for key in Samples.BGS:
+                if key in samples:
+                    del samples[key]
+
+        if not load_data:
+            for key in Samples.DATASETS:
+                if key in samples:
+                    del samples[key]
+
+    else:
+        print("Note: samples are provided. Ignoring load_samples kwargs load_bgs, load_data.")
+
+    if restrict_data_to_channel:
+        # remove unnecessary data samples
+        for channel in channels:
+            for key in Samples.DATASETS:
+                if (key in samples) and (key not in channel.data_samples):
+                    del samples[key]
+
     signals = Samples.SIGNALS.copy()
 
-    if load_just_bbtt:  # quite ad hoc but should become obsolete
-        del samples["vbfbbtt-k2v0"]
-        del samples["vbfbbtt"]
-        signals.remove("vbfbbtt-k2v0")
-        signals.remove("vbfbbtt")
+    if load_just_ggf:  # quite ad hoc but should become obsolete
+        if "vbfbbtt" in signals:
+            signals.remove("vbfbbtt")
+        if "vbfbbtt-k2v0" in signals:
+            signals.remove("vbfbbtt-k2v0")
 
-    # remove unnecessary data samples
-    for key in Samples.DATASETS + (not load_bgs) * Samples.BGS:
-        if (key in samples) and (key not in channel.data_samples or not load_data):
-            del samples[key]
+        if "vbfbbtt-k2v0" in samples:
+            del samples["vbfbbtt-k2v0"]
+        if "vbfbbtt" in samples:
+            del samples["vbfbbtt"]
+
+        for ch in CHANNELS:
+            if f"vbfbbtt-k2v0{ch}" in samples:
+                del samples[f"vbfbbtt-k2v0{ch}"]
+            if f"vbfbbtt{ch}" in samples:
+                del samples[f"vbfbbtt{ch}"]
+
+    print("Loading samples", samples.keys())
 
     # load only the specified columns
     if load_columns is not None:
         for sample in samples.values():
             sample.load_columns = load_columns[sample.get_type()]
 
-    # load samples
-    for key, sample in samples.items():
-        if isinstance(filters_dict, dict):
-            filters = filters_dict[sample.get_type()]
-        else:
-            filters = filters_dict  # this should not be used since the triggers change in data and MC on a given year
-
-        if sample.selector is not None:
-
-            events = utils.load_sample(
-                sample,
-                year,
-                paths,
-                filters,
+    if multithread:
+        if not loaded_samples:
+            warnings.warn(
+                "Deprecation warning: Switch to using the LoadedSample class. Loading failed.",
+                stacklevel=1,
             )
+            return None
+
+        data_ = Parallel(n_jobs=len(samples))(
+            delayed(LoadedSample)(
+                sample=sample,
+                events=utils.load_sample(
+                    sample,
+                    year,
+                    paths,
+                    filters_dict[sample.get_type()] if filters_dict is not None else None,
+                ),
+            )
+            for sample in samples.values()
+            if sample.selector is not None
+        )
+
+        keys = [key for key, sample in samples.items() if sample.selector is not None]
+        events_dict = dict(zip(keys, data_))
+
+    else:
+        # load samples (legacy)
+        for key, sample in samples.items():
+
+            filters = filters_dict[sample.get_type()] if filters_dict is not None else None
+
+            if sample.selector is not None:
+
+                events = utils.load_sample(
+                    sample,
+                    year,
+                    paths,
+                    filters,
+                )
+                print("Loaded sample", key, "in year", year)
+
+                if not loaded_samples:
+                    events_dict[key] = events
+                else:
+                    events_dict[key] = LoadedSample(sample=sample, events=events)
+
+    # keep only the specified bbtt channels
+    for channel in channels:
+        print(channel.key, signals, events_dict.keys())
+        for signal in signals:
 
             if not loaded_samples:
-                events_dict[key] = events
+                # quick fix due to old naming still in samples
+                events_dict[f"{signal}{channel.key}"] = events_dict[signal][
+                    events_dict[signal][f"GenTau{channel.key}"][0]
+                ]
+                del events_dict[signal]
             else:
-                events_dict[key] = LoadedSample(sample=sample, events=events)
+                events_dict[f"{signal}{channel.key}"] = LoadedSample(
+                    sample=Samples.SAMPLES[f"{signal}{channel.key}"],
+                    events=events_dict[signal].events[
+                        events_dict[signal].get_var(f"GenTau{channel.key}")
+                    ],
+                )
 
-    # keep only the specified bbtt channel
-    for signal in signals:
-        if not loaded_samples:
-            # quick fix due to old naming still in samples
-            events_dict[f"{signal}{channel.key}"] = events_dict[signal][
-                events_dict[signal][f"GenTau{channel.key}"][0]
-            ]
-            del events_dict[signal]
-        else:
-            events_dict[f"{signal}{channel.key}"] = LoadedSample(
-                sample=Samples.SAMPLES[f"{signal}{channel.key}"],
-                events=events_dict[signal].events[
-                    events_dict[signal].get_var(f"GenTau{channel.key}")
-                ],
-            )
-            del events_dict[signal]
+    del events_dict[signal]
 
     return events_dict
 
@@ -598,7 +789,10 @@ def apply_triggers(
 
 
 def delete_columns(
-    events_dict: dict[str, LoadedSample | pd.DataFrame], year: str, channel: Channel, triggers=True
+    events_dict: dict[str, LoadedSample | pd.DataFrame],
+    year: str,
+    channels: list[Channel],
+    triggers=True,
 ):
     if not isinstance(next(iter(events_dict.values())), LoadedSample):
         warnings.warn(
@@ -608,13 +802,24 @@ def delete_columns(
         print("No action taken, events_dict is not a LoadedSample")
         return events_dict
 
+    if not isinstance(channels, list):
+        warnings.warn(
+            "Deprecation warning: Should switch to using a list of channels in the future!",
+            stacklevel=1,
+        )
+        channels = [channels]
+
     for sample in events_dict.values():
         isData = sample.sample.isData
         if triggers:
             sample.events.drop(
-                columns=list(
+                columns=(
                     set(sample.events.columns)
-                    - set(channel.triggers(year, data_only=isData, mc_only=not isData))
+                    - {
+                        trigger
+                        for channel in channels
+                        for trigger in channel.triggers(year, data_only=isData, mc_only=not isData)
+                    }
                 )
             )
     return events_dict
@@ -626,7 +831,7 @@ def derive_variables(events_dict: dict[str, LoadedSample], channel: Channel, num
         if "ak8FatJetPNetXbbvsQCDLegacy" not in sample.events:
             Xbb = sample.get_var("ak8FatJetPNetXbbLegacy")
             QCD = sample.get_var("ak8FatJetPNetQCDLegacy")
-            Xbb_vs_QCD = Xbb / (Xbb + QCD)
+            Xbb_vs_QCD = np.divide(Xbb, Xbb + QCD, out=np.zeros_like(Xbb), where=(Xbb + QCD) != 0)
 
             for n in range(num_fatjets):
                 sample.events[("ak8FatJetPNetXbbvsQCDLegacy", str(n))] = Xbb_vs_QCD[:, n]
@@ -635,10 +840,22 @@ def derive_variables(events_dict: dict[str, LoadedSample], channel: Channel, num
             tauhtaum = sample.get_var("ak8FatJetParTXtauhtaum")
             qcd = sample.get_var("ak8FatJetParTQCD")
             top = sample.get_var("ak8FatJetParTTop")
-            tauhtaum_vs_QCDTop = tauhtaum / (tauhtaum + qcd + top)
+            tauhtaum_vs_QCDTop = np.divide(
+                tauhtaum,
+                tauhtaum + qcd + top,
+                out=np.zeros_like(tauhtaum),
+                where=(tauhtaum + qcd + top) != 0,
+            )
 
             for n in range(num_fatjets):
                 sample.events[("ak8FatJetParTXtauhtaumvsQCDTop", str(n))] = tauhtaum_vs_QCDTop[:, n]
+
+        if channel.key == "hm" and "ak8FatJetParTXtauhtaumvsQCD" not in sample.events:
+            tauhtaum_vs_QCD = np.divide(
+                tauhtaum, tauhtaum + qcd, out=np.zeros_like(tauhtaum), where=(tauhtaum + qcd) != 0
+            )
+            for n in range(num_fatjets):
+                sample.events[("ak8FatJetParTXtauhtaumvsQCD", str(n))] = tauhtaum_vs_QCD[:, n]
 
 
 def bbtautau_assignment_old(events_dict: dict[str, pd.DataFrame], channel: Channel):
@@ -672,10 +889,20 @@ def bbtautau_assignment_old(events_dict: dict[str, pd.DataFrame], channel: Chann
     return bbtt_masks
 
 
-def bbtautau_assignment(events_dict: dict[str, pd.DataFrame | LoadedSample], channel: Channel):
+def bbtautau_assignment(
+    events_dict: dict[str, pd.DataFrame | LoadedSample],
+    channel: Channel = None,
+    agnostic: bool = False,
+):
     """Assign bb and tautau jets per each event."""
 
+    # if channel is none but agnostic is false raise an error
+    if channel is None and not agnostic:
+        raise ValueError("Channel is required if agnostic is False")
+
     if not isinstance(next(iter(events_dict.values())), LoadedSample):
+        if agnostic:
+            raise ValueError("Need to work with LoadedSample if agnostic is True")
         warnings.warn(
             "Deprecation warning: Should switch to using the LoadedSample class in the future!",
             stacklevel=1,
@@ -689,9 +916,20 @@ def bbtautau_assignment(events_dict: dict[str, pd.DataFrame | LoadedSample], cha
         }
 
         # assign tautau jet as the one with the highest ParTtautauvsQCD score
-        tautau_pick = np.argmax(
-            sample.get_var(f"ak8FatJetParTX{channel.tagger_label}vsQCD"), axis=1
-        )
+        if agnostic:
+            sig_labels = [ch.tagger_label for ch in CHANNELS.values()]
+            num = (
+                sample.get_var(f"ak8FatJetParTX{sig_labels[0]}")
+                + sample.get_var(f"ak8FatJetParTX{sig_labels[1]}")
+                + sample.get_var(f"ak8FatJetParTX{sig_labels[2]}")
+            )
+            denom = num + sample.get_var("ak8FatJetParTQCD")
+            combined_score = np.divide(num, denom, out=np.zeros_like(num), where=(num + denom) != 0)
+            tautau_pick = np.argmax(combined_score, axis=1)
+        else:
+            tautau_pick = np.argmax(
+                sample.get_var(f"ak8FatJetParTX{channel.tagger_label}vsQCD"), axis=1
+            )
 
         # assign bb jet as the one with the highest ParTXbbvsQCD score, but prioritize tautau
         bb_sorted = np.argsort(sample.get_var("ak8FatJetParTXbbvsQCD"), axis=1)
@@ -705,6 +943,168 @@ def bbtautau_assignment(events_dict: dict[str, pd.DataFrame | LoadedSample], cha
 
         sample.bb_mask = bbtt_masks["bb"]
         sample.tt_mask = bbtt_masks["tt"]
+
+
+def _add_bdt_scores(
+    events: pd.DataFrame,
+    sample_bdt_preds: np.ndarray,
+    multiclass: bool,
+    all_outs: bool = True,
+    jshift: str = "",
+):
+    """
+    Assumes map to be
+    Class 0: bbtthe
+    Class 1: bbtthh
+    Class 2: bbtthm
+    Class 3: dyjets
+    Class 4: qcd
+    Class 5: ttbarhad
+    Class 6: ttbarll
+    Class 7: ttbarsl
+    """
+
+    if jshift != "":
+        jshift = "_" + jshift
+
+    if not multiclass:
+        events[f"BDTScore{jshift}"] = sample_bdt_preds
+    else:
+        # bg_tot = np.sum(sample_bdt_preds[:, 3:], axis=1)
+        he_score = sample_bdt_preds[:, 0]  # TODO could be de-hardcoded
+        hh_score = sample_bdt_preds[:, 1]
+        hm_score = sample_bdt_preds[:, 2]
+
+        events[f"BDTScoretauhtauh{jshift}"] = hh_score  # / (hh_score + bg_tot)
+        events[f"BDTScoretauhtaum{jshift}"] = hm_score  # / (hm_score + bg_tot)
+        events[f"BDTScoretauhtaue{jshift}"] = he_score  # / (he_score + bg_tot)
+
+        if all_outs:
+            events[f"BDTScoreDY{jshift}"] = sample_bdt_preds[:, 3]
+            events[f"BDTScoreQCD{jshift}"] = sample_bdt_preds[:, 4]
+            events[f"BDTScoreTThad{jshift}"] = sample_bdt_preds[:, 5]
+            events[f"BDTScoreTTll{jshift}"] = sample_bdt_preds[:, 6]
+            events[f"BDTScoreTTSL{jshift}"] = sample_bdt_preds[:, 7]
+
+        for ch in CHANNELS.values():
+            taukey = ch.tagger_label
+            events[f"BDTScore{taukey+jshift}vsQCD"] = np.nan_to_num(
+                events[f"BDTScore{taukey+jshift}"]
+                / (events[f"BDTScore{taukey+jshift}"] + events["BDTScoreQCD"]),
+                nan=PAD_VAL,
+            )
+
+            events[f"BDTScore{taukey+jshift}vsAll"] = np.nan_to_num(
+                events[f"BDTScore{taukey+jshift}"]
+                / (
+                    events[f"BDTScore{taukey+jshift}"]
+                    + events["BDTScoreQCD"]
+                    + events["BDTScoreTThad"]
+                    + events["BDTScoreTTll"]
+                    + events["BDTScoreTTSL"]
+                    + events["BDTScoreDY"]
+                ),
+                nan=PAD_VAL,
+            )
+
+
+def compute_bdt_preds(
+    data: dict[str, dict[str, LoadedSample]],
+    modelname: str,
+    model_dir: Path,
+) -> dict[str, dict[str, np.ndarray]]:
+    """Compute BDT predictions for multiple years and samples.
+
+    This function loads a trained XGBoost model and uses it to make predictions on multiple
+    years and samples of data. The input data is expected to be organized by year and sample name.
+
+    Args:
+        data: Dictionary mapping years to dictionaries of samples. Each sample should be a LoadedSample
+            object containing the features needed for prediction.
+        model_path: Path to the trained XGBoost model file (.json)
+        feature_names: List of feature names to use for prediction. These must be accessible via
+            the get_var() method of each LoadedSample.
+
+    Returns:
+        dict: Nested dictionary containing predictions for each year and sample:
+            {year: {sample_name: predictions_array}}
+
+    """
+
+    bst = xgb.Booster()
+    bst.load_model(model_dir / f"{modelname}.json")
+    feature_names = (
+        bdt_config[modelname]["train_vars"]["misc"]["feats"]
+        + bdt_config[modelname]["train_vars"]["fatjet"]["feats"]
+    )
+
+    for year in data:
+        for sample_name in data[year]:
+            dsample = xgb.DMatrix(
+                np.stack(
+                    [data[year][sample_name].get_var(feat) for feat in feature_names],
+                    axis=1,
+                ),
+                feature_names=feature_names,
+            )
+
+            y_pred = bst.predict(dsample)
+            _add_bdt_scores(data[year][sample_name].events, y_pred, multiclass=True, all_outs=True)
+
+
+def load_bdt_preds(
+    events_dict: dict[str, pd.DataFrame],
+    year: str,
+    bdt_preds_dir: Path,
+    modelname: str,
+    # jec_jmsr_shifts: bool = False,
+    all_outs: bool = True,
+):
+    """
+    Loads the BDT scores for each event and saves in the dataframe in the "BDTScore" column.
+    If ``jec_jmsr_shifts``, also loads BDT preds for every JEC / JMSR shift in MC.
+
+    Args:
+        bdt_preds (str): Path to the bdt_preds .npy file.
+        bdt_sample_order (List[str]): Order of samples in the predictions file.
+
+    """
+    # with (bdt_preds_dir / year / "sample_order.txt").open() as f:
+    #     sample_order_dict = eval(f.read())
+
+    # if jec_jmsr_shifts:
+    #     shift_preds = {
+    #         jshift: np.load(f"{bdt_preds_dir}/{year}/preds_{jshift}.npy")
+    #         for jshift in jec_shifts + jmsr_shifts
+    #     }
+
+    # i = 0
+    # for sample, num_events in sample_order_dict.items(): #TODO implement this system as safety check
+    # if sample in events_dict:
+    # events = events_dict[sample]
+    # assert num_events == len(
+    #     events
+    # ), f"# of BDT predictions does not match # of events for sample {sample}"
+
+    for sample, loaded_sample in events_dict.items():
+        pred_file = Path(bdt_preds_dir) / year / sample / f"{modelname}_preds.npy"
+        if not pred_file.exists():
+            raise FileNotFoundError(f"Prediction file does not exist: {pred_file}")
+
+        bdt_preds = np.load(pred_file)
+        multiclass = len(bdt_preds.shape) > 1
+        putils._add_bdt_scores(loaded_sample.events, bdt_preds, multiclass, all_outs)
+
+        # if jec_jmsr_shifts and sample != data_key:
+        #     for jshift in jec_shifts + jmsr_shifts:
+        #         sample_bdt_preds = shift_preds[jshift][i : i + num_events]
+        #         _add_bdt_scores(
+        #             events, sample_bdt_preds, multiclass, multisig, all_outs, jshift=jshift
+        #         )
+
+    #     i += num_events
+
+    # assert i == len(bdt_preds), f"# events {i} != # of BDT preds {len(bdt_preds)}"
 
 
 def control_plots(
@@ -837,6 +1237,7 @@ def get_templates(
     blind_pass: bool = False,
     plot_data: bool = True,
     show: bool = False,
+    use_bdt: bool = False,
 ) -> dict[str, Hist]:
     """
     (1) Makes histograms for each region in the ``selection_regions`` dictionary,
@@ -868,7 +1269,7 @@ def get_templates(
     # do TXbb SFs + uncs. for signals and Hbb samples only
     # txbb_samples = sig_keys + [key for key in bg_keys if key in hbb_bg_keys]
 
-    selection_regions = Regions.get_selection_regions(channel)
+    selection_regions = Regions.get_selection_regions(channel, use_bdt=use_bdt)
 
     for rname, region in selection_regions.items():
         pass_region = rname.startswith("pass")
@@ -1245,18 +1646,43 @@ def parse_args(parser=None):
         type=str,
     )
 
+    add_bool_arg(parser, "use_bdt", "Use BDT for sensitivity study", default=False)
+
+    parser.add_argument(
+        "--model",
+        help="Name of the BDT model to use",
+        default="28May25_baseline",
+        type=str,
+    )
+
+    # TODO handle this with global variables
+    parser.add_argument(
+        "--model-dir",
+        help="Path to the BDT model directory",
+        default="/home/users/lumori/bbtautau/src/bbtautau/postprocessing/classifier/trained_models/28May25_baseline_all",
+        type=str,
+    )
+
     args = parser.parse_args()
+    save_args = deepcopy(args)
+
+    args.model_dir = Path(args.model_dir)
 
     if args.control_plots:
         raise NotImplementedError("Control plots not implemented")
 
-    if not args.signal_data_dirs and args.data_dir:
-        args.signal_data_dirs = [args.data_dir]
+    if args.data_dir:
+        args.data_dir = Path(args.data_dir)
 
-    if not args.bg_data_dirs and args.data_dir:
+    if args.bg_data_dirs:
+        args.bg_data_dirs = [Path(bg_dir) for bg_dir in args.bg_data_dirs]
+    elif args.data_dir:
         args.bg_data_dirs = [args.data_dir]
 
-    save_args = deepcopy(args)
+    if args.signal_data_dirs:
+        args.signal_data_dirs = [Path(sig_dir) for sig_dir in args.signal_data_dirs]
+    elif args.data_dir:
+        args.signal_data_dirs = [args.data_dir]
 
     # save args in args.plot_dir and args.template_dir if they exit
     if args.plot_dir:

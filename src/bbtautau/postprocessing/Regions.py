@@ -12,32 +12,43 @@ from bbtautau.bbtautau_utils import Channel
 from bbtautau.postprocessing.utils import Region
 
 
-def get_selection_regions(channel: Channel):
+def get_selection_regions(channel: Channel, use_bdt: bool = False):
+    pass_cuts = {
+        "bbFatJetPt": [250, CUT_MAX_VAL],
+        "ttFatJetPt": [200, CUT_MAX_VAL],
+        f"ttFatJet{channel.tt_mass_cut[0]}": channel.tt_mass_cut[1],
+        "bbFatJetParTXbbvsQCD": [channel.txbb_cut, CUT_MAX_VAL],
+    }
+
+    fail_cuts = {
+        "bbFatJetPt": [250, CUT_MAX_VAL],
+        "ttFatJetPt": [200, CUT_MAX_VAL],
+        f"ttFatJet{channel.tt_mass_cut[0]}": channel.tt_mass_cut[1],
+        f"ttFatJetParTX{channel.tagger_label}vsQCDTop": [0.3, CUT_MAX_VAL],
+    }
+
+    if use_bdt:
+        pass_cuts[f"BDTScore{channel.tagger_label}vsAll"] = [channel.txtt_BDT_cut, CUT_MAX_VAL]
+        fail_cuts[f"bbFatJetParTXbbvsQCD+BDTScore{channel.tagger_label}vsAll"] = [
+            [-CUT_MAX_VAL, channel.txbb_cut],
+            [-CUT_MAX_VAL, channel.txtt_BDT_cut],
+        ]
+    else:
+        pass_cuts[f"ttFatJetParTX{channel.tagger_label}vsQCDTop"] = [channel.txtt_cut, CUT_MAX_VAL]
+        fail_cuts[f"bbFatJetParTXbbvsQCD+ttFatJetParTX{channel.tagger_label}vsQCDTop"] = [
+            [-CUT_MAX_VAL, channel.txbb_cut],
+            [-CUT_MAX_VAL, channel.txtt_cut],
+        ]
+
     regions = {
         # {label: {cutvar: [min, max], ...}, ...}
         "pass": Region(
-            cuts={
-                "bbFatJetPt": [250, CUT_MAX_VAL],
-                "ttFatJetPt": [200, CUT_MAX_VAL],
-                f"ttFatJet{channel.tt_mass_cut[0]}": channel.tt_mass_cut[1],
-                "bbFatJetParTXbbvsQCD": [channel.txbb_cut, CUT_MAX_VAL],
-                f"ttFatJetParTX{channel.tagger_label}vsQCDTop": [channel.txtt_cut, CUT_MAX_VAL],
-            },
+            cuts=pass_cuts,
             signal=True,
             label="Pass",
         ),
         "fail": Region(
-            cuts={
-                "bbFatJetPt": [250, CUT_MAX_VAL],
-                "ttFatJetPt": [200, CUT_MAX_VAL],
-                f"ttFatJet{channel.tt_mass_cut[0]}": channel.tt_mass_cut[1],
-                # invert at least one of the cuts
-                f"bbFatJetParTXbbvsQCD+ttFatJetParTX{channel.tagger_label}vsQCDTop": [
-                    [-CUT_MAX_VAL, channel.txbb_cut],
-                    [-CUT_MAX_VAL, channel.txtt_cut],
-                ],
-                f"ttFatJetParTX{channel.tagger_label}vsQCDTop": [0.3, CUT_MAX_VAL],
-            },
+            cuts=fail_cuts,
             signal=False,
             label="Fail",
         ),

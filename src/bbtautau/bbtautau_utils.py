@@ -21,6 +21,7 @@ class Channel:
     tagger_label: str  # label for tagger score used
     txbb_cut: float  # cut on bb tagger score
     txtt_cut: float  # cut on tt tagger score
+    txtt_BDT_cut: float  # cut on tt BDT score
     tt_mass_cut: tuple[str, list[float]]  # cut on tt mass
     lepton_dataset: str = None  # lepton dataset (if applicable)
 

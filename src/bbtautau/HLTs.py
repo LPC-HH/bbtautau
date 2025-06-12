@@ -316,6 +316,11 @@ class HLTs:
                 for sublist in cls.hlt_dict(year, as_str=False, mc_only=True, **hlt_kwargs).values()
                 for hlt in sublist
             ],
+            "bg": [
+                (hlt.get_name(hlt_prefix) if as_str else hlt)
+                for sublist in cls.hlt_dict(year, as_str=False, mc_only=True, **hlt_kwargs).values()
+                for hlt in sublist
+            ],
             "data": [
                 (hlt.get_name(hlt_prefix) if as_str else hlt)
                 for sublist in cls.hlt_dict(
