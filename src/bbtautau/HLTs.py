@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import ClassVar
 
-from boostedhh.utils import HLT
+from boostedhh import utils
 
 years_2022 = ["2022", "2022EE"]
 years_2023 = ["2023", "2023BPix"]
 years = years_2022 + years_2023
+
+
+@dataclass
+class HLT(utils.HLT):
+    """Same as boostedhh.utils.HLT but with channel."""
+
+    # which channel? defaults to all.
+    channel: list[str] = field(default_factory=lambda: ["hh", "hm", "he"])  
 
 
 class HLTs:
@@ -58,6 +67,7 @@ class HLTs:
                 mc_years=years_2022,
                 data_years=years_2022,
                 dataset="JetMET",
+                channel=["hh"],
             ),
             # HLT( #This should be there but is not in 25Apr16 samples. For now just ignore
             #     name="HLT_QuadPFJet70_50_40_35_PNet2BTagMean0p65",
@@ -70,11 +80,13 @@ class HLTs:
                 name="HLT_QuadPFJet103_88_75_15_PFBTagDeepJet_1p3_VBF2",
                 years=years,
                 dataset="JetMET",
+                channel=["hh"],
             ),
             HLT(
                 name="HLT_QuadPFJet103_88_75_15_DoublePFBTagDeepJet_1p3_7p7_VBF1",
                 years=years,
                 dataset="JetMET",
+                channel=["hh"],
             ),
         ],
         "singletau": [
@@ -96,24 +108,28 @@ class HLTs:
                 name="HLT_DoubleMediumDeepTauPFTauHPS30_L2NN_eta2p1_PFJet60",
                 years=years,
                 dataset="Tau",
+                channel=["hh"],
             ),
-            HLT(
-                name="HLT_DoubleMediumDeepTauPFTauHPS30_L2NN_eta2p1_PFJet75",
-                years=years,
-                dataset="Tau",
-            ),
+            # HLT(
+            #     name="HLT_DoubleMediumDeepTauPFTauHPS30_L2NN_eta2p1_PFJet75",
+            #     years=years,
+            #     dataset="Tau",
+            #     channel=["hh"],
+            # ),
         ],
         "muon": [
             HLT(
                 name="HLT_IsoMu24",
                 years=years,
                 dataset="Muon",
+                channel=["hm"],
             ),
             # TODO: check sensitivity without below triggers
             HLT(
                 name="HLT_Mu50",
                 years=years,
                 dataset="Muon",
+                channel=["hm"],
             ),
         ],
         "muontau": [
@@ -121,6 +137,7 @@ class HLTs:
                 name="HLT_IsoMu20_eta2p1_LooseDeepTauPFTauHPS27_eta2p1_CrossL1",
                 years=years,
                 dataset="Muon",
+                channel=["hm"],
             ),
         ],
         "egamma": [
@@ -128,21 +145,25 @@ class HLTs:
                 name="HLT_Ele30_WPTight_Gsf",
                 years=years,
                 dataset="EGamma",
+                channel=["he"],
             ),
             HLT(
                 name="HLT_Ele115_CaloIdVT_GsfTrkIdT",
                 years=years,
                 dataset="EGamma",
+                channel=["he"],
             ),
             HLT(
                 name="HLT_Ele50_CaloIdVT_GsfTrkIdT_PFJet165",
                 years=years,
                 dataset="EGamma",
+                channel=["he"],
             ),
             HLT(
                 name="HLT_Photon200",
                 years=years,
                 dataset="EGamma",
+                channel=["he"],
             ),
         ],
         "etau": [
@@ -150,6 +171,7 @@ class HLTs:
                 name="HLT_Ele24_eta2p1_WPTight_Gsf_LooseDeepTauPFTauHPS30_eta2p1_CrossL1",
                 years=years,
                 dataset="EGamma",
+                channel=["he"],
             ),
         ],
         "met": [
@@ -165,11 +187,13 @@ class HLTs:
                 name="HLT_PFHT280_QuadPFJet30_PNet2BTagMean0p55",
                 years=["2023BPix"],
                 dataset="ParkingHH",
+                channel=["hh"],
             ),
             HLT(
                 name="HLT_PFHT340_QuadPFJet70_50_40_40_PNet2BTagMean0p70",
                 years=years_2023,
                 dataset="ParkingHH",
+                channel=["hh"],
             ),
         ],
     }
