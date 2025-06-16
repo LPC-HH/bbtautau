@@ -13,8 +13,8 @@ CHANNELS = {
         data_samples=["jetmet", "tau"],
         isLepton=False,
         tagger_label="tauhtauh",
-        txbb_cut=0.907,
-        txtt_cut=0.990,
+        txbb_cut=0.91,
+        txtt_cut=0.999,
         tt_mass_cut=("PNetmassLegacy", [50, 150]),
     ),
     "hm": Channel(
@@ -25,8 +25,8 @@ CHANNELS = {
         lepton_dataset="muon",
         isLepton=True,
         tagger_label="tauhtaum",
-        txbb_cut=0.731,
-        txtt_cut=0.979,
+        txbb_cut=0.851025641025641,
+        txtt_cut=0.9887948717948718,
         tt_mass_cut=("ParTmassResApplied", [70, 210]),
     ),
     "he": Channel(
@@ -37,8 +37,8 @@ CHANNELS = {
         lepton_dataset="egamma",
         isLepton=True,
         tagger_label="tauhtaue",
-        txbb_cut=0.855,
-        txtt_cut=0.99,
+        txbb_cut=0.91,
+        txtt_cut=0.999,
         tt_mass_cut=("ParTmassResApplied", [70, 210]),
     ),
 }

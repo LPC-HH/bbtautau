@@ -130,6 +130,7 @@ parser.add_argument(
     choices=hh_years + ["2022-2023"],
     help="years to make datacards for",
 )
+add_bool_arg(parser, "dd-dyjets", "use data-driven DY jets estimate", default=True)
 add_bool_arg(parser, "mcstats", "add mc stats nuisances", default=True)
 add_bool_arg(parser, "bblite", "use barlow-beeston-lite method", default=True)
 add_bool_arg(parser, "unblinded", "unblinded so skip blinded parts", default=False)
@@ -166,7 +167,7 @@ mc_samples = OrderedDict(
         ("ttbarsl", "ttbarsl"),
         ("ttbarll", "ttbarll"),
         ("ttbarhad", "ttbarhad"),
-        ("dyjets", "dyjets"),
+        # ("dyjets", "dyjets"),
         ("wjets", "wjets"),
         ("zjets", "zjets"),
         ("hbb", "hbb"),

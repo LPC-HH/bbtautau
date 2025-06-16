@@ -31,12 +31,15 @@ bg_order = [
     "ttbarsl",
     "ttbarhad",
     "qcd",
+    "qcddy",
 ]
 sample_label_map = {s: SAMPLES[s].label for s in SAMPLES}
 sample_label_map[data_key] = "Data"
+sample_label_map["qcddy"] = "QCD + DYJets"
 
 BG_COLOURS = {
     "qcd": "darkblue",
+    "qcddy": "darkblue",
     "ttbarhad": "brown",
     "ttbarsl": "lightblue",
     "ttbarll": "lightgray",

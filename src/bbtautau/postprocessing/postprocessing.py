@@ -29,7 +29,7 @@ import bbtautau.postprocessing.utils as putils
 from bbtautau.bbtautau_utils import Channel
 from bbtautau.HLTs import HLTs
 from bbtautau.postprocessing import Regions, Samples, plotting
-from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES, SIGNALS
+from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES
 from bbtautau.postprocessing.utils import LoadedSample
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -158,7 +158,8 @@ def main(args: argparse.Namespace):
     }
 
     if args.sigs is None:
-        args.sigs = {s + CHANNEL.key: SAMPLES[s + CHANNEL.key] for s in SIGNALS}
+        sigs = ["bbtt", "vbfbbtt-k2v0"]
+        args.sigs = {s + CHANNEL.key: SAMPLES[s + CHANNEL.key] for s in sigs}
 
     if args.bgs is None:
         args.bgs = {bkey: b for bkey, b in SAMPLES.items() if b.get_type() == "bg"}
