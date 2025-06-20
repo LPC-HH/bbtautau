@@ -13,8 +13,9 @@ CHANNELS = {
         data_samples=["jetmet", "tau"],
         isLepton=False,
         tagger_label="tauhtauh",
-        txbb_cut=0.907,
-        txtt_cut=0.990,
+        txbb_cut=0.8979591836734694,
+        txtt_cut=0.9918367346938776,
+        txtt_BDT_cut=0.996,
         tt_mass_cut=("PNetmassLegacy", [50, 150]),
     ),
     "hm": Channel(
@@ -25,8 +26,9 @@ CHANNELS = {
         lepton_dataset="muon",
         isLepton=True,
         tagger_label="tauhtaum",
-        txbb_cut=0.731,
-        txtt_cut=0.979,
+        txbb_cut=0.8204081632653062,
+        txtt_cut=0.9959183673469387,
+        txtt_BDT_cut=0.8,
         tt_mass_cut=("ParTmassResApplied", [70, 210]),
     ),
     "he": Channel(
@@ -37,8 +39,9 @@ CHANNELS = {
         lepton_dataset="egamma",
         isLepton=True,
         tagger_label="tauhtaue",
-        txbb_cut=0.855,
-        txtt_cut=0.99,
+        txbb_cut=0.8979591836734694,
+        txtt_cut=0.9959183673469387,
+        txtt_BDT_cut=0.9918,
         tt_mass_cut=("ParTmassResApplied", [70, 210]),
     ),
 }
@@ -125,6 +128,7 @@ SAMPLES = {
 SIGNALS = ["bbtt", "vbfbbtt", "vbfbbtt-k2v0"]
 SIGNALS_CHANNELS = SIGNALS.copy()
 
+# TODO Check this
 sig_keys_ggf = ["bbtt"]
 sig_keys_vbf = ["vbfbbtt-k2v0"]
 
@@ -153,6 +157,6 @@ BGS = [
 single_h_keys = ["hbb"]
 ttbar_keys = ["ttbarhad", "ttbarsl", "ttbarll"]
 
-qcdouts = ["QCD0HF", "QCD1HF", "QCD2HF"]
-topouts = ["TopW", "TopbW", "TopbWev", "TopbWmv", "TopbWtauhv", "TopbWq", "TopbWqq"][:2]
+qcdouts = ["QCD", "QCD0HF", "QCD1HF", "QCD2HF"]
+topouts = ["Top", "TopW", "TopbW", "TopbWev", "TopbWmv", "TopbWtauhv", "TopbWq", "TopbWqq"]
 sigouts = ["Xtauhtauh", "Xtauhtaue", "Xtauhtaum", "Xbb"]

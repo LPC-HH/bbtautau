@@ -76,6 +76,14 @@ class LoadedSample(utils.LoadedSampleABC):
             tt_mask=self.tt_mask[selection] if self.tt_mask is not None else None,
         )
 
+    def get_mask(self, jet: str) -> np.ndarray:
+        if jet == "bb":
+            return self.bb_mask
+        elif jet == "tt":
+            return self.tt_mask
+        else:
+            raise ValueError(f"Invalid jet: {jet}")
+
 
 @dataclass
 class Region:
