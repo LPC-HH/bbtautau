@@ -233,7 +233,11 @@ def main(args: argparse.Namespace):
         # pass_ylim=150,
         # fail_ylim=1e5,
         use_bdt=args.use_bdt,
-        sig_scale_dict={f"bbtt{CHANNEL.key}": 300, f"vbfbbtt-k2v0{CHANNEL.key}": 40},
+        sig_scale_dict={
+            f"bbtt{CHANNEL.key}": 300,
+            f"vbfbbtt{CHANNEL.key}": 40,
+            f"vbfbbtt-k2v0{CHANNEL.key}": 40,
+        },  # Added vbf to fix an error that I don't understand
         template_dir=args.template_dir,
         plot_dir=args.plot_dir,
         show=False,
@@ -242,7 +246,7 @@ def main(args: argparse.Namespace):
     print("\nSaving templates")
     save_templates(
         templates,
-        args.template_dir / f"{args.year}_templates{'_bdt' if args.use_bdt else ''}.pkl",
+        args.template_dir / f"{args.year}_templates.pkl",
         args.blinded,
         shape_vars,
     )
@@ -330,7 +334,7 @@ def trigger_filter(
 
     if fast_mode:
         for i in range(len(base_filters)):
-            base_filters[i] += [("('ak8FatJetPNetXbbLegacy', '0')", ">=", 0.95)]
+            base_filters[i] += [("('ak8FatJetPNetXbbLegacy', '0')", ">=", 0.98)]
 
     filters_dict = {}
 
@@ -923,9 +927,11 @@ def bbtautau_assignment(
                 sample.get_var(f"ak8FatJetParTX{sig_labels[0]}")
                 + sample.get_var(f"ak8FatJetParTX{sig_labels[1]}")
                 + sample.get_var(f"ak8FatJetParTX{sig_labels[2]}")
-            )
+            ) / 3
             denom = num + sample.get_var("ak8FatJetParTQCD")
-            combined_score = np.divide(num, denom, out=np.zeros_like(num), where=(num + denom) != 0)
+            combined_score = np.divide(
+                num, denom, out=np.zeros_like(num), where=((num != PAD_VAL) & (denom != 0))
+            )
             tautau_pick = np.argmax(combined_score, axis=1)
         else:
             tautau_pick = np.argmax(

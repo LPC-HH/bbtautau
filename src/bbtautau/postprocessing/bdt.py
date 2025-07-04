@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import os
+import time
 from pathlib import Path
 from typing import ClassVar
 
@@ -12,9 +13,8 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from bdt_config import bdt_config
-from boostedhh import hh_vars, plotting, utils
+from boostedhh import hh_vars, plotting
 from postprocessing import (
-    base_filters_default,
     bbtautau_assignment,
     delete_columns,
     derive_variables,
@@ -23,16 +23,14 @@ from postprocessing import (
     trigger_filter,
 )
 from Samples import CHANNELS, SAMPLES
-from sklearn.metrics import (
-    auc,
-    roc_curve,
-)
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from tabulate import tabulate
 
 from bbtautau.HLTs import HLTs
+from bbtautau.postprocessing.rocUtils import ROCAnalyzer
 from bbtautau.postprocessing.utils import LoadedSample
+from bbtautau.userConfig import DATA_PATHS
 
 # TODO
 # - k-fold cross validation
@@ -52,12 +50,12 @@ class Trainer:
 
     loaded_dmatrix = False
 
-    # Default samples for training
+    # Default samples for training / evaluation
     sample_names: ClassVar[list[str]] = [
         "qcd",
         "ttbarhad",
-        "ttbarsl",
         "ttbarll",
+        "ttbarsl",
         "dyjets",
         "bbtt",
     ]
@@ -81,52 +79,7 @@ class Trainer:
 
         self.samples = {name: SAMPLES[name] for name in self.sample_names}
 
-        self.data_path = {
-            "2022": {
-                "signal": Path(
-                    "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr17bbpresel_v12_private_signal/"
-                ),
-                "bg": Path(
-                    "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr17bbpresel_v12_private_signal/"
-                ),
-                "data": Path(
-                    "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr17bbpresel_v12_private_signal/"
-                ),
-            },
-            "2022EE": {
-                "signal": Path(
-                    "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr24Fix_v12_private_signal"
-                ),
-                "bg": Path(
-                    "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr24Fix_v12_private_signal"
-                ),
-                "data": Path(
-                    "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr24Fix_v12_private_signal/"
-                ),
-            },
-            "2023": {
-                "signal": Path(
-                    "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr24Fix_v12_private_signal"
-                ),
-                "bg": Path(
-                    "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr24Fix_v12_private_signal"
-                ),
-                "data": Path(
-                    "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr24Fix_v12_private_signal/"
-                ),
-            },
-            "2023BPix": {
-                "signal": Path(
-                    "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr24Fix_v12_private_signal"
-                ),
-                "bg": Path(
-                    "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr24Fix_v12_private_signal"
-                ),
-                "data": Path(
-                    "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr24Fix_v12_private_signal/"
-                ),
-            },
-        }
+        self.data_paths = DATA_PATHS
 
         self.modelname = modelname
         self.bdt_config = bdt_config
@@ -145,11 +98,16 @@ class Trainer:
         self.model_dir.mkdir(parents=True, exist_ok=True)
 
     def load_data(self, force_reload=False):
+        """
+        Note: Load_data_old did not use the trigger filters
+        """
         # Check if data buffer file exists
         if self.model_dir / "dtrain.buffer" in self.model_dir.glob("*.buffer") and not force_reload:
             print("Loading data from buffer file")
             self.dtrain = xgb.DMatrix(self.model_dir / "dtrain.buffer")
             self.dval = xgb.DMatrix(self.model_dir / "dval.buffer")
+
+            print(self.model_dir)
             self.dtrain_rescaled = xgb.DMatrix(self.model_dir / "dtrain_rescaled.buffer")
             self.dval_rescaled = xgb.DMatrix(self.model_dir / "dval_rescaled.buffer")
 
@@ -160,22 +118,21 @@ class Trainer:
         else:
             for year in self.years:
 
+                # filters_dict = base_filter()
+
                 filters_dict = trigger_filter(
                     HLTs.hlts_list_by_dtype(year),
                     year,
                     fast_mode=False,
-                    PNetXbb_cut=0.8,  # TODO manage this better
+                    # PNetXbb_cut=0.8,  # TODO manage this better
                 )  # = {"data": [(...)], "signal": [(...)], "bg": [(...)]}
-
-                # filters_dict = postprocessing.base_filter(fast_mode=self.test_mode)
-
-                # filters_dict = None
 
                 columns = get_columns(year)
 
                 self.events_dict[year] = load_samples(
                     year=year,
-                    paths=self.data_path[year],
+                    paths=self.data_paths[year],
+                    channels=list(CHANNELS.values()),
                     samples=self.samples,
                     filters_dict=filters_dict,
                     load_columns=columns,
@@ -192,55 +149,6 @@ class Trainer:
                     self.events_dict[year], CHANNELS["hm"]
                 )  # legacy issue, muon branches are misnamed
                 bbtautau_assignment(self.events_dict[year], agnostic=True)
-
-    def load_data_old(self, base_filters=True, force_reload=False):
-        # Check if data buffer file exists
-        if self.model_dir / "dtrain.buffer" in self.model_dir.glob("*.buffer") and not force_reload:
-            print("Loading data from buffer file")
-
-            self.dtrain = xgb.DMatrix(str(self.model_dir / "dtrain.buffer"))
-            self.dval = xgb.DMatrix(str(self.model_dir / "dval.buffer"))
-            self.dtrain_rescaled = xgb.DMatrix(str(self.model_dir / "dtrain_rescaled.buffer"))
-            self.dval_rescaled = xgb.DMatrix(str(self.model_dir / "dval_rescaled.buffer"))
-
-            for ch in CHANNELS:
-                self.samples[f"bbtt{ch}"] = SAMPLES[f"bbtt{ch}"]
-            del self.samples["bbtt"]
-            self.loaded_dmatrix = True
-        else:
-            self.events_dict = {year: {} for year in self.years}
-            for year in self.years:
-                for key, sample in self.samples.items():
-                    if sample.selector is not None:
-                        sample.load_columns = get_columns(year)[sample.get_type()]
-                        events = utils.load_sample(
-                            sample,
-                            year,
-                            self.data_path[year],
-                            base_filters_default if base_filters else None,
-                        )
-                        self.events_dict[year][key] = LoadedSample(sample=sample, events=events)
-                        print(f"Successfully imported sample {sample.label} (key: {key}) to memory")
-                derive_variables(
-                    self.events_dict[year], CHANNELS["hm"]
-                )  # legacy issue, muon branches are misnamed
-                bbtautau_assignment(self.events_dict[year], agnostic=True)
-
-            for ch, channel in CHANNELS.items():
-                for year in self.years:
-                    self.events_dict[year][f"bbtt{ch}"] = LoadedSample(
-                        sample=SAMPLES[f"bbtt{ch}"],
-                        events=self.events_dict[year]["bbtt"].events[
-                            self.events_dict[year]["bbtt"].get_var(f"GenTau{ch}")
-                        ],
-                    )
-                    bbtautau_assignment(
-                        self.events_dict[year], channel
-                    )  # overwrites jet assignment in signal channels
-                self.samples[f"bbtt{ch}"] = SAMPLES[f"bbtt{ch}"]
-            del self.samples["bbtt"]
-            for year in self.years:
-                del self.events_dict[year]["bbtt"]
 
     @staticmethod
     def shorten_df(df, N, seed=42):
@@ -577,88 +485,98 @@ class Trainer:
 
         savedir = self.model_dir if savedir is None else Path(savedir)
         savedir.mkdir(parents=True, exist_ok=True)
+        (savedir / "rocs").mkdir(parents=True, exist_ok=True)
+        (savedir / "outputs").mkdir(parents=True, exist_ok=True)
 
-        # TODO: de-hardcode this
-        sigs_strs = {"hh": 0, "he": 1, "hm": 2}
-        bg_strs = {"QCD": [4], "all": [3, 4, 5, 6, 7]}
+        # "taggers" just indicates the branch names in the event df, and here they are the sample names
+        signal_names = [sig_name for sig_name in self.samples if self.samples[sig_name].isSignal]
+        background_names = [
+            bkg_name for bkg_name in self.samples if not self.samples[bkg_name].isSignal
+        ]
 
-        # store some metrics for the various samples. for now only auc
-        summary = {"auc": {sig: {} for sig in sigs_strs}}
+        print("signal_names", signal_names)
+        print("background_names", background_names)
 
-        if not hasattr(self, "rocs"):
-            self.rocs = {}
-        self.rocs = {sig: {} for sig in sigs_strs}
+        event_filters = {name: self.dval.get_label() == i for i, name in enumerate(self.classes)}
 
-        if discs is None:
-            for sig in sigs_strs:
-                for bg in bg_strs:
-                    disc = f"bbtt{sig}vs{bg}"
+        time_start = time.time()
 
-                    bg_truth = np.isin(self.dval.get_label(), bg_strs[bg])
-                    sig_truth = self.dval.get_label() == sigs_strs[sig]
-                    weights = self.dval.get_weight()
+        preds_dict = {}
+        for class_name in self.classes:
+            events = {}
+            for i, pred_class_name in enumerate(self.classes):
+                events[pred_class_name] = y_pred[event_filters[class_name], i]
+            events["finalWeight"] = self.dval.get_weight()[event_filters[class_name]]
+            events = pd.DataFrame(events)
 
-                    truth = np.zeros_like(bg_truth)
-                    truth[sig_truth] = 1
+            preds_dict[class_name] = LoadedSample(sample=self.samples[class_name], events=events)
 
-                    sig_score = y_pred[:, sigs_strs[sig]]
-                    bg_scores = np.sum([y_pred[:, b] for b in bg_strs[bg]], axis=0)
-                    disc_score = np.divide(
-                        sig_score,
-                        sig_score + bg_scores,
-                        out=np.zeros_like(sig_score),
-                        where=(sig_score + bg_scores != 0),
-                    )
+        time_end = time.time()
+        print(
+            f"Time taken to convert predictions to LoadedSamples: {time_end - time_start} seconds"
+        )
 
-                    (savedir / "scores").mkdir(parents=True, exist_ok=True)
-                    (savedir / "outputs").mkdir(parents=True, exist_ok=True)
+        rocAnalyzer = ROCAnalyzer(
+            years=self.years,
+            signals={sig: preds_dict[sig] for sig in signal_names},
+            backgrounds={bkg: preds_dict[bkg] for bkg in background_names},
+        )
 
-                    plotting.plot_hist(
-                        [disc_score[sig_truth]]
-                        + [disc_score[self.dval.get_label() == b] for b in bg_strs[bg]],
-                        [sig] + [self.samples[self.classes[b]].label for b in bg_strs[bg]],
-                        nbins=100,
-                        weights=[weights[sig_truth]]
-                        + [weights[self.dval.get_label() == b] for b in bg_strs[bg]],
-                        xlabel=f"BDT {disc} score",
-                        lumi=f"{np.sum([hh_vars.LUMI[year] for year in self.years]) / 1000:.1f}",
-                        density=True,
-                        year="-".join(self.years) if len(self.years) < 4 else "2022-2023",
-                        saveas=savedir / f"scores/bdt_scores_{sig}_{bg}.pdf",
-                    )
+        #########################################################
+        #########################################################
+        # This part configures what background outputs to put in the taggers
 
-                    # exclude events that are not signal or background
-                    mask = bg_truth | sig_truth
-                    disc_score = disc_score[mask]
-                    truth = truth[mask]
-                    weights_all = weights.copy()
-                    weights = weights[mask]
-                    fpr, tpr, thresholds = roc_curve(truth, disc_score, sample_weight=weights)
-                    roc_auc = auc(fpr, tpr)
+        bkg_tagger_groups = (
+            [[bkg] for bkg in background_names if "ttbar" not in bkg]
+            + [["ttbarhad", "ttbarll", "ttbarsl"]]
+            + [["qcd", "dyjets"]]
+            + [background_names]
+        )
 
-                    summary["auc"][sig][bg] = roc_auc
+        #########################################################
+        #########################################################
 
-                    self.rocs[sig][bg] = {
-                        "fpr": fpr,
-                        "tpr": tpr,
-                        "thresholds": thresholds,
-                        "label": disc,
-                        "auc": roc_auc,
-                    }
-
-                # Plot ROC curve
-                (savedir / "rocs").mkdir(parents=True, exist_ok=True)
-                plotting.multiROCCurve(
-                    {"": {b: self.rocs[sig][b] for b in bg_strs}},
-                    thresholds=[0.5, 0.9, 0.95, 0.995],
-                    show=True,
-                    plot_dir=savedir / "rocs",
-                    lumi=f"{np.sum([hh_vars.LUMI[year] for year in self.years]) / 1000:.1f}",
-                    year="-".join(self.years) if (self.years == hh_vars.years) else "2022-2023",
-                    name=f"roc_{sig}",
+        for sig_tagger in signal_names:
+            for bkg_taggers in bkg_tagger_groups:
+                rocAnalyzer.process_discriminant(
+                    signal_name=sig_tagger,
+                    background_names=background_names,
+                    signal_tagger=sig_tagger,
+                    background_taggers=bkg_taggers,
                 )
 
-            # Plot BDT output score
+        rocAnalyzer.compute_rocs()
+
+        print(rocAnalyzer.discriminants.keys())
+        print(rocAnalyzer.discriminants["bbtthhvsQCD"].roc.fpr)
+        print(rocAnalyzer.discriminants["bbtthhvsQCD"].roc.tpr)
+
+        discs_by_sig = {
+            sig: [disc for disc in rocAnalyzer.discriminants.values() if disc.signal_name == sig]
+            for sig in signal_names
+        }
+
+        summary = {"auc": {}}
+
+        for sig, discs in discs_by_sig.items():
+            disc_names = [disc.name for disc in discs]
+            print("Plotting ROCs for", disc_names)
+            print(rocAnalyzer.discriminants[disc_names[0]])
+            rocAnalyzer.plot_rocs(title=f"BDT {sig}", disc_names=disc_names, plot_dir=savedir)
+
+            for disc in discs:
+                rocAnalyzer.plot_disc_scores(
+                    disc.name, [[bkg] for bkg in background_names], savedir
+                )
+
+            disc_bkgall = [disc for disc in discs if set(background_names) == set(disc.bkg_names)]
+            if len(disc_bkgall) == 0:
+                print(f"No discriminant found for {sig} with background {background_names}")
+                continue
+            summary["auc"][sig] = disc_bkgall[0].roc.auc
+
+            # Plot BDT output score distributions
+            weights_all = self.dval.get_weight()
             for i, sample in enumerate(self.classes):
                 plotting.plot_hist(
                     [y_pred[self.dval.get_label() == i, _s] for _s in range(len(self.classes))],
@@ -671,8 +589,9 @@ class Trainer:
                     xlabel=f"BDT output score on {sample}",
                     lumi=f"{np.sum([hh_vars.LUMI[year] for year in self.years]) / 1000:.1f}",
                     density=True,
-                    year="-".join(self.years) if (self.years == hh_vars.years) else "2022-2023",
-                    saveas=savedir / f"outputs/bdt_outputs_{sample}.pdf",
+                    year="-".join(self.years) if (self.years != hh_vars.years) else "2022-2023",
+                    plot_dir=savedir / "outputs",
+                    name=sample,
                 )
 
         return summary
@@ -900,13 +819,6 @@ if __name__ == "__main__":
         help="Only compute importance of features",
     )
 
-    parser.add_argument(
-        "--test-loading",
-        action="store_true",
-        default=False,
-        help="Test the loading of data",
-    )
-
     # Add mutually exclusive group for train/load
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--train", action="store_true", help="Train a new model")
@@ -917,22 +829,6 @@ if __name__ == "__main__":
     if args.study_rescaling:
         # TODO check adn print a note that other arguments are ignored if specified
         study_rescaling(importance_only=args.importance_only)
-        exit()
-
-    if args.test_loading:
-        print("\n=== Testing Data Loading ===")
-
-        analyser = Trainer(years=["2022"], sample_names=["bbtt"], modelname="test")
-        analyser.test_mode = True
-        analyser.load_data(force_reload=True)
-        print(f"Loaded {len(analyser.events_dict['2022']['bbtthh'].events)} events")
-        del analyser
-
-        analyser = Trainer(years=["2022"], sample_names=["bbtt"], modelname="test")
-        analyser.test_mode = True
-        analyser.load_data_old(force_reload=True)
-        print(f"Loaded {len(analyser.events_dict['2022']['bbtthh'].events)} events")
-
         exit()
 
     if args.eval_bdt_preds:
