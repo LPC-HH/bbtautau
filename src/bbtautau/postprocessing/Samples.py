@@ -16,7 +16,7 @@ CHANNELS = {
         txbb_cut=0.8979591836734694,
         txtt_cut=0.9918367346938776,
         txtt_BDT_cut=0.996,
-        tt_mass_cut=("PNetmassLegacy", [50, 150]),
+        tt_mass_cut=("ttFatJetPNetmassLegacy", [50, 150]),
     ),
     "hm": Channel(
         key="hm",
@@ -29,7 +29,7 @@ CHANNELS = {
         txbb_cut=0.8204081632653062,
         txtt_cut=0.9959183673469387,
         txtt_BDT_cut=0.8,
-        tt_mass_cut=("ParTmassResApplied", [70, 210]),
+        tt_mass_cut=("ttFatJetParTmassResApplied", [70, 210]),
     ),
     "he": Channel(
         key="he",
@@ -42,7 +42,7 @@ CHANNELS = {
         txbb_cut=0.8979591836734694,
         txtt_cut=0.9959183673469387,
         txtt_BDT_cut=0.9918,
-        tt_mass_cut=("ParTmassResApplied", [70, 210]),
+        tt_mass_cut=("ttFatJetParTmassResApplied", [70, 210]),
     ),
 }
 

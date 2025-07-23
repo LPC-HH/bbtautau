@@ -48,6 +48,7 @@ from bbtautau.postprocessing.Samples import (
     single_h_keys,
     ttbar_keys,
 )
+from bbtautau.userConfig import SHAPE_VAR
 
 try:
     rl.util.install_roofit_helpers()
@@ -145,7 +146,7 @@ args = parser.parse_args()
 CMS_PARAMS_LABEL = "CMS_bbtautau_boosted"
 MCB_LABEL = "MCBlinded"
 qcd_data_key = "qcd_datadriven"
-blind_window = [110, 140]
+blind_window = SHAPE_VAR["blind_window"]
 
 # if args.nTF is None:
 #     if args.regions == "all":
