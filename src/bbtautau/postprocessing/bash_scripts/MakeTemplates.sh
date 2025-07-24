@@ -15,14 +15,16 @@
 
 years=("2022" "2022EE" "2023" "2023BPix")
 channels=("hh" "he" "hm")
+bmin=1
 
-MAIN_DIR="../../.."
+MAIN_DIR="/home/users/lumori/bbtautau"
+SCRIPT_DIR="${MAIN_DIR}/src/bbtautau/postprocessing"
 data_dir_2022="/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr17bbpresel_v12_private_signal"
 data_dir_otheryears="/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr24Fix_v12_private_signal"
 TAG=""
 USE_BDT=0
 
-options=$(getopt -o "" --long "year:,tag:,channel:,use_bdt" -- "$@")
+options=$(getopt -o "" --long "year:,tag:,channel:,use_bdt,bmin:" -- "$@")
 eval set -- "$options"
 
 while true; do
@@ -34,6 +36,10 @@ while true; do
         --tag)
             shift
             TAG=$1
+            ;;
+        --bmin)
+            shift
+            bmin=$1
             ;;
         --channel)
             shift
@@ -81,9 +87,9 @@ do
         echo "    Templates for $channel"
         # Add --use_bdt if enabled
         if [[ $USE_BDT -eq 1 ]]; then
-            python -u postprocessing.py --year $year --channel $channel --data-dir $data_dir --plot-dir "${MAIN_DIR}/plots/Templates/$TAG" --template-dir "templates/$TAG" --templates --use_bdt
+            python -u ${SCRIPT_DIR}/postprocessing.py --year $year --channel $channel --data-dir $data_dir --plot-dir "${MAIN_DIR}/plots/Templates/$TAG" --template-dir "${MAIN_DIR}/src/bbtautau/postprocessing/templates/$TAG" --templates --use_bdt --model 10July25_leptons --sensitivity-dir "${MAIN_DIR}/plots/SensitivityStudy/2025-07-24/" --bmin $bmin
         else
-            python -u postprocessing.py --year $year --channel $channel --data-dir $data_dir --plot-dir "${MAIN_DIR}/plots/Templates/$TAG" --template-dir "templates/$TAG" --templates
+            python -u ${SCRIPT_DIR}/postprocessing.py --year $year --channel $channel --data-dir $data_dir --plot-dir "${MAIN_DIR}/plots/Templates/$TAG" --template-dir "${MAIN_DIR}/src/bbtautau/postprocessing/templates/$TAG" --sensitivity-dir "${MAIN_DIR}/plots/SensitivityStudy/2025-07-24/" --templates --bmin $bmin
         fi
     done
 done

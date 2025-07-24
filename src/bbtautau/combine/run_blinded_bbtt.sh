@@ -201,7 +201,7 @@ done
 setparamsblinded=""
 freezeparamsblinded=""
 for channel in "${CHANNELS[@]}"; do
-    for bin in {5..7}
+    for bin in {5..8}
     do
         # would need to use regex here for multiple fail regions
         setparamsblinded+="${CMS_PARAMS_LABEL}_tf_dataResidual_${channel}Bin${bin}=0,"
@@ -316,7 +316,7 @@ if [ $dfit = 1 ]; then
     -n ${channellabel}Blinded --ignoreCovWarning -v $verbose 2>&1 | tee $outsdir/${channellabel}FitDiagnostics.txt
     # --saveShapes --saveNormalizations --saveWithUncertainties --saveOverallShapes \
 
-    python $CMSSW_BASE/src/HiggsAnalysis/CombinedLimit/test/diffNuisances.py fitDiagnosticsBlinded.root -g nuisance_pulls.root --all --regex='^(?!.*mcstat)'  --vtol=0.3 --stol=0.1 --vtol2=2.0 --stol2=0.5
+    python3 $CMSSW_BASE/src/HiggsAnalysis/CombinedLimit/test/diffNuisances.py fitDiagnosticsBlinded.root -g nuisance_pulls.root --all --regex='^(?!.*mcstat)'  --vtol=0.3 --stol=0.1 --vtol2=2.0 --stol2=0.5
 
     echo "Fit Shapes"
     PostFitShapesFromWorkspace --dataset "$dataset" -w ${wsm}.root --output ${channellabel}FitShapes.root \

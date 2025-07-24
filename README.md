@@ -141,8 +141,19 @@ python boostedhh/condor/check_jobs.py --analysis bbtautau --tag 25Apr24_v12_priv
 
 ### Trigger study
 
-@Ludo - add instructions here.
+Trigger efficiency studies can be performed using the `src/bbtautau/postprocessing/TriggerStudy.py` script. The main execution logic is within the `if __name__ == "__main__"` block, where you can configure the years and signal samples to process.
 
+The script will:
+- Load the specified signal samples.
+- Define trigger sets and tagger configurations.
+- Calculate and plot trigger efficiencies for different channels (`hh`, `hm`, `he`).
+- Generate N-1 efficiency tables to study the impact of individual triggers.
+
+To run the study, configure the desired `years` and `SIGNALS` inside the script and then execute it:
+```bash
+python src/bbtautau/postprocessing/TriggerStudy.py
+```
+Output plots and tables will be saved in the `plots/TriggerStudy/` directory.
 
 
 ### Sensitivity study
@@ -266,10 +277,10 @@ pip3 install -e .
 
 ### Create datacards
 
-After activating the above CMSSW environment (go inside the CMSSW folder and do `cmsenv`), you can use the CreateDatacard.py script as so:
+After activating the above CMSSW environment (go inside the CMSSW folder and do `cmsenv`), you can use the CreateDatacard.py script as so (from your src/bbtautau folder):
 
 ```bash
-python3 postprocessing/CreateDatacard.py --sigs bbtt --templates-dir templates/25Apr25LudoCuts --model-name 25Apr25PassFix
+python3 postprocessing/CreateDatacard.py --sigs bbtt --templates-dir postprocessing/templates/25Apr25LudoCuts --model-name 25Apr25PassFix
 ```
 
 By default, this will create datacards for all three channels summed across years in the `cards/model-name` directory.

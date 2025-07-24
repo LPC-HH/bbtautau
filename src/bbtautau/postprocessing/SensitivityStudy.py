@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import logging
 import warnings
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from postprocessing import (
     bb_filters,
     bbtautau_assignment,
     compute_bdt_preds,
+    delete_columns,
     derive_variables,
     get_columns,
     leptons_assignment,
@@ -126,7 +128,7 @@ class Analyser:
 
         self.model_dir = MODEL_DIR
 
-    def load_data(self):
+    def load_data(self, tt_pres=False):
 
         # This could be improved by adding channel-by-channel granularity
         # Now filter just requires that any trigger in that year fires
@@ -138,10 +140,9 @@ class Analyser:
             #     # PNetXbb_cut=0.8 if not self.test_mode else None,
             # )  # = {"data": [(...)], "signal": [(...)], ...}
 
-            if self.test_mode:
-                filters_dict = base_filter(self.test_mode)
-            else:
-                filters_dict = bb_filters(num_fatjets=3, bb_cut=0.3)
+            filters_dict = base_filter(self.test_mode)
+            filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3)
+            if tt_pres:
                 filters_dict = tt_filters(self.channel, filters_dict, num_fatjets=3, tt_cut=0.3)
 
             columns = get_columns(year, triggers_in_channel=self.channel)
@@ -159,6 +160,7 @@ class Analyser:
             )
 
             apply_triggers(self.events_dict[year], year, self.channel)
+            delete_columns(self.events_dict[year], year, channels=[self.channel])
 
             derive_variables(
                 self.events_dict[year], CHANNELS["hm"]
@@ -385,83 +387,89 @@ class Analyser:
 
     def compute_sig_bkg_abcd(self, years, txbbcut, txttcut, mbb1, mbb2, mtt1, mtt2):
         # pass/fail from taggers
-        sig_pass = 0  # resonant region pass
-        sig_fail = 0  # resonant region fail
-        bg_pass = 0  # sidebands pass
-        bg_fail = 0  # sidebands fail
+        sig_pass = 0  # resonant region pass, signal
+        bg_pass_sb = 0  # sideband region pass, data
+        bg_fail_res = 0  # resonant region fail, data
+        bg_fail_sb = 0  # sideband region fail, data
         for year in years:
-            for key in [self.sig_key] + self.channel.data_samples:
-                if key == self.sig_key:
-                    cut = (
-                        (self.txbbs[year][key] > txbbcut)
-                        & (self.txtts[year][key] > txttcut)
-                        & (self.massbb[year][key] > mbb1)
-                        & (self.massbb[year][key] < mbb2)
-                        & (self.ptbb[year][key] > 250)
-                        & (self.pttt[year][key] > 200)
-                    )
-                    if not self.use_bdt:
-                        cut &= (self.masstt[year][key] > mtt1) & (self.masstt[year][key] < mtt2)
 
-                    sig_pass += np.sum(self.events_dict[year][key].events["finalWeight"][cut])
-                else:  # compute background
-                    cut_bg_pass = (
-                        (self.txbbs[year][key] > txbbcut)
-                        & (self.txtts[year][key] > txttcut)
-                        & (self.ptbb[year][key] > 250)
-                        & (self.pttt[year][key] > 200)
-                    )
-                    if not self.use_bdt:
-                        cut_bg_pass &= (self.masstt[year][key] > mtt1) & (
-                            self.masstt[year][key] < mtt2
-                        )
+            cut_sig_pass = (
+                (self.txbbs[year][self.sig_key] > txbbcut)
+                & (self.txtts[year][self.sig_key] > txttcut)
+                & (self.massbb[year][self.sig_key] > mbb1)
+                & (self.massbb[year][self.sig_key] < mbb2)
+                & (self.ptbb[year][self.sig_key] > 250)
+                & (self.pttt[year][self.sig_key] > 200)
+            )
+            if not self.use_bdt:
+                cut_sig_pass &= (self.masstt[year][self.sig_key] > mtt1) & (
+                    self.masstt[year][self.sig_key] < mtt2
+                )
 
-                    msb1 = (self.massbb[year][key] > SHAPE_VAR["range"][0]) & (
-                        self.massbb[year][key] < mbb1
-                    )
-                    msb2 = (self.massbb[year][key] > mbb2) & (
-                        self.massbb[year][key] < SHAPE_VAR["range"][1]
-                    )
-                    bg_pass += np.sum(
-                        self.events_dict[year][key].events["finalWeight"][cut_bg_pass & msb1]
-                    )
-                    bg_pass += np.sum(
-                        self.events_dict[year][key].events["finalWeight"][cut_bg_pass & msb2]
-                    )
-                    cut_bg_fail = (
-                        ((self.txbbs[year][key] < txbbcut) | (self.txtts[year][key] < txttcut))
-                        & (self.ptbb[year][key] > 250)
-                        & (self.pttt[year][key] > 200)
-                    )
-                    if not self.use_bdt:
-                        cut_bg_fail &= (self.masstt[year][key] > mtt1) & (
-                            self.masstt[year][key] < mtt2
-                        )
+            sig_pass += np.sum(
+                self.events_dict[year][self.sig_key].events["finalWeight"][cut_sig_pass]
+            )
 
-                    bg_fail += np.sum(
-                        self.events_dict[year][key].events["finalWeight"][cut_bg_fail & msb1]
+            for key in self.channel.data_samples:
+                cut_bg_pass_sb = (
+                    (self.txbbs[year][key] > txbbcut)
+                    & (self.txtts[year][key] > txttcut)
+                    & (self.ptbb[year][key] > 250)
+                    & (self.pttt[year][key] > 200)
+                )
+                if not self.use_bdt:
+                    cut_bg_pass_sb &= (self.masstt[year][key] > mtt1) & (
+                        self.masstt[year][key] < mtt2
                     )
-                    bg_fail += np.sum(
-                        self.events_dict[year][key].events["finalWeight"][cut_bg_fail & msb2]
-                    )
-                    cut_sig_fail = (
-                        ((self.txbbs[year][key] < txbbcut) | (self.txtts[year][key] < txttcut))
-                        & (self.massbb[year][key] > mbb1)
-                        & (self.massbb[year][key] < mbb2)
-                        & (self.ptbb[year][key] > 250)
-                        & (self.pttt[year][key] > 200)
-                    )
-                    if not self.use_bdt:
-                        cut_sig_fail &= (self.masstt[year][key] > mtt1) & (
-                            self.masstt[year][key] < mtt2
-                        )
 
-                    sig_fail += np.sum(
-                        self.events_dict[year][key].events["finalWeight"][cut_sig_fail]
+                msb1 = (self.massbb[year][key] > SHAPE_VAR["range"][0]) & (
+                    self.massbb[year][key] < mbb1
+                )
+                msb2 = (self.massbb[year][key] > mbb2) & (
+                    self.massbb[year][key] < SHAPE_VAR["range"][1]
+                )
+                bg_pass_sb += np.sum(
+                    self.events_dict[year][key].events["finalWeight"][cut_bg_pass_sb & msb1]
+                )
+                bg_pass_sb += np.sum(
+                    self.events_dict[year][key].events["finalWeight"][cut_bg_pass_sb & msb2]
+                )
+                cut_bg_fail_sb = (
+                    ((self.txbbs[year][key] < txbbcut) | (self.txtts[year][key] < txttcut))
+                    & (self.ptbb[year][key] > 250)
+                    & (self.pttt[year][key] > 200)
+                )
+                if not self.use_bdt:
+                    cut_bg_fail_sb &= (self.masstt[year][key] > mtt1) & (
+                        self.masstt[year][key] < mtt2
                     )
+
+                bg_fail_sb += np.sum(
+                    self.events_dict[year][key].events["finalWeight"][cut_bg_fail_sb & msb1]
+                )
+                bg_fail_sb += np.sum(
+                    self.events_dict[year][key].events["finalWeight"][cut_bg_fail_sb & msb2]
+                )
+                cut_bg_fail_res = (
+                    ((self.txbbs[year][key] < txbbcut) | (self.txtts[year][key] < txttcut))
+                    & (self.massbb[year][key] > mbb1)
+                    & (self.massbb[year][key] < mbb2)
+                    & (self.ptbb[year][key] > 250)
+                    & (self.pttt[year][key] > 200)
+                )
+                if not self.use_bdt:
+                    cut_bg_fail_res &= (self.masstt[year][key] > mtt1) & (
+                        self.masstt[year][key] < mtt2
+                    )
+
+                bg_fail_res += np.sum(
+                    self.events_dict[year][key].events["finalWeight"][cut_bg_fail_res]
+                )
+
+        del cut_sig_pass, cut_bg_pass_sb, cut_bg_fail_sb, cut_bg_fail_res, msb1, msb2
 
         # signal, B, C, D, TF = C/D
-        return sig_pass, bg_pass, sig_fail, bg_fail, sig_fail / bg_fail
+        return sig_pass, bg_pass_sb, bg_fail_res, bg_fail_sb, bg_fail_res / bg_fail_sb
 
     def grid_search_opt(
         self,
@@ -470,7 +478,7 @@ class Analyser:
         gridlims,
         B_min_vals,
         foms,
-        normalize_sig=True,
+        normalize_sig=False,
     ) -> Optimum:
 
         mbb1, mbb2 = SHAPE_VAR["blind_window"]
@@ -487,7 +495,6 @@ class Analyser:
 
         sig_bkg_f = self.compute_sig_bkg_abcd
 
-        # scalar function, must be vectorized
         def sig_bg(bbcut, ttcut):
             return sig_bkg_f(
                 years=years,
@@ -504,11 +511,11 @@ class Analyser:
         )
 
         # results is a list of (sig, bkg, tf) tuples
-        sigs, bgs, sig_fails, bg_fails, tfs = zip(*results)
+        sigs, bgs_sb, bg_fails_res, bg_fails_sb, tfs = zip(*results)
         sigs = np.array(sigs).reshape(BBcut.shape)
-        bgs = np.array(bgs).reshape(BBcut.shape)
-        sig_fails = np.array(sig_fails).reshape(BBcut.shape)
-        bg_fails = np.array(bg_fails).reshape(BBcut.shape)
+        bgs_sb = np.array(bgs_sb).reshape(BBcut.shape)
+        bg_fails_res = np.array(bg_fails_res).reshape(BBcut.shape)
+        bg_fails_sb = np.array(bg_fails_sb).reshape(BBcut.shape)
         tfs = np.array(tfs).reshape(BBcut.shape)
 
         if normalize_sig:
@@ -519,7 +526,7 @@ class Analyser:
             )
             sigs = sigs / tot_sig_weight
 
-        bgs_scaled = bgs * tfs
+        bgs_scaled = bgs_sb * tfs
 
         results = {}
         for fom in foms:
@@ -528,8 +535,8 @@ class Analyser:
 
                 results[fom.name][f"Bmin={B_min}"] = {}
 
-                sel_B_min = bgs_scaled >= B_min
-                limits = fom.fom_func(bgs, sigs, tfs)
+                sel_B_min = bgs_sb >= B_min
+                limits = fom.fom_func(bgs_sb, sigs, tfs)
                 if not np.any(sel_B_min):
                     print(f"Warning: No points satisfy B_min>{B_min} for FOM={fom.name}. Skipping.")
                     results[fom.name][f"Bmin={B_min}"] = Optimum(
@@ -556,9 +563,9 @@ class Analyser:
                 results[fom.name][f"Bmin={B_min}"] = Optimum(
                     limit=limit_opt,
                     signal_yield=sigs[idx_opt],
-                    bkg_yield=bgs[idx_opt],
-                    hmass_fail=sig_fails[idx_opt],
-                    sideband_fail=bg_fails[idx_opt],
+                    bkg_yield=bgs_sb[idx_opt],
+                    hmass_fail=bg_fails_res[idx_opt],
+                    sideband_fail=bg_fails_sb[idx_opt],
                     transfer_factor=tfs[idx_opt],
                     cuts=(bbcut_opt, ttcut_opt),
                     BBcut=BBcut,
@@ -766,10 +773,10 @@ class Analyser:
 
         for i, fom in enumerate(foms):
             fom_name = fom.name
-            if fom_name in results["Bmin=1"]:
+            if fom_name in results:
                 ax.plot(
                     b_min_vals,
-                    [results[f"Bmin={B_min}"][fom_name].limit for B_min in b_min_vals],
+                    [results[fom_name][f"Bmin={B_min}"].limit for B_min in b_min_vals],
                     color=colors[i % len(colors)],
                     marker=markers[i % len(markers)],
                     linewidth=2,
@@ -823,8 +830,8 @@ class Analyser:
             row = {"B_min": B_min}
             for fom in foms:
                 fom_name = fom.name
-                if fom_name in results[f"Bmin={B_min}"]:
-                    optimum = results[f"Bmin={B_min}"][fom_name]
+                if fom_name in results:
+                    optimum = results[fom_name][f"Bmin={B_min}"]
                     limit = fom.fom_func(
                         optimum.bkg_yield, optimum.signal_yield, optimum.transfer_factor
                     )
@@ -1159,6 +1166,7 @@ def analyse_channel(
 ):
 
     print(f"Processing channel: {channel}. Test mode: {test_mode}.")
+
     analyser = Analyser(years, channel, test_mode, use_bdt, modelname, main_plot_dir, at_inference)
 
     analyser.load_data()
@@ -1181,6 +1189,7 @@ def analyse_channel(
         analyser.study_minimization_method(years)
 
     del analyser
+    gc.collect()
 
 
 if __name__ == "__main__":

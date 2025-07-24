@@ -110,7 +110,7 @@ parser.add_argument(
 
 parser.add_argument(
     "--nTF",
-    default=[2],
+    default=[0],
     type=int,
     nargs="*",
     help="order of polynomial for TF.",
