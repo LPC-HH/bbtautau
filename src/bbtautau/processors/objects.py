@@ -48,37 +48,76 @@ def get_ak8jets(fatjets: FatJetArray):
     fatjets["pt_raw"] = (1 - fatjets.rawFactor) * fatjets.pt
     fatjets["mass_raw"] = (1 - fatjets.rawFactor) * fatjets.mass
 
-    fatjets["globalParT_QCD"] = (
-        fatjets.globalParT_QCD0HF + fatjets.globalParT_QCD1HF + fatjets.globalParT_QCD2HF
+    # gloParT 2
+    fatjets["globalParT2_QCD"] = (
+        fatjets.globalParT2_QCD0HF + fatjets.globalParT2_QCD1HF + fatjets.globalParT2_QCD2HF
     )
-    fatjets["globalParT_Top"] = fatjets.globalParT_TopW + fatjets.globalParT_TopbW
+    fatjets["globalParT2_Top"] = fatjets.globalParT2_TopW + fatjets.globalParT2_TopbW
 
     fatjets["particleNetLegacy_XbbvsQCD"] = fatjets.particleNetLegacy_Xbb / (
         fatjets.particleNetLegacy_Xbb + fatjets.particleNetLegacy_QCD
     )
-    fatjets["globalParT_XbbvsQCD"] = fatjets.globalParT_Xbb / (
-        fatjets.globalParT_Xbb + fatjets["globalParT_QCD"]
+    fatjets["globalParT2_XbbvsQCD"] = fatjets.globalParT2_Xbb / (
+        fatjets.globalParT2_Xbb + fatjets["globalParT2_QCD"]
     )
-    fatjets["globalParT_XbbvsQCDTop"] = fatjets.globalParT_Xbb / (
-        fatjets.globalParT_Xbb + fatjets["globalParT_QCD"] + fatjets["globalParT_Top"]
+    fatjets["globalParT2_XbbvsQCDTop"] = fatjets.globalParT2_Xbb / (
+        fatjets.globalParT2_Xbb + fatjets["globalParT2_QCD"] + fatjets["globalParT2_Top"]
     )
 
     for tautau in ["tauhtauh", "tauhtaue", "tauhtaum"]:
-        fatjets[f"globalParT_X{tautau}vsQCD"] = fatjets[f"globalParT_X{tautau}"] / (
-            fatjets[f"globalParT_X{tautau}"] + fatjets["globalParT_QCD"]
+        fatjets[f"globalParT2_X{tautau}vsQCD"] = fatjets[f"globalParT2_X{tautau}"] / (
+            fatjets[f"globalParT2_X{tautau}"] + fatjets["globalParT2_QCD"]
         )
-        fatjets[f"globalParT_X{tautau}vsQCDTop"] = fatjets[f"globalParT_X{tautau}"] / (
-            fatjets[f"globalParT_X{tautau}"] + fatjets["globalParT_QCD"] + fatjets["globalParT_Top"]
+        fatjets[f"globalParT2_X{tautau}vsQCDTop"] = fatjets[f"globalParT2_X{tautau}"] / (
+            fatjets[f"globalParT2_X{tautau}"]
+            + fatjets["globalParT2_QCD"]
+            + fatjets["globalParT2_Top"]
         )
 
-    fatjets["globalParT_massResCorr"] = fatjets.globalParT_massRes
-    fatjets["globalParT_massVisCorr"] = fatjets.globalParT_massVis
-    fatjets["globalParT_massResApplied"] = (
-        fatjets.globalParT_massRes * (1 - fatjets.rawFactor) * fatjets.mass
+    fatjets["globalParT2_massResCorr"] = fatjets.globalParT2_massRes
+    fatjets["globalParT2_massVisCorr"] = fatjets.globalParT2_massVis
+    fatjets["globalParT2_massResApplied"] = (
+        fatjets.globalParT2_massRes * (1 - fatjets.rawFactor) * fatjets.mass
     )
-    fatjets["globalParT_massVisApplied"] = (
-        fatjets.globalParT_massVis * (1 - fatjets.rawFactor) * fatjets.mass
+    fatjets["globalParT2_massVisApplied"] = (
+        fatjets.globalParT2_massVis * (1 - fatjets.rawFactor) * fatjets.mass
     )
+
+    # gloParT 3
+    fatjets["globalParT3_Top"] = (
+        fatjets.globalParT3_TopbWev
+        + fatjets.globalParT3_TopbWmv
+        + fatjets.globalParT3_TopbWq
+        + fatjets.globalParT3_TopbWqq
+        + fatjets.globalParT3_TopbWtauhv
+    )
+
+    fatjets["globalParT3_XbbvsQCD"] = fatjets.globalParT3_Xbb / (
+        fatjets.globalParT3_Xbb + fatjets["globalParT3_QCD"]
+    )
+    fatjets["globalParT3_XbbvsQCDTop"] = fatjets.globalParT3_Xbb / (
+        fatjets.globalParT3_Xbb + fatjets["globalParT3_QCD"] + fatjets["globalParT3_Top"]
+    )
+
+    for tautau in ["tauhtauh", "tauhtaue", "tauhtaum"]:
+        fatjets[f"globalParT3_X{tautau}vsQCD"] = fatjets[f"globalParT3_X{tautau}"] / (
+            fatjets[f"globalParT3_X{tautau}"] + fatjets["globalParT3_QCD"]
+        )
+        fatjets[f"globalParT3_X{tautau}vsQCDTop"] = fatjets[f"globalParT3_X{tautau}"] / (
+            fatjets[f"globalParT3_X{tautau}"]
+            + fatjets["globalParT3_QCD"]
+            + fatjets["globalParT3_Top"]
+        )
+
+    fatjets["globalParT3_massGenericCorr"] = fatjets.globalParT3_massGeneric
+    fatjets["globalParT3_massX2pCorr"] = fatjets.globalParT3_massX2p
+    fatjets["globalParT3_massGenericApplied"] = (
+        fatjets.globalParT3_massGeneric * (1 - fatjets.rawFactor) * fatjets.mass
+    )
+    fatjets["globalParT3_massX2pApplied"] = (
+        fatjets.globalParT3_massX2p * (1 - fatjets.rawFactor) * fatjets.mass
+    )
+
     return fatjets
 
 
