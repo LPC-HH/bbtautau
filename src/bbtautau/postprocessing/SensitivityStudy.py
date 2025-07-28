@@ -239,10 +239,10 @@ class Analyser:
         rocAnalyzer.compute_rocs()
 
         # Plot bb
-        rocAnalyzer.plot_rocs(title="bbFatJet", disc_names=discs_bb, plot_dir=self.plot_dir)
+        rocAnalyzer.plot_rocs(title="bbFatJet", disc_names=discs_bb, plot_dir=self.plot_dir, thresholds=self.xbb_cuts)
 
         # Plot tt
-        rocAnalyzer.plot_rocs(title="ttFatJet", disc_names=discs_tt, plot_dir=self.plot_dir)
+        rocAnalyzer.plot_rocs(title="ttFatJet", disc_names=discs_tt, plot_dir=self.plot_dir, thresholds=self.xtt_cuts)
 
         for disc in discs_all:
             rocAnalyzer.plot_disc_scores(disc, background_names, self.plot_dir)
@@ -662,6 +662,10 @@ class Analyser:
             fom_df = pd.concat(bmin_dfs).set_index("Label").T
             print(f"\nResults for FOM: {fom.name}")
             print(self.channel.label, "\n", fom_df.to_markdown())
+
+            # Save cuts to analyzer for plotting marks in ROC curves
+            self.xtt_cuts = list(fom_df.loc["Cut_Xtt"])
+            self.xbb_cuts = list(fom_df.loc["Cut_Xbb"])
 
             # Save separate CSV file for each FOM
             output_csv = self.plot_dir / f"{'_'.join(years)}_opt_results_{fom.name}.csv"
@@ -1174,8 +1178,6 @@ def analyse_channel(
     if actions is None:
         actions = []
 
-    if "compute_rocs" in actions:
-        analyser.compute_and_plot_rocs(years)
     if "plot_mass" in actions:
         analyser.plot_mass(years)
     if "sensitivity" in actions:
@@ -1187,6 +1189,8 @@ def analyse_channel(
     if "minimization_study" in actions:
         analyser.prepare_sensitivity(years)
         analyser.study_minimization_method(years)
+    if "compute_rocs" in actions:
+        analyser.compute_and_plot_rocs(years)
 
     del analyser
     gc.collect()
