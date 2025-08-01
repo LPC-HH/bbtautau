@@ -11,11 +11,12 @@
 # --tag: Tag for the templates and plots
 # --year: Year to run on - by default runs on all years
 # --use_bdt: Flag to enable use of BDT in template creation
+# --bmin: Minimum background yield value(s) - supports multiple values (e.g., --bmin 1 5 10)
 ####################################################################################################
 
 years=("2022" "2022EE" "2023" "2023BPix")
 channels=("hh" "he" "hm")
-bmin=1
+bmin_values=(1)  # Default to single value, can be overridden with --bmin
 
 MAIN_DIR="/home/users/lumori/bbtautau"
 SCRIPT_DIR="${MAIN_DIR}/src/bbtautau/postprocessing"
@@ -24,43 +25,68 @@ data_dir_otheryears="/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr24Fix_v1
 TAG=""
 USE_BDT=0
 
-options=$(getopt -o "" --long "year:,tag:,channel:,use_bdt,bmin:" -- "$@")
-eval set -- "$options"
+# Function to display help
+show_help() {
+    echo "Usage: $0 --tag TAG [OPTIONS]"
+    echo ""
+    echo "Required arguments:"
+    echo "  --tag TAG          Tag for the templates and plots"
+    echo ""
+    echo "Optional arguments:"
+    echo "  --year YEAR        Year to run on (default: all years)"
+    echo "  --channel CHANNEL  Channel to run on (default: all channels)"
+    echo "  --use_bdt          Enable BDT usage in template creation"
+    echo "  --bmin VALUES      Space-separated list of minimum background yield values"
+    echo "                     Examples: --bmin 1"
+    echo "                              --bmin 1 5 10"
+    echo "                              --bmin 1 2 5 8 10 15 20"
+    echo ""
+    echo "Examples:"
+    echo "  $0 --tag my_analysis --bmin 1 5 10"
+    echo "  $0 --tag my_analysis --year 2022 --channel hh --use_bdt --bmin 1 5 8"
+}
 
-while true; do
+# Parse arguments manually to handle multiple bmin values
+while [[ $# -gt 0 ]]; do
     case "$1" in
         --year)
             shift
             years=($1)
+            shift
             ;;
         --tag)
             shift
             TAG=$1
+            shift
             ;;
         --bmin)
             shift
-            bmin=$1
+            # Parse multiple bmin values separated by spaces
+            bmin_values=()
+            while [[ $# -gt 0 && ! $1 =~ ^-- ]]; do
+                bmin_values+=($1)
+                shift
+            done
             ;;
         --channel)
             shift
             channels=($1)
+            shift
             ;;
         --use_bdt)
             USE_BDT=1
-            ;;
-        --)
             shift
-            break;;
-        \?)
-            echo "Invalid option: -$OPTARG" >&2
-            exit 1
             ;;
-        :)
-            echo "Option -$OPTARG requires an argument." >&2
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            echo "Use --help for usage information"
             exit 1
             ;;
     esac
-    shift
 done
 
 if [[ -z $TAG ]]; then
@@ -68,7 +94,17 @@ if [[ -z $TAG ]]; then
   exit 1
 fi
 
+# Validate that bmin_values is not empty
+if [[ ${#bmin_values[@]} -eq 0 ]]; then
+  echo "No bmin values provided. Using default value of 1"
+  bmin_values=(1)
+fi
+
 echo "TAG: $TAG"
+echo "BMIN VALUES: ${bmin_values[*]}"
+echo "YEARS: ${years[*]}"
+echo "CHANNELS: ${channels[*]}"
+echo "USE_BDT: $USE_BDT"
 
 for year in "${years[@]}"
 do
@@ -84,12 +120,12 @@ do
     echo "Templates for $year"
     for channel in "${channels[@]}"
     do
-        echo "    Templates for $channel"
+        echo "    Templates for $channel with bmin values: ${bmin_values[*]}"
         # Add --use_bdt if enabled
         if [[ $USE_BDT -eq 1 ]]; then
-            python -u ${SCRIPT_DIR}/postprocessing.py --year $year --channel $channel --data-dir $data_dir --plot-dir "${MAIN_DIR}/plots/Templates/$TAG" --template-dir "${MAIN_DIR}/src/bbtautau/postprocessing/templates/$TAG" --templates --use_bdt --model 10July25_leptons --sensitivity-dir "${MAIN_DIR}/plots/SensitivityStudy/2025-07-24/" --bmin $bmin
+            python -u ${SCRIPT_DIR}/postprocessing.py --year $year --channel $channel --data-dir $data_dir --plot-dir "${MAIN_DIR}/plots/Templates/$TAG" --template-dir "${MAIN_DIR}/src/bbtautau/postprocessing/templates/$TAG" --templates --use_bdt --model 29July25_loweta_lowreg --sensitivity-dir "${MAIN_DIR}/plots/SensitivityStudy/2025-07-31/" --bmin "${bmin_values[@]}"
         else
-            python -u ${SCRIPT_DIR}/postprocessing.py --year $year --channel $channel --data-dir $data_dir --plot-dir "${MAIN_DIR}/plots/Templates/$TAG" --template-dir "${MAIN_DIR}/src/bbtautau/postprocessing/templates/$TAG" --sensitivity-dir "${MAIN_DIR}/plots/SensitivityStudy/2025-07-24/" --templates --bmin $bmin
+            python -u ${SCRIPT_DIR}/postprocessing.py --year $year --channel $channel --data-dir $data_dir --plot-dir "${MAIN_DIR}/plots/Templates/$TAG" --template-dir "${MAIN_DIR}/src/bbtautau/postprocessing/templates/$TAG" --sensitivity-dir "${MAIN_DIR}/plots/SensitivityStudy/2025-07-31/" --templates --bmin "${bmin_values[@]}"
         fi
     done
 done

@@ -835,42 +835,62 @@ def createDatacardAlphabet(
 
 
 def main(args):
-    model = rl.Model("HHModel")
+    # Get all analysis subfolders in the templates directory
+    base_templates_dir = Path(args.templates_dir)
+    analysis_dirs = [d for d in base_templates_dir.iterdir() if d.is_dir()]
 
-    for channel in channels:
-        # templates per region per year, templates per region summed across years
-        templates_dict, templates_summed = get_templates(
-            f"{args.templates_dir}/{channel.key}", years, args.sig_separate, args.scale_templates
-        )
+    logging.info(f"Found analysis directories: {[d.name for d in analysis_dirs]}")
 
-        # random template from which to extract shape vars
-        sample_templates: Hist = templates_summed[next(iter(templates_summed.keys()))]
+    # Process each analysis subfolder
+    for analysis_dir in analysis_dirs:
+        analysis_name = analysis_dir.name
+        logging.info(f"Processing analysis: {analysis_name}")
 
-        # [mH(bb)]
-        shape_vars = [
-            ShapeVar(
-                name=axis.name,
-                bins=axis.edges,
-                orders={sr: args.nTF[i] for i, sr in enumerate(signal_regions)},
+        # Create a separate model for each analysis
+        model = rl.Model(f"HHModel_{analysis_name}")
+
+        for channel in channels:
+            # Check if channel directory exists in this analysis
+            channel_path = analysis_dir / channel.key
+            if not channel_path.exists():
+                logging.warning(f"Channel {channel.key} not found in {analysis_name}, skipping")
+                continue
+
+            # templates per region per year, templates per region summed across years
+            templates_dict, templates_summed = get_templates(
+                str(channel_path), years, args.sig_separate, args.scale_templates
             )
-            for _, axis in enumerate(sample_templates.axes[1:])
-        ]
 
-        createDatacardAlphabet(args, model, channel, templates_dict, templates_summed, shape_vars)
+            # random template from which to extract shape vars
+            sample_templates: Hist = templates_summed[next(iter(templates_summed.keys()))]
 
-    ##############################################
-    # Save model
-    ##############################################
+            # [mH(bb)]
+            shape_vars = [
+                ShapeVar(
+                    name=axis.name,
+                    bins=axis.edges,
+                    orders={sr: args.nTF[i] for i, sr in enumerate(signal_regions)},
+                )
+                for _, axis in enumerate(sample_templates.axes[1:])
+            ]
 
-    logging.info("rendering combine model")
-    Path(args.cards_dir).mkdir(parents=True, exist_ok=True)
-    out_dir = (
-        Path(args.cards_dir) / args.model_name if args.model_name is not None else args.cards_dir
-    )
-    model.renderCombine(out_dir)
+            createDatacardAlphabet(
+                args, model, channel, templates_dict, templates_summed, shape_vars
+            )
 
-    with Path(f"{out_dir}/model.pkl").open("wb") as fout:
-        pickle.dump(model, fout, 2)  # use python 2 compatible protocol
+        ##############################################
+        # Save model for this analysis
+        ##############################################
+
+        logging.info(f"rendering combine model for {analysis_name}")
+        base_cards_dir = Path(args.cards_dir)
+        out_dir = base_cards_dir / args.model_name / analysis_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        model.renderCombine(out_dir)
+
+        with Path(f"{out_dir}/model.pkl").open("wb") as fout:
+            pickle.dump(model, fout, 2)  # use python 2 compatible protocol
 
 
 main(args)

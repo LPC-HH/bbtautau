@@ -155,66 +155,91 @@ shape_vars = [
 ]
 
 
+def extract_optimal_cuts_from_csv(
+    sensitivity_dir: Path, channel_name: str, model: str, use_bdt: bool, bmin: int
+):
+    """
+    Extract optimal cuts for a given bmin value from sensitivity study CSV files.
+
+    Args:
+        sensitivity_dir: Path to the sensitivity study's output directory
+        channel_name: Channel name (e.g., 'hh', 'hm', 'he')
+        model: Model name to use for path construction
+        use_bdt: Whether using BDT cuts
+        bmin: Minimum background yield value
+
+    Returns:
+        tuple: (txbb_cut, txtt_cut) - The optimal cuts for the given bmin
+    """
+    # read the first available FOM CSV file
+    csv_dir = Path(sensitivity_dir).joinpath(
+        f"full_presel/{model if use_bdt else 'ParT'}/{channel_name}"
+    )
+
+    # Look for any FOM-specific CSV files
+    csv_files = list(csv_dir.glob("*_opt_results_*.csv"))
+
+    if len(csv_files) == 0:
+        raise ValueError(f"No sensitivity CSV files found in {csv_dir}")
+
+    # Take the first CSV file found and extract FOM name
+    csv_file = sorted(csv_files)[0]  # Sort for reproducible behavior
+    print(f"Reading CSV: {csv_file}")
+
+    # Extract FOM name from filename like "2022_2022EE_opt_results_2sqrtB_S_var.csv"
+    if "_opt_results_" in csv_file.name:
+        fom_name = csv_file.name.split("_opt_results_")[1].replace(".csv", "")
+    else:
+        fom_name = "unknown"
+
+    # Read as simple CSV (no multi-level headers)
+    opt_results = pd.read_csv(csv_file, index_col=0)
+    print(f"Using FOM: {fom_name}")
+    print(f"Available B_min values: {opt_results.columns.tolist()}")
+
+    # Check if the target Bmin column exists
+    target_col = f"Bmin={bmin}"
+    if target_col not in opt_results.columns:
+        raise ValueError(
+            f"B_min={bmin} not found in CSV. Available: {opt_results.columns.tolist()}"
+        )
+
+    # Extract the cuts
+    txbb_cut = float(opt_results.loc["Cut_Xbb", target_col])
+    if use_bdt:
+        txtt_cut = float(opt_results.loc["Cut_Xtt", target_col])
+    else:
+        txtt_cut = float(opt_results.loc["Cut_Xtt", target_col])
+
+    print(f"Extracted cuts for Bmin={bmin}: TXbb={txbb_cut}, Txtt={txtt_cut}")
+
+    return txbb_cut, txtt_cut
+
+
 def main(args: argparse.Namespace):
-    CHANNEL = CHANNELS[args.channel]
+    """
+    Main function that handles multiple bmin values.
+    Data is loaded once, but templates are generated for each bmin value with updated cuts.
+    """
+    # Convert single bmin value to list for backward compatibility
+    if isinstance(args.bmin, int):
+        args.bmin = [args.bmin]
 
-    # update TXbb and Txtt cuts if a sensitivity output csv path is provided
-    if args.sensitivity_dir is not None:
-        CHANNEL = deepcopy(CHANNEL)
+    print(f"Processing bmin values: {args.bmin}")
 
-        # read the first available FOM CSV file
-        csv_dir = Path(args.sensitivity_dir).joinpath(
-            f"full_presel/{args.model if args.use_bdt else 'ParT'}/{args.channel}"
-        )
-
-        # Look for any FOM-specific CSV files
-        csv_files = list(csv_dir.glob("*_opt_results_*.csv"))
-
-        if len(csv_files) == 0:
-            raise ValueError(f"No sensitivity CSV files found in {csv_dir}")
-
-        # Take the first CSV file found and extract FOM name
-        csv_file = sorted(csv_files)[0]  # Sort for reproducible behavior
-        print(f"Reading CSV: {csv_file}")
-
-        # Extract FOM name from filename like "2022_2022EE_opt_results_2sqrtB_S_var.csv"
-        if "_opt_results_" in csv_file.name:
-            fom_name = csv_file.name.split("_opt_results_")[1].replace(".csv", "")
-        else:
-            fom_name = "unknown"
-
-        # Read as simple CSV (no multi-level headers)
-        opt_results = pd.read_csv(csv_file, index_col=0)
-        print(f"Using FOM: {fom_name}")
-        print(f"Available B_min values: {opt_results.columns.tolist()}")
-
-        # Check if the target Bmin column exists
-        target_col = f"Bmin={args.bmin}"
-        if target_col not in opt_results.columns:
-            raise ValueError(
-                f"B_min={args.bmin} not found in CSV. Available: {opt_results.columns.tolist()}"
-            )
-
-        # update the CHANNEL cuts
-        CHANNEL.txbb_cut = float(opt_results.loc["Cut_Xbb", target_col])
-        if args.use_bdt:
-            CHANNEL.txtt_BDT_cut = float(opt_results.loc["Cut_Xtt", target_col])
-        else:
-            CHANNEL.txtt_cut = float(opt_results.loc["Cut_Xtt", target_col])
-
-        print(
-            f"Updated TXbb and Txtt cuts to {CHANNEL.txbb_cut} and {CHANNEL.txtt_cut if not args.use_bdt else CHANNEL.txtt_BDT_cut} for {args.channel}"
-        )
-
+    # Set up data paths and sample configurations
     data_paths = {
         "signal": args.signal_data_dirs,
         "data": args.data_dir,
         "bg": args.bg_data_dirs,
     }
 
+    # Use base channel configuration (without cuts update yet)
+    BASE_CHANNEL = CHANNELS[args.channel]
+
     if args.sigs is None:
         sigs = ["bbtt", "vbfbbtt-k2v0"]
-        args.sigs = {s + CHANNEL.key: SAMPLES[s + CHANNEL.key] for s in sigs}
+        args.sigs = {s + BASE_CHANNEL.key: SAMPLES[s + BASE_CHANNEL.key] for s in sigs}
 
     if args.bgs is None:
         args.bgs = {bkey: b for bkey, b in SAMPLES.items() if b.get_type() == "bg"}
@@ -222,17 +247,17 @@ def main(args: argparse.Namespace):
     if args.templates:
         filters = bb_filters(num_fatjets=3, bb_cut=0.3)
         print("Using bb filters")
-        # filters = tt_filters(CHANNEL, filters, num_fatjets=3, tt_cut=0.3)
+        # filters = tt_filters(BASE_CHANNEL, filters, num_fatjets=3, tt_cut=0.3)
     else:
         filters = None
 
-    print("Loading samples")
+    print("Loading samples (once for all bmin values)")
 
-    # dictionary that will contain all information (from all samples)
+    # Load data once
     events_dict = load_samples(
         args.year,
         data_paths,
-        [CHANNEL],
+        [BASE_CHANNEL],
         load_data=True,
         load_bgs=True,
         filters_dict=filters,
@@ -245,16 +270,16 @@ def main(args: argparse.Namespace):
     print(cutflow.cutflow)
 
     print("\nTriggers")
-    apply_triggers(events_dict, args.year, CHANNEL)
+    apply_triggers(events_dict, args.year, BASE_CHANNEL)
     cutflow.add_cut(events_dict, "Triggers", "finalWeight")
     print(cutflow.cutflow)
 
-    delete_columns(events_dict, args.year, channels=[CHANNEL])
+    delete_columns(events_dict, args.year, channels=[BASE_CHANNEL])
 
-    derive_variables(events_dict, CHANNEL)
+    derive_variables(events_dict, BASE_CHANNEL)
 
     print("\nbbtautau assignment")
-    bbtautau_assignment(events_dict, CHANNEL, agnostic=True)
+    bbtautau_assignment(events_dict, BASE_CHANNEL, agnostic=True)
     leptons_assignment(events_dict, dR_cut=1.5)
 
     if args.use_bdt:
@@ -268,38 +293,82 @@ def main(args: argparse.Namespace):
         time_end = time.time()
         print(f"Time taken to predict BDT: {time_end - time_start} seconds")
 
-    print("\nTemplates")
-    templates = get_templates(
-        events_dict,
-        args.year,
-        args.sigs,
-        args.bgs,
-        CHANNEL,
-        shape_vars,
-        {},  # TODO: systematics
-        # pass_ylim=150,
-        # fail_ylim=1e5,
-        use_bdt=args.use_bdt,
-        sig_scale_dict={
-            f"bbtt{CHANNEL.key}": 300,
-            f"vbfbbtt{CHANNEL.key}": 40,
-            f"vbfbbtt-k2v0{CHANNEL.key}": 40,
-        },  # Added vbf to fix an error that I don't understand
-        template_dir=args.template_dir,
-        plot_dir=args.plot_dir,
-        show=False,
-    )
+    # Now process each bmin value
+    for bmin in args.bmin:
+        print(f"\n{'='*60}")
+        print(f"Processing bmin = {bmin}")
+        print(f"{'='*60}")
 
-    print("\nSaving templates")
-    save_templates(
-        templates,
-        args.template_dir / f"{args.year}_templates.pkl",
-        args.blinded,
-        shape_vars,
-    )
+        # Create a copy of the base channel for this bmin
+        CHANNEL = deepcopy(BASE_CHANNEL)
 
-    del templates
-    gc.collect()
+        # Update cuts if sensitivity directory is provided
+        if args.sensitivity_dir is not None:
+            print(f"Extracting optimal cuts for bmin={bmin}")
+            txbb_cut, txtt_cut = extract_optimal_cuts_from_csv(
+                Path(args.sensitivity_dir), args.channel, args.model, args.use_bdt, bmin
+            )
+
+            # Update the channel cuts
+            CHANNEL.txbb_cut = txbb_cut
+            if args.use_bdt:
+                CHANNEL.txtt_BDT_cut = txtt_cut
+            else:
+                CHANNEL.txtt_cut = txtt_cut
+
+            print(
+                f"Updated TXbb and Txtt cuts to {CHANNEL.txbb_cut} and "
+                f"{CHANNEL.txtt_cut if not args.use_bdt else CHANNEL.txtt_BDT_cut} for {args.channel}"
+            )
+
+        print(f"\nGenerating templates for bmin={bmin}")
+
+        # Create bmin-specific directories
+        template_dir_bmin = (
+            args.template_dir / f"bmin_{bmin}" / args.channel.key if args.template_dir else ""
+        )
+        plot_dir_bmin = args.plot_dir / f"bmin_{bmin}" / args.channel.key if args.plot_dir else ""
+
+        if template_dir_bmin:
+            (template_dir_bmin / "cutflows" / args.year).mkdir(parents=True, exist_ok=True)
+        if plot_dir_bmin:
+            plot_dir_bmin.mkdir(parents=True, exist_ok=True)
+
+        templates = get_templates(
+            events_dict,  # Same data for all bmin values
+            args.year,
+            args.sigs,
+            args.bgs,
+            CHANNEL,  # Updated channel with new cuts
+            shape_vars,
+            {},  # TODO: systematics
+            use_bdt=args.use_bdt,
+            sig_scale_dict={
+                f"bbtt{CHANNEL.key}": 300,
+                f"vbfbbtt{CHANNEL.key}": 40,
+                f"vbfbbtt-k2v0{CHANNEL.key}": 40,
+            },
+            template_dir=template_dir_bmin,
+            plot_dir=plot_dir_bmin,
+            show=False,
+        )
+
+        if args.template_dir:
+            print(f"Saving templates for bmin={bmin}")
+            template_file = template_dir_bmin / f"{args.year}_templates.pkl"
+            save_templates(
+                templates,
+                template_file,
+                args.blinded,
+                shape_vars,
+            )
+
+        del templates
+        gc.collect()
+
+        print(f"Completed processing for bmin={bmin}")
+
+    print(f"\nCompleted processing all bmin values: {args.bmin}")
 
 
 def base_filter(test_mode: bool = False):
@@ -1821,8 +1890,9 @@ def parse_args(parser=None):
 
     parser.add_argument(
         "--bmin",
-        help="Minimum bkg yield for the TXbb/Txtt cuts. Need to be present in the csv file",
-        default=1,
+        help="Minimum bkg yield(s) for the TXbb/Txtt cuts. Can be a single value or a list. Need to be present in the csv file",
+        default=[1],
+        nargs="*",
         type=int,
     )
 
@@ -1857,11 +1927,11 @@ def parse_args(parser=None):
         #     except Exception as e:
         #         print(f"Error saving args: {e}")
 
-    if args.template_dir:
-        args.template_dir = Path(args.template_dir) / args.channel
-        (args.template_dir / "cutflows" / args.year).mkdir(parents=True, exist_ok=True)
-        # with (args.template_dir / "args.json").open("w") as f:
-        #     json.dump(save_args.__dict__, f, indent=4)
+    # if args.template_dir:
+    #     args.template_dir = Path(args.template_dir) / args.channel
+    # (args.template_dir / "cutflows" / args.year).mkdir(parents=True, exist_ok=True)
+    # with (args.template_dir / "args.json").open("w") as f:
+    #     json.dump(save_args.__dict__, f, indent=4)
 
     return args
 
