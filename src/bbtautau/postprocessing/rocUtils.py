@@ -17,7 +17,18 @@ import numpy as np
 from boostedhh import hh_vars
 from boostedhh.utils import PAD_VAL
 from joblib import Parallel, delayed
-from sklearn.metrics import auc, roc_curve
+from sklearn.metrics import (
+    accuracy_score,
+    auc,
+    average_precision_score,
+    balanced_accuracy_score,
+    f1_score,
+    matthews_corrcoef,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    roc_curve,
+)
 from utils import LoadedSample, rename_jetbranch_ak8
 
 from bbtautau.postprocessing.plotting import plotting
@@ -31,6 +42,36 @@ class ROC:
     thresholds: np.ndarray
     label: str
     auc: float
+
+
+@dataclass
+class Metrics:
+    """Container for comprehensive performance metrics."""
+
+    # AUC-based metrics
+    roc_auc: float
+    pr_auc: float
+
+    # Threshold-dependent metrics at optimal point
+    optimal_threshold: float
+    f1_score: float
+    precision: float
+    recall: float
+    accuracy: float
+    balanced_accuracy: float
+    matthews_corr: float
+
+    # Threshold-dependent metrics at 0.5 threshold
+    f1_score_05: float
+    precision_05: float
+    recall_05: float
+    accuracy_05: float
+
+    # Additional info
+    n_signal: int
+    n_background: int
+    signal_weight: float
+    background_weight: float
 
 
 @dataclass
@@ -153,6 +194,80 @@ class Discriminant:
         roc_auc = auc(fpr, tpr)
         self.roc = ROC(fpr, tpr, thresholds, rename_jetbranch_ak8(self.get_name()), roc_auc)
 
+    def compute_metrics(self):
+        """
+        Compute comprehensive performance metrics for the discriminant.
+        """
+        y_true = self.get_binary_labels()
+        y_scores = self.get_discriminant_score()
+        weights = self.get_weights()
+
+        # AUC-based metrics
+        roc_auc = roc_auc_score(y_true, y_scores, sample_weight=weights)
+        pr_auc = average_precision_score(y_true, y_scores, sample_weight=weights)
+
+        # Find optimal threshold using F1-score
+        thresholds = np.linspace(0, 1, 100)
+        f1_scores = []
+        for thresh in thresholds:
+            y_pred = (y_scores >= thresh).astype(int)
+            try:
+                f1 = f1_score(y_true, y_pred, sample_weight=weights, zero_division=0)
+                f1_scores.append(f1)
+            except:
+                f1_scores.append(0.0)
+
+        optimal_threshold = thresholds[np.argmax(f1_scores)]
+        y_pred_optimal = (y_scores >= optimal_threshold).astype(int)
+        y_pred_05 = (y_scores >= 0.5).astype(int)
+
+        # Compute metrics at optimal threshold
+        f1_optimal = f1_score(y_true, y_pred_optimal, sample_weight=weights, zero_division=0)
+        precision_optimal = precision_score(
+            y_true, y_pred_optimal, sample_weight=weights, zero_division=0
+        )
+        recall_optimal = recall_score(
+            y_true, y_pred_optimal, sample_weight=weights, zero_division=0
+        )
+        accuracy_optimal = accuracy_score(y_true, y_pred_optimal, sample_weight=weights)
+        balanced_acc_optimal = balanced_accuracy_score(
+            y_true, y_pred_optimal, sample_weight=weights
+        )
+        matthews_optimal = matthews_corrcoef(y_true, y_pred_optimal, sample_weight=weights)
+
+        # Compute metrics at 0.5 threshold
+        f1_05 = f1_score(y_true, y_pred_05, sample_weight=weights, zero_division=0)
+        precision_05 = precision_score(y_true, y_pred_05, sample_weight=weights, zero_division=0)
+        recall_05 = recall_score(y_true, y_pred_05, sample_weight=weights, zero_division=0)
+        accuracy_05 = accuracy_score(y_true, y_pred_05, sample_weight=weights)
+
+        # Sample statistics
+        signal_mask = y_true == 1
+        n_signal = np.sum(signal_mask)
+        n_background = np.sum(~signal_mask)
+        signal_weight = np.sum(weights[signal_mask])
+        background_weight = np.sum(weights[~signal_mask])
+
+        self.metrics = Metrics(
+            roc_auc=roc_auc,
+            pr_auc=pr_auc,
+            optimal_threshold=optimal_threshold,
+            f1_score=f1_optimal,
+            precision=precision_optimal,
+            recall=recall_optimal,
+            accuracy=accuracy_optimal,
+            balanced_accuracy=balanced_acc_optimal,
+            matthews_corr=matthews_optimal,
+            f1_score_05=f1_05,
+            precision_05=precision_05,
+            recall_05=recall_05,
+            accuracy_05=accuracy_05,
+            n_signal=n_signal,
+            n_background=n_background,
+            signal_weight=signal_weight,
+            background_weight=background_weight,
+        )
+
     def get_discriminant_score(self):
         return self.disc_scores
 
@@ -188,6 +303,35 @@ class Discriminant:
             }
         else:
             return self.roc
+
+    def get_metrics(self, as_dict=False):
+        """Get comprehensive metrics for the discriminant."""
+        if not hasattr(self, "metrics"):
+            print(f"Warning: Metrics not computed for discriminant {self.get_name()}")
+            return None
+
+        if as_dict:
+            return {
+                "roc_auc": self.metrics.roc_auc,
+                "pr_auc": self.metrics.pr_auc,
+                "optimal_threshold": self.metrics.optimal_threshold,
+                "f1_score": self.metrics.f1_score,
+                "precision": self.metrics.precision,
+                "recall": self.metrics.recall,
+                "accuracy": self.metrics.accuracy,
+                "balanced_accuracy": self.metrics.balanced_accuracy,
+                "matthews_corr": self.metrics.matthews_corr,
+                "f1_score_05": self.metrics.f1_score_05,
+                "precision_05": self.metrics.precision_05,
+                "recall_05": self.metrics.recall_05,
+                "accuracy_05": self.metrics.accuracy_05,
+                "n_signal": self.metrics.n_signal,
+                "n_background": self.metrics.n_background,
+                "signal_weight": self.metrics.signal_weight,
+                "background_weight": self.metrics.background_weight,
+            }
+        else:
+            return self.metrics
 
 
 class ROCAnalyzer:
@@ -386,8 +530,10 @@ class ROCAnalyzer:
             print("Start computing ROCs...")
             t0 = time.time()
 
+        # Compute both ROCs and comprehensive metrics
         Parallel(n_jobs=-1, prefer="threads")(
-            delayed(disc.compute_roc)() for disc in self.discriminants.values()
+            delayed(lambda d: (d.compute_roc(), d.compute_metrics()))(disc)
+            for disc in self.discriminants.values()
         )
 
         if verbose:
@@ -395,6 +541,52 @@ class ROCAnalyzer:
             print(
                 f"Computed ROCs for {len(self.discriminants)} discriminants in {t1 - t0:.2f} seconds"
             )
+
+    def get_metrics_summary(self, signal_names=None, save_path=None):
+        """
+        Get a summary of all metrics for all discriminants.
+
+        Args:
+            signal_names: List of signal names to include. If None, include all.
+            save_path: Path to save CSV summary. If None, don't save.
+
+        Returns:
+            dict: Nested dictionary with metrics organized by signal and discriminant
+        """
+        summary = {}
+
+        for disc_name, disc in self.discriminants.items():
+            if not hasattr(disc, "metrics"):
+                continue
+
+            signal_name = disc.get_signal_name()
+            if signal_names is not None and signal_name not in signal_names:
+                continue
+
+            if signal_name not in summary:
+                summary[signal_name] = {}
+
+            summary[signal_name][disc_name] = disc.get_metrics(as_dict=True)
+
+        # Save to CSV if requested
+        if save_path is not None:
+            self._save_metrics_csv(summary, save_path)
+
+        return summary
+
+    def _save_metrics_csv(self, summary, save_path):
+        """Save metrics summary to CSV file."""
+        import pandas as pd
+
+        rows = []
+        for signal_name, disc_data in summary.items():
+            for disc_name, metrics in disc_data.items():
+                row = {"signal": signal_name, "discriminant": disc_name, **metrics}
+                rows.append(row)
+
+        summary_df = pd.DataFrame(rows)
+        summary_df.to_csv(save_path, index=False)
+        print(f"Metrics summary saved to {save_path}")
 
     def plot_disc_scores(
         self,

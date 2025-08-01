@@ -18,7 +18,6 @@ from joblib import Parallel, delayed
 from postprocessing import (
     apply_triggers,
     base_filter,
-    bb_filters,
     bbtautau_assignment,
     compute_bdt_preds,
     delete_columns,
@@ -130,18 +129,11 @@ class Analyser:
 
     def load_data(self, tt_pres=False):
 
-        # This could be improved by adding channel-by-channel granularity
-        # Now filter just requires that any trigger in that year fires
         for year in self.years:
-            # filters_dict = trigger_filter(
-            #     HLTs.hlts_list_by_dtype(year),
-            #     year,
-            #     fast_mode=self.test_mode,
-            #     # PNetXbb_cut=0.8 if not self.test_mode else None,
-            # )  # = {"data": [(...)], "signal": [(...)], ...}
 
             filters_dict = base_filter(self.test_mode)
-            filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3)
+            # filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3)
+
             if tt_pres:
                 filters_dict = tt_filters(self.channel, filters_dict, num_fatjets=3, tt_cut=0.3)
 
@@ -1219,7 +1211,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--modelname",
-        default="10July25_baseline",
+        default="29July25_loweta_lowreg",
         help="Name of the BDT model to use for sensitivity study",
     )
     parser.add_argument(
@@ -1244,7 +1236,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--bdt-dir",
         help="directory where you save your bdt model for inference",
-        default="/home/users/lumori/bbtautau/src/bbtautau//postprocessing/classifier/trained_models/28May25_baseline_all",
+        default="/home/users/lumori/bbtautau/src/bbtautau//postprocessing/classifier/trained_models/29July25_loweta_lowreg",
         type=str,
     )
 

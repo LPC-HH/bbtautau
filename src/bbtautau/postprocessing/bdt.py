@@ -16,7 +16,6 @@ from bdt_config import bdt_config
 from boostedhh import hh_vars, plotting
 from postprocessing import (
     base_filter,
-    bb_filters,
     bbtautau_assignment,
     delete_columns,
     derive_variables,
@@ -106,13 +105,7 @@ class Trainer:
             for year in self.years:
 
                 filters_dict = base_filter(test_mode=False)
-                filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3)
-
-                # filters_dict = trigger_filter(
-                #     HLTs.hlts_list_by_dtype(year),
-                #     year,
-                #     test_mode=False,
-                # )  # = {"data": [(...)], "signal": [(...)], "bg": [(...)]}
+                # filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3) # not needed, events are already filtered by skimmer
 
                 columns = get_columns(year)
 
@@ -171,25 +164,36 @@ class Trainer:
             writer.writeheader()
             writer.writerows(stats)
 
-    def prepare_training_set(self, save_buffer=False, scale_rule="signal", balance="bysample"):
+    def prepare_training_set(
+        self, save_buffer=False, scale_rule="signal", balance="bysample_clip_1to10"
+    ):
         """Prepare features and labels using LabelEncoder for multiclass classification.
 
         Args:
             train (bool, optional): Whether to prepare data for training. If true, will save a buffer file with training and eval files for quicker loading. Defaults to False.
             scale_rule (str, optional): Rule for global scaling weights. Can be 'signal' (average signal event weight = 1), 'signal_1e-1', or 'signal_1e-2'. Defaults to 'signal'.
             balance (str, optional): Rule for balancing samples. Can be
-            - 'bysigbkg' : total signal weight = total background weight
-            - 'bysample_legacy' : tot_sig = tot_ttbar = qcd = dy
             - 'bysample' : each of 8 samples has same weight, 1/4 of signal weight
-            - 'bysample_aggregate_ttbar' : leave TTBar together, hh = he = hm = qcd = dy = ttbar, each has 1/3 of signal weight
-            Defaults to 'bysigbkg'.
-            Total weight = 2*tot_sig
+            - 'bysample_clip_1to10' : like bysample but clip min avg weight to 1/10 of signal avg
+            - 'bysample_clip_1to20' : like bysample but clip min avg weight to 1/20 of signal avg
+            - 'grouped_physics' : balance by physics groups (signal, ttbar, other_bkg) equally
+            - 'sqrt_scaling' : total weight proportional to sqrt(number of events)
+            - 'ens_weighting' : effective number of samples weighting (beta=0.999)
+            Defaults to 'bysample_clip_1to10'.
+            Total weight = 8*tot_sig
         """
 
-        if scale_rule not in ["signal", "signal_1e-1", "signal_1e-2"]:
+        if scale_rule not in ["signal", "signal_3e-1", "signal_3"]:
             raise ValueError(f"Invalid scale rule: {scale_rule}")
 
-        if balance not in ["bysigbkg", "bysample_legacy", "bysample", "bysample_aggregate_ttbar"]:
+        if balance not in [
+            "bysample",
+            "bysample_clip_1to10",
+            "bysample_clip_1to20",
+            "grouped_physics",
+            "sqrt_scaling",
+            "ens_weighting",
+        ]:
             raise ValueError(f"Invalid balance rule: {balance}")
 
         # Initialize lists for features, labels, and weights
@@ -205,8 +209,8 @@ class Trainer:
             self.classes = self.label_encoder.classes_
             return
 
-        # Store weight statistics for each year
-        weight_stats = []
+        # Store weight statistics aggregated across all years
+        weight_stats_by_stage_sample = {}
 
         # Process each sample
         for year in self.years:
@@ -219,20 +223,7 @@ class Trainer:
                     if self.samples[sig_sample].isSignal
                 ]
             ).sum()
-            total_ttbar_weight = np.concatenate(
-                [
-                    np.abs(self.events_dict[year][ttbar_sample].get_var("finalWeight"))
-                    for ttbar_sample in self.samples
-                    if "ttbar" in ttbar_sample
-                ]
-            ).sum()
-            total_bkg_weight = np.concatenate(
-                [
-                    np.abs(self.events_dict[year][bkg_sample].get_var("finalWeight"))
-                    for bkg_sample in self.samples
-                    if self.samples[bkg_sample].isBackground
-                ]
-            ).sum()
+
             len_signal = sum(
                 [
                     len(self.events_dict[year][sig_sample].events)
@@ -240,6 +231,11 @@ class Trainer:
                     if self.samples[sig_sample].isSignal
                 ]
             )
+
+            len_signal_per_channel = len_signal / len(
+                [sample for sample in self.samples if self.samples[sample].isSignal]
+            )
+
             avg_signal_weight = total_signal_weight / len_signal
             feats = [feat for cat in self.train_vars for feat in self.train_vars[cat]]
 
@@ -250,66 +246,158 @@ class Trainer:
                 weights = np.abs(sample.get_var("finalWeight").copy())
                 weights_rescaled = weights.copy()
 
-                self.record_stats(
-                    weight_stats, "Initial", year, sample.sample.label, weights_rescaled
+                # Aggregate for multi-year stats
+                key = ("Initial", sample.sample.label)
+                if key not in weight_stats_by_stage_sample:
+                    weight_stats_by_stage_sample[key] = []
+                weight_stats_by_stage_sample[key].append(weights_rescaled)
+
+                global_scale_factor = {
+                    "signal": 1.0,
+                    "signal_3e-1": 3e-1,
+                    "signal_3": 3,
+                }
+
+                # rescale by average signal weight, so average signal event has weight 1, .3 or 3
+                weights_rescaled = (
+                    weights_rescaled / avg_signal_weight * global_scale_factor[scale_rule]
                 )
 
-                # rescale by average signal weight, so median signal event has weight 1, .1 or .01
-                if scale_rule == "signal":
-                    weights_rescaled = weights_rescaled / avg_signal_weight
-                elif scale_rule == "signal_1e-1":
-                    weights_rescaled = weights_rescaled / avg_signal_weight * 1e-1
-                elif scale_rule == "signal_1e-2":
-                    weights_rescaled = weights_rescaled / avg_signal_weight * 1e-2
+                # now total_signal_weight = len_signal * global_scale_factor[scale_rule]
 
-                # now total_signal_weight = len_signal!
+                # Aggregate for multi-year stats
+                key = ("Global rescaling", sample.sample.label)
+                if key not in weight_stats_by_stage_sample:
+                    weight_stats_by_stage_sample[key] = []
+                weight_stats_by_stage_sample[key].append(weights_rescaled)
 
-                self.record_stats(
-                    weight_stats, "Global rescaling", year, sample.sample.label, weights_rescaled
-                )
-
-                # Rescale each different sample. Scale such that total weight is 2*total_signal_weight to compare similar methods
-                if balance == "bysample_legacy":  # tot_sig = tot_ttbar = qcd = dy
-                    if sample.sample.isSignal:
-                        weights_rescaled = weights_rescaled / 2
-                    elif "ttbar" in sample_name:
-                        weights_rescaled = (
-                            weights_rescaled * total_signal_weight / total_ttbar_weight / 2.0
-                        )
-                    else:  # qcd, dy
-                        weights_rescaled = (
-                            weights_rescaled / np.sum(weights_rescaled) * len_signal / 2.0
-                        )
-                elif (
+                # Rescale each different sample.
+                if (
                     balance == "bysample"
-                ):  # each of 8 samples has same weight, 1/4 of signal weight
+                ):  # each of 8 samples has same weight, equal to signal weight per channel
                     weights_rescaled = (
-                        weights_rescaled / np.sum(weights_rescaled) * len_signal / 4.0
+                        weights_rescaled / np.sum(weights_rescaled) * len_signal_per_channel
                     )
-                elif (
-                    balance == "bysample_aggregate_ttbar"
-                ):  # leave TTBar together, hh = he = hm = qcd = dy = ttbar, each has 1/3 of signal weight
+                elif balance == "bysample_clip_1to10":
+                    n_events = len(sample.events)
+                    # Set the initial target total weight for this sample to be equal to that of the average signal samples
+                    target_total_weight = len_signal_per_channel * global_scale_factor[scale_rule]
+
+                    # Calculate what the average weight of this sample would become
+                    avg_weight_if_scaled = target_total_weight / n_events
+
+                    # Define the clipping threshold: 1/10th of the average signal weight
+                    min_avg_weight = global_scale_factor[scale_rule] / 10.0
+
+                    # If the potential average weight is too small, cap the target total weight
+                    if avg_weight_if_scaled < min_avg_weight:
+                        target_total_weight = min_avg_weight * n_events
+
+                    # Calculate the final scaling factor and apply it
+                    scaling_factor = target_total_weight / np.sum(weights_rescaled)
+                    weights_rescaled = weights_rescaled * scaling_factor
+
+                elif balance == "bysample_clip_1to20":
+                    n_events = len(sample.events)
+                    # Set the initial target total weight for this sample to be equal to other samples
+                    target_total_weight = len_signal_per_channel * global_scale_factor[scale_rule]
+
+                    # Calculate what the average weight of this sample would become
+                    avg_weight_if_scaled = target_total_weight / n_events
+
+                    # Define the clipping threshold: 1/20th of the average signal weight
+                    min_avg_weight = global_scale_factor[scale_rule] / 20.0
+
+                    # If the potential average weight is too small, cap the target total weight
+                    if avg_weight_if_scaled < min_avg_weight:
+                        target_total_weight = min_avg_weight * n_events
+
+                    # Calculate the final scaling factor and apply it
+                    scaling_factor = target_total_weight / np.sum(weights_rescaled)
+                    weights_rescaled = weights_rescaled * scaling_factor
+
+                elif balance == "grouped_physics":
+                    # Group samples by physics process for balanced reweighting
+                    # Calculate group-wise scaling factors
                     if sample.sample.isSignal:
-                        weights_rescaled = (
-                            weights_rescaled / np.sum(weights_rescaled) * len_signal / 3.0
+                        # Each signal sample gets weight equal to len_signal_per_channel
+                        target_total_weight = (
+                            len_signal_per_channel * global_scale_factor[scale_rule]
                         )
                     elif "ttbar" in sample_name:
-                        weights_rescaled = weights_rescaled / total_ttbar_weight / 3.0
-                    else:  # qcd, dy
-                        weights_rescaled = (
-                            weights_rescaled / np.sum(weights_rescaled) * len_signal / 3.0
+                        # TTbar group: calculate total events in ttbar group
+                        ttbar_total_events = sum(
+                            [
+                                len(self.events_dict[year][s].events)
+                                for s in self.samples
+                                if "ttbar" in s and s in self.events_dict[year]
+                            ]
                         )
-                elif balance == "bysigbkg":  # tot_sig = tot_bkg
-                    if sample.sample.isSignal:
-                        pass
+                        ttbar_fraction = len(sample.events) / ttbar_total_events
+                        # TTbar group gets same total weight as one signal sample, distributed proportionally
+                        target_total_weight = (
+                            len_signal_per_channel * global_scale_factor[scale_rule]
+                        ) * ttbar_fraction
                     else:
-                        weights_rescaled = weights_rescaled * (
-                            total_signal_weight / total_bkg_weight
+                        # Other backgrounds group
+                        other_total_events = sum(
+                            [
+                                len(self.events_dict[year][s].events)
+                                for s in self.samples
+                                if not self.samples[s].isSignal
+                                and "ttbar" not in s
+                                and s in self.events_dict[year]
+                            ]
                         )
+                        other_fraction = (
+                            len(sample.events) / other_total_events
+                            if other_total_events > 0
+                            else 1.0
+                        )
+                        # Other bkg group gets same total weight as one signal sample, distributed proportionally
+                        target_total_weight = (
+                            len_signal_per_channel * global_scale_factor[scale_rule]
+                        ) * other_fraction
 
-                self.record_stats(
-                    weight_stats, "Balance rescaling", year, sample.sample.label, weights_rescaled
-                )
+                    scaling_factor = target_total_weight / np.sum(weights_rescaled)
+                    weights_rescaled = weights_rescaled * scaling_factor
+
+                elif balance == "sqrt_scaling":
+                    # Scale total weight proportional to sqrt(number of events)
+                    n_events = len(sample.events)
+                    sqrt_factor = np.sqrt(n_events)
+                    # Normalize: signal samples should get len_signal_per_channel weight
+                    # Other samples get weight proportional to sqrt(events) relative to sqrt(len_signal_per_channel)
+                    target_total_weight = (
+                        sqrt_factor
+                        * np.sqrt(len_signal_per_channel)
+                        * global_scale_factor[scale_rule]
+                    )
+                    scaling_factor = target_total_weight / np.sum(weights_rescaled)
+                    weights_rescaled = weights_rescaled * scaling_factor
+
+                elif balance == "ens_weighting":
+                    # Effective Number of Samples weighting with beta=0.999
+                    n_events = len(sample.events)
+                    beta = 0.999
+                    # Weight inversely proportional to ENS (class-balanced loss approach)
+                    cb_weight = (1 - beta) / (1 - beta**n_events)
+                    # Normalize: signal samples should get len_signal_per_channel weight
+                    # Other samples get weight proportional to their CB weight relative to signal CB weight
+                    signal_cb_weight = (1 - beta) / (1 - beta**len_signal_per_channel)
+                    target_total_weight = (
+                        (cb_weight / signal_cb_weight)
+                        * len_signal_per_channel
+                        * global_scale_factor[scale_rule]
+                    )
+                    scaling_factor = target_total_weight / np.sum(weights_rescaled)
+                    weights_rescaled = weights_rescaled * scaling_factor
+
+                # Aggregate for multi-year stats
+                key = ("Balance rescaling", sample.sample.label)
+                if key not in weight_stats_by_stage_sample:
+                    weight_stats_by_stage_sample[key] = []
+                weight_stats_by_stage_sample[key].append(weights_rescaled)
 
                 X_list.append(X_sample)
                 weights_list.append(weights)
@@ -317,6 +405,23 @@ class Trainer:
 
                 sample_names_labels.extend([sample_name] * len(sample.events))
 
+        # Create aggregated stats across all years
+        weight_stats = []
+        for (stage, sample), weights_for_sample in weight_stats_by_stage_sample.items():
+            # Concatenate weights from all years for this stage and sample
+            all_weights = np.concatenate(weights_for_sample)
+            weight_stats.append(
+                {
+                    "stage": stage,
+                    "sample": sample,
+                    "n_events": len(all_weights),
+                    "total_weight": np.sum(all_weights),
+                    "average_weight": np.mean(all_weights),
+                    "std_weight": np.std(all_weights),
+                }
+            )
+
+        # Save only the aggregated stats
         self.save_stats(weight_stats, self.model_dir / "weight_stats.csv")
 
         # Combine all samples
@@ -347,8 +452,8 @@ class Trainer:
         print(f"X_train.shape: {X_train.shape}, X_val.shape: {X_val.shape}")
 
         # Create DMatrix objects
-        self.dtrain_rescaled = xgb.DMatrix(X_train, label=y_train, weight=weights_train, nthread=-1)
-        self.dval_rescaled = xgb.DMatrix(X_val, label=y_val, weight=weights_val, nthread=-1)
+        self.dtrain_rescaled = xgb.DMatrix(X_train, label=y_train, weight=weights_train, nthread=8)
+        self.dval_rescaled = xgb.DMatrix(X_val, label=y_val, weight=weights_val, nthread=8)
 
         # Split into training and validation sets for all other purposes, e.g. computing rocs
         X_train, X_val, y_train, y_val, weights_train, weights_val = train_test_split(
@@ -361,8 +466,8 @@ class Trainer:
         )
 
         # Create DMatrix objects
-        self.dtrain = xgb.DMatrix(X_train, label=y_train, weight=weights_train, nthread=-1)
-        self.dval = xgb.DMatrix(X_val, label=y_val, weight=weights_val, nthread=-1)
+        self.dtrain = xgb.DMatrix(X_train, label=y_train, weight=weights_train, nthread=8)
+        self.dval = xgb.DMatrix(X_val, label=y_val, weight=weights_val, nthread=8)
 
         # save buffer for quicker loading
         if save_buffer:
@@ -541,6 +646,7 @@ class Trainer:
                     background_taggers=bkg_taggers,
                 )
 
+        # Compute ROCs and comprehensive metrics
         rocAnalyzer.compute_rocs()
 
         discs_by_sig = {
@@ -548,7 +654,8 @@ class Trainer:
             for sig in signal_names
         }
 
-        summary = {"auc": {}}
+        # Initialize results structure
+        eval_results = {"metrics": {}}
 
         for sig, discs in discs_by_sig.items():
             disc_names = [disc.name for disc in discs]
@@ -565,11 +672,20 @@ class Trainer:
                 except Exception as e:
                     print(f"Error computing confusion matrix for {disc.name}: {e}")
 
+            # Find discriminant with all backgrounds for comprehensive evaluation
             disc_bkgall = [disc for disc in discs if set(background_names) == set(disc.bkg_names)]
             if len(disc_bkgall) == 0:
                 print(f"No discriminant found for {sig} with background {background_names}")
                 continue
-            summary["auc"][sig] = disc_bkgall[0].roc.auc
+
+            main_disc = disc_bkgall[0]
+
+            # Store comprehensive metrics
+            if hasattr(main_disc, "metrics"):
+                eval_results["metrics"][sig] = main_disc.get_metrics(as_dict=True)
+            else:
+                print(f"Warning: Metrics not computed for {main_disc.name}")
+                eval_results["metrics"][sig] = {}
 
             # Plot BDT output score distributions
             weights_all = self.dval.get_weight()
@@ -590,11 +706,69 @@ class Trainer:
                     name=sample,
                 )
 
-        return summary
+        # Save comprehensive metrics summary
+        rocAnalyzer.get_metrics_summary(
+            signal_names=signal_names, save_path=savedir / "metrics_summary.csv"
+        )
+
+        # Print summary table
+        self._print_metrics_summary(eval_results["metrics"])
+
+        return eval_results
+
+    def _print_metrics_summary(self, metrics_dict):
+        """Print a formatted summary of metrics for all signals."""
+        from tabulate import tabulate
+
+        if not metrics_dict:
+            print("No metrics to display")
+            return
+
+        # Prepare data for table
+        headers = [
+            "Signal",
+            "ROC AUC",
+            "PR AUC",
+            "F1 (opt)",
+            "Precision (opt)",
+            "Recall (opt)",
+            "F1 (0.5)",
+            "Balanced Acc",
+            "MCC",
+            "Threshold",
+        ]
+
+        rows = []
+        for signal, metrics in metrics_dict.items():
+            if not metrics:  # Skip empty metrics
+                continue
+
+            row = [
+                signal,
+                f"{metrics.get('roc_auc', 0):.3f}",
+                f"{metrics.get('pr_auc', 0):.3f}",
+                f"{metrics.get('f1_score', 0):.3f}",
+                f"{metrics.get('precision', 0):.3f}",
+                f"{metrics.get('recall', 0):.3f}",
+                f"{metrics.get('f1_score_05', 0):.3f}",
+                f"{metrics.get('balanced_accuracy', 0):.3f}",
+                f"{metrics.get('matthews_corr', 0):.3f}",
+                f"{metrics.get('optimal_threshold', 0.5):.3f}",
+            ]
+            rows.append(row)
+
+        print("\n" + "=" * 80)
+        print("COMPREHENSIVE METRICS SUMMARY")
+        print("=" * 80)
+        print(tabulate(rows, headers=headers, tablefmt="grid"))
+        print("\nLegend:")
+        print("- (opt): Metrics at optimal threshold (maximizing F1)")
+        print("- (0.5): Metrics at fixed 0.5 threshold")
+        print("- MCC: Matthews Correlation Coefficient")
+        print("=" * 80)
 
 
 def study_rescaling(output_dir: str = "rescaling_study", importance_only=False) -> dict:
-    # TODO: decide what to do with input_dir
     """Study the impact of different rescaling rules on BDT performance.
     For now give little flexibility, but is not meant to be customized too much.
 
@@ -605,15 +779,22 @@ def study_rescaling(output_dir: str = "rescaling_study", importance_only=False) 
         Dictionary containing study results for each rescaling rule
     """
     # Create output directory
-    trainer = Trainer(years=["2022"], modelname="28May25_baseline", model_dir=output_dir)
+    trainer = Trainer(years=["2022"], modelname="29July25_loweta_lowreg", output_dir=output_dir)
 
     print(f"importance_only: {importance_only}")
     if not importance_only:
         trainer.load_data(force_reload=True)
 
     # Define rescaling rules to study
-    scale_rules = ["signal", "signal_1e-1", "signal_1e-2"]
-    balance_rules = ["bysigbkg", "bysample_legacy", "bysample", "bysample_aggregate_ttbar"]
+    scale_rules = ["signal", "signal_3e-1", "signal_3"]
+    balance_rules = [
+        "bysample",
+        "bysample_clip_1to10",
+        "bysample_clip_1to20",
+        "grouped_physics",
+        "sqrt_scaling",
+        "ens_weighting",
+    ]
 
     results = {}
 
@@ -662,11 +843,11 @@ def study_rescaling(output_dir: str = "rescaling_study", importance_only=False) 
 
 
 def _rescaling_comparison(results: dict, model_dir: Path) -> None:
-    """comparison of different rescaling rules.
+    """Enhanced comparison of different rescaling rules with comprehensive metrics.
 
     Args:
-        results: Dictionary containing study results
-        study_dir: Directory to save comparison plots
+        results: Dictionary containing study results with comprehensive metrics
+        model_dir: Directory to save comparison plots and tables
     """
     # Safety check in debugging
     if not isinstance(model_dir, Path):
@@ -677,29 +858,119 @@ def _rescaling_comparison(results: dict, model_dir: Path) -> None:
     scale_rules = list(results.keys())
     balance_rules = list(results[scale_rules[0]].keys())
 
-    # Create a 2D table for each signal channel
+    # Define metrics to analyze
+    metrics = {
+        "roc_auc": "ROC AUC",
+        "pr_auc": "PR AUC",
+        "f1_score": "F1 (optimal)",
+        "precision": "Precision (optimal)",
+        "recall": "Recall (optimal)",
+        "f1_score_05": "F1 (0.5)",
+        "balanced_accuracy": "Balanced Accuracy",
+        "matthews_corr": "Matthews Corr",
+    }
+
     for sig in ["hh", "he", "hm"]:
-        # Create 2D table data
+        # Create individual metric tables
+        for metric_key, metric_name in metrics.items():
+            table_data = []
+            for scale_rule in scale_rules:
+                row = [scale_rule]
+                for balance_rule in balance_rules:
+                    try:
+                        metric_value = results[scale_rule][balance_rule]["metrics"][sig].get(
+                            metric_key, 0
+                        )
+                        row.append(f"{metric_value:.3f}")
+                    except (KeyError, TypeError):
+                        row.append("-")
+                table_data.append(row)
+
+            # Print and save individual metric table
+            print(f"\n{metric_name} for {sig} channel:")
+            print(tabulate(table_data, headers=["Scale"] + balance_rules, tablefmt="grid"))
+
+            with (model_dir / f"{metric_key}_{sig}.txt").open("w") as f:
+                f.write(f"{metric_name} for {sig} channel:\n")
+                f.write(tabulate(table_data, headers=["Scale"] + balance_rules, tablefmt="grid"))
+
+        # Create comprehensive summary table for this signal
+        summary_data = []
+        for scale_rule in scale_rules:
+            for balance_rule in balance_rules:
+                try:
+                    metrics_dict = results[scale_rule][balance_rule]["metrics"][sig]
+                    summary_data.append(
+                        [
+                            scale_rule,
+                            balance_rule,
+                            f"{metrics_dict.get('roc_auc', 0):.3f}",
+                            f"{metrics_dict.get('pr_auc', 0):.3f}",
+                            f"{metrics_dict.get('f1_score', 0):.3f}",
+                            f"{metrics_dict.get('precision', 0):.3f}",
+                            f"{metrics_dict.get('recall', 0):.3f}",
+                            f"{metrics_dict.get('f1_score_05', 0):.3f}",
+                            f"{metrics_dict.get('balanced_accuracy', 0):.3f}",
+                            f"{metrics_dict.get('matthews_corr', 0):.3f}",
+                            f"{metrics_dict.get('optimal_threshold', 0.5):.3f}",
+                        ]
+                    )
+                except (KeyError, TypeError):
+                    summary_data.append([scale_rule, balance_rule] + ["-"] * 9)
+
+        # Print and save comprehensive summary
+        headers = [
+            "Scale",
+            "Balance",
+            "ROC AUC",
+            "PR AUC",
+            "F1 (opt)",
+            "Prec (opt)",
+            "Rec (opt)",
+            "F1 (0.5)",
+            "Bal Acc",
+            "MCC",
+            "Threshold",
+        ]
+        print(f"\nComprehensive metrics for {sig} channel:")
+        print(tabulate(summary_data, headers=headers, tablefmt="grid"))
+
+        with (model_dir / f"comprehensive_{sig}.txt").open("w") as f:
+            f.write(f"Comprehensive metrics for {sig} channel:\n")
+            f.write(tabulate(summary_data, headers=headers, tablefmt="grid"))
+
+    # Create cross-channel comparison for key metrics
+    _create_cross_channel_comparison(results, scale_rules, balance_rules, model_dir)
+
+
+def _create_cross_channel_comparison(results, scale_rules, balance_rules, model_dir):
+    """Create comparison tables across all channels for key metrics."""
+    key_metrics = ["roc_auc", "f1_score", "precision", "recall"]
+    channels = ["hh", "he", "hm"]
+
+    for metric in key_metrics:
+        print(f"\nCross-channel comparison: {metric.upper()}")
+
+        # Create table with channels as columns
         table_data = []
         for scale_rule in scale_rules:
-            row = [scale_rule]  # First column is scale rule
             for balance_rule in balance_rules:
-                # Get AUC value, or "-" if not available
-                try:
-                    auc_value = results[scale_rule][balance_rule]["auc"][sig]["all"]
-                    row.append(f"{auc_value:.3f}")
-                except KeyError:
-                    row.append("-")
-            table_data.append(row)
+                row = [f"{scale_rule}_{balance_rule}"]
+                for sig in channels:
+                    try:
+                        value = results[scale_rule][balance_rule]["metrics"][sig].get(metric, 0)
+                        row.append(f"{value:.3f}")
+                    except (KeyError, TypeError):
+                        row.append("-")
+                table_data.append(row)
 
-        # Print table with headers
-        print(f"\nAUC scores for {sig} channel:")
-        print(tabulate(table_data, headers=["Scale Rule"] + balance_rules, tablefmt="grid"))
+        headers = ["Method"] + channels
+        print(tabulate(table_data, headers=headers, tablefmt="grid"))
 
-        # Save table to file
-        with (model_dir / f"auc_table_{sig}.txt").open("w") as f:
-            f.write(f"AUC scores for {sig} channel:\n")
-            f.write(tabulate(table_data, headers=["Scale Rule"] + balance_rules, tablefmt="grid"))
+        # Save to file
+        with (model_dir / f"cross_channel_{metric}.txt").open("w") as f:
+            f.write(f"Cross-channel comparison: {metric.upper()}\n")
+            f.write(tabulate(table_data, headers=headers, tablefmt="grid"))
 
 
 def eval_bdt_preds(

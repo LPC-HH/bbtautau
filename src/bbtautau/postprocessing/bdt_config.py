@@ -244,7 +244,7 @@ bdt_config = {
             "num_class": 8,
             # "device": "cuda",
         },
-        "num_rounds": 500,
+        "num_rounds": 300,
         "test_size": 0.2,
         "random_seed": 42,
         "var_classes": ["fatjet", "leptons", "misc"],
