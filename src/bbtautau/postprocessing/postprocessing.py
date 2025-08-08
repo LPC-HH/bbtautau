@@ -1100,6 +1100,7 @@ def _add_bdt_scores(
     multiclass: bool,
     all_outs: bool = True,
     jshift: str = "",
+    llsl_weight: float = 1,
 ):
     """
     Assumes map to be
@@ -1149,8 +1150,8 @@ def _add_bdt_scores(
                     events[f"BDTScore{taukey+jshift}"]
                     + events["BDTScoreQCD"]
                     + events["BDTScoreTThad"]
-                    + events["BDTScoreTTll"]
-                    + events["BDTScoreTTSL"]
+                    + llsl_weight * events["BDTScoreTTll"]
+                    + llsl_weight * events["BDTScoreTTSL"]
                     + events["BDTScoreDY"]
                 ),
                 nan=PAD_VAL,
@@ -1161,6 +1162,7 @@ def compute_bdt_preds(
     data: dict[str, dict[str, LoadedSample]],
     modelname: str,
     model_dir: Path,
+    llsl_weight: float = 1,
 ) -> dict[str, dict[str, np.ndarray]]:
     """Compute BDT predictions for multiple years and samples.
 
@@ -1199,7 +1201,7 @@ def compute_bdt_preds(
             )
 
             y_pred = bst.predict(dsample)
-            _add_bdt_scores(data[year][sample_name].events, y_pred, multiclass=True, all_outs=True)
+            _add_bdt_scores(data[year][sample_name].events, y_pred, multiclass=True, all_outs=True, llsl_weight=llsl_weight)
 
 
 def load_bdt_preds(

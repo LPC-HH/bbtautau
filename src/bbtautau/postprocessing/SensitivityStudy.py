@@ -101,7 +101,7 @@ FOMS = {
 
 class Analyser:
     def __init__(
-        self, years, channel_key, test_mode, use_bdt, modelname, main_plot_dir, at_inference=False
+        self, years, channel_key, test_mode, use_bdt, modelname, main_plot_dir, at_inference=False, llsl_weight=1
     ):
         self.channel = CHANNELS[channel_key]
         self.years = years
@@ -124,6 +124,7 @@ class Analyser:
         self.use_bdt = use_bdt
         self.modelname = modelname
         self.at_inference = at_inference
+        self.llsl_weight = llsl_weight
 
         self.model_dir = MODEL_DIR
 
@@ -167,6 +168,7 @@ class Analyser:
                         data=self.events_dict,
                         model_dir=self.model_dir,
                         modelname=self.modelname,
+                        llsl_weight=self.llsl_weight
                     )
                     print("BDT predictions computed at inference time")
 
@@ -378,6 +380,117 @@ class Analyser:
                 self.pttt[year][key] = self.events_dict[year][key].get_var("ttFatJetPt")
 
     def compute_sig_bkg_abcd(self, years, txbbcut, txttcut, mbb1, mbb2, mtt1, mtt2):
+        # pass/fail from taggers
+        sig_pass = 0  # resonant region pass, signal
+        bg_pass_sb = 0  # sideband region pass, data
+        bg_fail_res = 0  # resonant region fail, data
+        bg_fail_sb = 0  # sideband region fail, data
+        for year in years:
+
+            cut_sig_pass = (
+                (self.txbbs[year][self.sig_key] > txbbcut)
+                & (self.txtts[year][self.sig_key] > txttcut)
+                & (self.massbb[year][self.sig_key] > mbb1)
+                & (self.massbb[year][self.sig_key] < mbb2)
+                & (self.ptbb[year][self.sig_key] > 250)
+                & (self.pttt[year][self.sig_key] > 200)
+            )
+            if not self.use_bdt:
+                cut_sig_pass &= (self.masstt[year][self.sig_key] > mtt1) & (
+                    self.masstt[year][self.sig_key] < mtt2
+                )
+
+            sig_pass += np.sum(
+                self.events_dict[year][self.sig_key].events["finalWeight"][cut_sig_pass]
+            )
+
+            for key in self.channel.data_samples:
+                cut_bg_pass_sb = (
+                    (self.txbbs[year][key] > txbbcut)
+                    & (self.txtts[year][key] > txttcut)
+                    & (self.ptbb[year][key] > 250)
+                    & (self.pttt[year][key] > 200)
+                )
+                if not self.use_bdt:
+                    cut_bg_pass_sb &= (self.masstt[year][key] > mtt1) & (
+                        self.masstt[year][key] < mtt2
+                    )
+
+                msb1 = (self.massbb[year][key] > SHAPE_VAR["range"][0]) & (
+                    self.massbb[year][key] < mbb1
+                )
+                msb2 = (self.massbb[year][key] > mbb2) & (
+                    self.massbb[year][key] < SHAPE_VAR["range"][1]
+                )
+                bg_pass_sb += np.sum(
+                    self.events_dict[year][key].events["finalWeight"][cut_bg_pass_sb & msb1]
+                )
+                bg_pass_sb += np.sum(
+                    self.events_dict[year][key].events["finalWeight"][cut_bg_pass_sb & msb2]
+                )
+                cut_bg_fail_sb = (
+                    ((self.txbbs[year][key] < txbbcut) | (self.txtts[year][key] < txttcut))
+                    & (self.ptbb[year][key] > 250)
+                    & (self.pttt[year][key] > 200)
+                )
+                if not self.use_bdt:
+                    cut_bg_fail_sb &= (self.masstt[year][key] > mtt1) & (
+                        self.masstt[year][key] < mtt2
+                    )
+
+                bg_fail_sb += np.sum(
+                    self.events_dict[year][key].events["finalWeight"][cut_bg_fail_sb & msb1]
+                )
+                bg_fail_sb += np.sum(
+                    self.events_dict[year][key].events["finalWeight"][cut_bg_fail_sb & msb2]
+                )
+                cut_bg_fail_res = (
+                    ((self.txbbs[year][key] < txbbcut) | (self.txtts[year][key] < txttcut))
+                    & (self.massbb[year][key] > mbb1)
+                    & (self.massbb[year][key] < mbb2)
+                    & (self.ptbb[year][key] > 250)
+                    & (self.pttt[year][key] > 200)
+                )
+                if not self.use_bdt:
+                    cut_bg_fail_res &= (self.masstt[year][key] > mtt1) & (
+                        self.masstt[year][key] < mtt2
+                    )
+
+                bg_fail_res += np.sum(
+                    self.events_dict[year][key].events["finalWeight"][cut_bg_fail_res]
+                )
+
+        del cut_sig_pass, cut_bg_pass_sb, cut_bg_fail_sb, cut_bg_fail_res, msb1, msb2
+
+        # signal, B, C, D, TF = C/D
+        return sig_pass, bg_pass_sb, bg_fail_res, bg_fail_sb, bg_fail_res / bg_fail_sb
+
+    def compute_sig_bkg_abcd_w_llsl_weight(self, years, txbbcut, txttcut, llsl_weight, mbb1, mbb2, mtt1, mtt2):
+        # calculate the tt BDT disc with the ttllsl_mod coefficient
+        for year in years:
+            for key in [self.sig_key] + self.channel.data_samples:
+                self.txbbs[year][key] = self.events_dict[year][key].get_var("bbFatJetParTXbbvsQCD")
+                if self.use_bdt:
+                    sig_score = self.events_dict[year][key].get_var(f"BDTScore{self.taukey}")
+                    QCD_score = self.events_dict[year][key].get_var("BDTScoreQCD")
+                    TThad_score = self.events_dict[year][key].get_var("BDTScoreTThad")
+                    TTll_score = self.events_dict[year][key].get_var("BDTScoreTTll")
+                    TTSL_score = self.events_dict[year][key].get_var("BDTScoreTTSL")
+                    DY_score = self.events_dict[year][key].get_var("BDTScoreDY")
+
+                    self.txtts[year][key] = np.nan_to_num(
+                            sig_score
+                            / (
+                                sig_score
+                                + QCD_score
+                                + TThad_score
+                                + llsl_weight * TTll_score
+                                + llsl_weight * TTSL_score
+                                + DY_score
+                            ),
+                            nan=PAD_VAL
+                    )
+
         # pass/fail from taggers
         sig_pass = 0  # resonant region pass, signal
         bg_pass_sb = 0  # sideband region pass, data
@@ -1155,11 +1268,12 @@ def analyse_channel(
     main_plot_dir,
     actions=None,
     at_inference=False,
+    llsl_weight=1,
 ):
 
     print(f"Processing channel: {channel}. Test mode: {test_mode}.")
 
-    analyser = Analyser(years, channel, test_mode, use_bdt, modelname, main_plot_dir, at_inference)
+    analyser = Analyser(years, channel, test_mode, use_bdt, modelname, main_plot_dir, at_inference, llsl_weight=llsl_weight)
 
     analyser.load_data()
 
@@ -1239,6 +1353,12 @@ if __name__ == "__main__":
         default="/home/users/lumori/bbtautau/src/bbtautau//postprocessing/classifier/trained_models/29July25_loweta_lowreg",
         type=str,
     )
+    parser.add_argument(
+        "--llsl-weight",
+        help="coefficient to multiply BDT TTSL and TTLL score with, when calculating tt disc",
+        default=1.0,
+        type=float
+    )
 
     args = parser.parse_args()
 
@@ -1256,4 +1376,5 @@ if __name__ == "__main__":
             main_plot_dir=args.plot_dir,
             actions=args.actions,
             at_inference=args.at_inference,
+            llsl_weight=args.llsl_weight,
         )
