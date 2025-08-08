@@ -9,7 +9,8 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import mplhep as hep
-from boostedhh import plotting
+import numpy as np
+from boostedhh import hh_vars, plotting
 from boostedhh.hh_vars import data_key
 from hist import Hist
 from Samples import SAMPLES
@@ -125,3 +126,234 @@ def ratioHistPlot(
             plt.show()
         else:
             plt.close()
+
+
+def plot_optimization_thresholds(
+    results, years, b_min_vals, foms, channel, save_path=None, show=False
+):
+    """
+    Plot optimization results with tagger thresholds on axes and signal yield as color.
+
+    This is the original plotting variant that shows:
+    - X axis: Xbb vs QCD tagger thresholds
+    - Y axis: Xtt vs QCDTop tagger thresholds
+    - Color: Signal yield
+    - Points: Optimal cuts for different B_min constraints
+
+    Args:
+        results: Dictionary of optimization results from grid_search_opt
+        years: List of years used in optimization
+        b_min_vals: List of B_min values used
+        foms: List of FOM objects
+        channel: Channel object with label
+        save_path: Optional path to save plot
+        show: Whether to show plot
+    """
+    plt.rcdefaults()
+    plt.style.use(hep.style.CMS)
+    hep.style.use("CMS")
+    fig, ax = plt.subplots(figsize=(10, 10))
+
+    hep.cms.label(
+        ax=ax,
+        label="Work in Progress",
+        data=True,
+        year="2022-23" if years == hh_vars.years else "+".join(years),
+        com="13.6",
+        fontsize=13,
+        lumi=f"{np.sum([hh_vars.LUMI[year] for year in years]) / 1000:.1f}",
+    )
+
+    colors = ["orange", "r", "purple", "b"]
+    markers = ["x", "o", "s", "D"]
+
+    i = 0
+    for B_min, c, m in zip(b_min_vals, colors, markers):
+        optimum = results[foms[0].name][f"Bmin={B_min}"]  # only plot the first FOM
+        if i == 0:
+            # Assuming all optimums have same cut and signal maps
+            sigmap = ax.contourf(
+                optimum.BBcut, optimum.TTcut, optimum.sig_map, levels=20, cmap="viridis"
+            )
+            i += 1
+
+        if B_min == 1:
+            ax.scatter(optimum.cuts[0], optimum.cuts[1], color=c, label="Global optimum", marker=m)
+        else:
+            ax.contour(
+                optimum.BBcut,
+                optimum.TTcut,
+                ~optimum.sel_B_min,
+                colors=c,
+                linestyles="dashdot",
+            )
+            ax.scatter(
+                optimum.cuts[0],
+                optimum.cuts[1],
+                color=c,
+                label=f"Optimum $B\\geq {B_min}$",
+                marker=m,
+            )
+
+    ax.set_xlabel(optimum.bb_disc_name)
+    ax.set_ylabel(optimum.tt_disc_name)
+    cbar = plt.colorbar(sigmap, ax=ax)
+    cbar.set_label("Signal yield")
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(handles=handles, loc="lower left")
+
+    text = channel.label + "\nFOM: " + foms[0].label
+
+    ax.text(
+        0.05,
+        0.72,
+        text,
+        transform=ax.transAxes,
+        fontsize=20,
+        fontproperties="Tex Gyre Heros",
+    )
+
+    if save_path:
+        plt.savefig(save_path.with_suffix(".pdf"), bbox_inches="tight")
+        plt.savefig(save_path.with_suffix(".png"), bbox_inches="tight")
+
+    if show:
+        plt.show()
+    else:
+        plt.close()
+
+
+def plot_optimization_sig_eff(
+    results,
+    years,
+    b_min_vals,
+    foms,
+    channel,
+    save_path=None,
+    show=False,
+    use_log_scale=False,
+    clip_values=False,
+    max_fom_value=100,
+):
+    """
+    Plot optimization results with signal efficiency on axes and FOM values as color.
+
+    This is the new plotting variant that shows:
+    - X axis: Xbb signal efficiency (0-1)
+    - Y axis: Xtt signal efficiency (0-1)
+    - Color: FOM values (lower is better)
+    - Points: Optimal signal efficiency cuts for different B_min constraints
+
+    Args:
+        results: Dictionary of optimization results from grid_search_opt_sig_eff
+        years: List of years used in optimization
+        b_min_vals: List of B_min values used
+        foms: List of FOM objects
+        channel: Channel object with label
+        save_path: Optional path to save plot
+        show: Whether to show plot
+        use_log_scale: Whether to use logarithmic color scaling for FOM values
+        clip_values: Whether to clip FOM values above max_fom_value
+        max_fom_value: Maximum FOM value when clipping (default: 100)
+    """
+    plt.rcdefaults()
+    plt.style.use(hep.style.CMS)
+    hep.style.use("CMS")
+    fig, ax = plt.subplots(figsize=(10, 10))
+
+    hep.cms.label(
+        ax=ax,
+        label="Work in Progress",
+        data=True,
+        year="2022-23" if years == hh_vars.years else "+".join(years),
+        com="13.6",
+        fontsize=13,
+        lumi=f"{np.sum([hh_vars.LUMI[year] for year in years]) / 1000:.1f}",
+    )
+
+    colors = ["orange", "r", "purple", "b"]
+    markers = ["x", "o", "s", "D"]
+
+    i = 0
+    for B_min, c, m in zip(b_min_vals, colors, markers):
+        optimum = results[foms[0].name][f"Bmin={B_min}"]  # only plot the first FOM
+        if i == 0:
+            # Prepare FOM data based on options
+            fom_data = optimum.fom_map.copy()
+
+            if clip_values:
+                # Clip values above max_fom_value
+                fom_data = np.clip(fom_data, None, max_fom_value)
+
+            # Set up normalization for log scale if requested
+            norm = None
+            if use_log_scale:
+                from matplotlib.colors import LogNorm
+
+                # Use LogNorm for logarithmic color scaling
+                norm = LogNorm(vmin=fom_data.min(), vmax=fom_data.max())
+
+            # Plot FOM values on signal efficiency grid
+            fommap = ax.contourf(
+                optimum.BBcut_sig_eff,
+                optimum.TTcut_sig_eff,
+                fom_data,
+                levels=20,
+                cmap="viridis_r",
+                norm=norm,  # Reverse colormap since lower FOM is better
+            )
+            i += 1
+
+        if B_min == 1:
+            ax.scatter(
+                optimum.sig_eff_cuts[0],
+                optimum.sig_eff_cuts[1],
+                color=c,
+                label="Global optimum",
+                marker=m,
+            )
+        else:
+            # Note: sel_B_min is still in threshold space, need to map to sig eff space
+            ax.contour(
+                optimum.BBcut_sig_eff,
+                optimum.TTcut_sig_eff,
+                ~optimum.sel_B_min,
+                colors=c,
+                linestyles="dashdot",
+            )
+            ax.scatter(
+                optimum.sig_eff_cuts[0],
+                optimum.sig_eff_cuts[1],
+                color=c,
+                label=f"Optimum $B\\geq {B_min}$",
+                marker=m,
+            )
+
+    ax.set_xlabel(optimum.bb_disc_name + " $\\epsilon_{sig}$")
+    ax.set_ylabel(optimum.tt_disc_name + " $\\epsilon_{sig}$")
+
+    cbar = plt.colorbar(fommap, ax=ax)
+    cbar.set_label("FOM value")
+
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(handles=handles, loc="lower left")
+
+    text = channel.label + "\n" + foms[0].label
+
+    ax.text(
+        0.05,
+        0.82,
+        text,
+        transform=ax.transAxes,
+        fontsize=20,
+        fontproperties="Tex Gyre Heros",
+    )
+
+    if save_path:
+        plt.savefig(save_path.with_suffix(".pdf"), bbox_inches="tight")
+        plt.savefig(save_path.with_suffix(".png"), bbox_inches="tight")
+
+    if show:
+        plt.show()
+    else:
+        plt.close()

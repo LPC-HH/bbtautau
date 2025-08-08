@@ -12,6 +12,7 @@
 # --year: Year to run on - by default runs on all years
 # --use_bdt: Flag to enable use of BDT in template creation
 # --bmin: Minimum background yield value(s) - supports multiple values (e.g., --bmin 1 5 10)
+# --no-sensitivity-dir: Disable the --sensitivity-dir argument (default: enabled)
 ####################################################################################################
 
 years=("2022" "2022EE" "2023" "2023BPix")
@@ -22,8 +23,10 @@ MAIN_DIR="/home/users/lumori/bbtautau"
 SCRIPT_DIR="${MAIN_DIR}/src/bbtautau/postprocessing"
 data_dir_2022="/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr17bbpresel_v12_private_signal"
 data_dir_otheryears="/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr24Fix_v12_private_signal"
+SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2025-07-31/"
 TAG=""
 USE_BDT=0
+USE_SENSITIVITY_DIR=1  # Flag to control --sensitivity-dir argument (default: on)
 
 # Function to display help
 show_help() {
@@ -36,6 +39,7 @@ show_help() {
     echo "  --year YEAR        Year to run on (default: all years)"
     echo "  --channel CHANNEL  Channel to run on (default: all channels)"
     echo "  --use_bdt          Enable BDT usage in template creation"
+    echo "  --no-sensitivity-dir  Disable the --sensitivity-dir argument (default: enabled)"
     echo "  --bmin VALUES      Space-separated list of minimum background yield values"
     echo "                     Examples: --bmin 1"
     echo "                              --bmin 1 5 10"
@@ -77,6 +81,10 @@ while [[ $# -gt 0 ]]; do
             USE_BDT=1
             shift
             ;;
+        --no-sensitivity-dir)
+            USE_SENSITIVITY_DIR=0
+            shift
+            ;;
         --help|-h)
             show_help
             exit 0
@@ -105,6 +113,7 @@ echo "BMIN VALUES: ${bmin_values[*]}"
 echo "YEARS: ${years[*]}"
 echo "CHANNELS: ${channels[*]}"
 echo "USE_BDT: $USE_BDT"
+echo "USE_SENSITIVITY_DIR: $USE_SENSITIVITY_DIR"
 
 for year in "${years[@]}"
 do
@@ -121,11 +130,27 @@ do
     for channel in "${channels[@]}"
     do
         echo "    Templates for $channel with bmin values: ${bmin_values[*]}"
+        # Build base command
+        base_cmd="python -u ${SCRIPT_DIR}/postprocessing.py --year $year --channel $channel --data-dir $data_dir --plot-dir \"${MAIN_DIR}/plots/Templates/$TAG\" --template-dir \"${MAIN_DIR}/src/bbtautau/postprocessing/templates/$TAG\" --templates"
+
         # Add --use_bdt if enabled
         if [[ $USE_BDT -eq 1 ]]; then
-            python -u ${SCRIPT_DIR}/postprocessing.py --year $year --channel $channel --data-dir $data_dir --plot-dir "${MAIN_DIR}/plots/Templates/$TAG" --template-dir "${MAIN_DIR}/src/bbtautau/postprocessing/templates/$TAG" --templates --use_bdt --model 29July25_loweta_lowreg --sensitivity-dir "${MAIN_DIR}/plots/SensitivityStudy/2025-07-31/" --bmin "${bmin_values[@]}"
-        else
-            python -u ${SCRIPT_DIR}/postprocessing.py --year $year --channel $channel --data-dir $data_dir --plot-dir "${MAIN_DIR}/plots/Templates/$TAG" --template-dir "${MAIN_DIR}/src/bbtautau/postprocessing/templates/$TAG" --sensitivity-dir "${MAIN_DIR}/plots/SensitivityStudy/2025-07-31/" --templates --bmin "${bmin_values[@]}"
+            base_cmd="$base_cmd --use_bdt --model 29July25_loweta_lowreg"
         fi
+
+        # Add --sensitivity-dir if enabled
+        if [[ $USE_SENSITIVITY_DIR -eq 1 ]]; then
+            base_cmd="$base_cmd --sensitivity-dir \"$SENSITIVITY_DIR\""
+        fi
+
+        # Add bmin values
+
+        #TODO: This block  needs to be tested, could not be correct
+
+        base_cmd=("$base_cmd" --bmin "${bmin_values[@]}")
+        # Execute the command
+        # eval $base_cmd
+        "${base_cmd[@]}"
+
     done
 done

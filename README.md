@@ -167,7 +167,7 @@ Arguments
 `--years` (list, default: 2022 2022EE 2023 2023BPix): List of years to include in the analysis.
 `--channels` (list, default: hh hm he): List of channels to run (default: all).
 `--test-mode` (flag, default: False): Run in test mode (reduced data size).
-`--use_bdt` (flag, default: False): Use BDT model for sensitivity study.
+`--use-bdt` (flag, default: False): Use BDT model for sensitivity study.
 `--modelname` (str, default: 28May25_baseline): Name of the BDT model to use.
 `--at-inference` (flag, default: False): Compute BDT predictions at inference time.
 `--actions` (list, required): Actions to perform. Choose one or more: `compute_rocs`, `plot_mass`, `sensitivity`, `time-methods`.

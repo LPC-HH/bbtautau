@@ -324,3 +324,8 @@ def singleVarHist(
         utils.blindBins(h, shape_var.blind_window, data_key)
 
     return h
+
+
+def label_transform(classes: list[str], labels: list[str]) -> list[int]:
+    """Transform labels to integers."""
+    return [classes.index(label) for label in labels]

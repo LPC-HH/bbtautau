@@ -177,10 +177,10 @@ mc_samples = OrderedDict(
 
 mc_samples_sig = OrderedDict(
     [
-        ("bbtt", "ggHH_kl_1_kt_1_13p6TeV_hbbhtauau"),
-        ("bbtt-kl0", "ggHH_kl_0_kt_1_13p6TeV_hbbhtauau"),
-        ("bbtt-kl2p45", "ggHH_kl_2p45_kt_1_13p6TeV_hbbhtauau"),
-        ("bbtt-kl5", "ggHH_kl_5_kt_1_13p6TeV_hbbhtauau"),
+        ("ggfbbtt", "ggHH_kl_1_kt_1_13p6TeV_hbbhtauau"),
+        ("ggfbbtt-kl0", "ggHH_kl_0_kt_1_13p6TeV_hbbhtauau"),
+        ("ggfbbtt-kl2p45", "ggHH_kl_2p45_kt_1_13p6TeV_hbbhtauau"),
+        ("ggfbbtt-kl5", "ggHH_kl_5_kt_1_13p6TeV_hbbhtauau"),
         ("vbfbbtt", "qqHH_CV_1_C2V_1_kl_1_13p6TeV_hbbhtauau"),
         ("vbfbbtt-k2v0", "qqHH_CV_1_C2V_0_kl_1_13p6TeV_hbbhtauau"),
         ("vbfbbtt-kv1p74-k2v1p37-kl14p4", "qqHH_CV_1p74_C2V_1p37_kl_14p4_13p6TeV_hbbhtauau"),
@@ -200,7 +200,7 @@ mc_samples_sig = OrderedDict(
 bg_keys = list(mc_samples.keys())
 
 if args.only_sm:
-    sig_keys_ggf = [f"bbtt{channel.key}" for channel in channels]
+    sig_keys_ggf = [f"ggfbbtt{channel.key}" for channel in channels]
     sig_keys_vbf = [f"vbfbbtt{channel.key}" for channel in channels]
 
 all_sig_keys = SIGNALS_CHANNELS
@@ -259,8 +259,13 @@ nuisance_params = {
     "THU_HH": Syst(
         prior="lnN",
         samples=sig_keys_ggf,
-        value={"bbtt": 1.06, "bbtt-kl0": 1.08, "bbtt-kl2p45": 1.06, "bbtt-kl5": 1.18},
-        value_down={"bbtt": 0.77, "bbtt-kl0": 0.82, "bbtt-kl2p45": 0.75, "bbtt-kl5": 0.87},
+        value={"ggfbbtt": 1.06, "ggfbbtt-kl0": 1.08, "ggfbbtt-kl2p45": 1.06, "ggfbbtt-kl5": 1.18},
+        value_down={
+            "ggfbbtt": 0.77,
+            "ggfbbtt-kl0": 0.82,
+            "ggfbbtt-kl2p45": 0.75,
+            "ggfbbtt-kl5": 0.87,
+        },
         diff_samples=True,
     ),
     # apply 2022 uncertainty to all MC (until 2023 rec.)
@@ -750,18 +755,21 @@ def alphabet_fit(
 
     for sr in signal_regions:
         # QCD overall pass / fail efficiency
-        qcd_eff = (
-            templates_summed[sr][data_key, :].sum().value
-            - np.sum([templates_summed[sr][bg_key, :].sum().value for bg_key in bg_keys])
-        ) / (
-            templates_summed["fail"][data_key, :].sum().value
-            - np.sum([templates_summed["fail"][bg_key, :].sum().value for bg_key in bg_keys])
+
+        data_qcd_pass = templates_summed[sr][data_key, :].sum().value - np.sum(
+            [templates_summed[sr][bg_key, :].sum().value for bg_key in bg_keys]
         )
+
+        data_qcd_fail = templates_summed["fail"][data_key, :].sum().value - np.sum(
+            [templates_summed["fail"][bg_key, :].sum().value for bg_key in bg_keys]
+        )
+        print(data_qcd_pass, data_qcd_fail)
+        qcd_eff = data_qcd_pass / data_qcd_fail
         # qcd_eff = (
         #     templates_summed[sr][qcd_key, :].sum().value
         #     / templates_summed["fail"][qcd_key, :].sum().value
         # )
-        logging.info(f"qcd eff {qcd_eff:.5f}")
+        logging.info(f"qcd eff {qcd_eff:.8f}")
 
         # transfer factor
         tf_dataResidual = rl.BasisPoly(

@@ -23,13 +23,12 @@ from postprocessing import (
     leptons_assignment,
     load_samples,
 )
-from Samples import CHANNELS, SAMPLES
+from Samples import CHANNELS, SAMPLES, sig_keys_ggf
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
 from tabulate import tabulate
 
 from bbtautau.postprocessing.rocUtils import ROCAnalyzer, multiclass_confusion_matrix
-from bbtautau.postprocessing.utils import LoadedSample
+from bbtautau.postprocessing.utils import LoadedSample, label_transform
 from bbtautau.userConfig import CLASSIFIER_DIR, DATA_PATHS, MODEL_DIR
 
 # TODO
@@ -52,7 +51,7 @@ class Trainer:
         "ttbarll",
         "ttbarsl",
         "dyjets",
-        "bbtt",
+        "ggfbbtt",
     ]
 
     def __init__(
@@ -80,6 +79,18 @@ class Trainer:
         self.bdt_config = bdt_config
         self.train_vars = self.bdt_config[self.modelname]["train_vars"]
         self.hyperpars = self.bdt_config[self.modelname]["hyperpars"]
+
+        # find a better place for this
+        self.classes = [
+            "ggfbbtthe",
+            "ggfbbtthh",
+            "ggfbbtthm",
+            "dyjets",
+            "qcd",
+            "ttbarhad",
+            "ttbarll",
+            "ttbarsl",
+        ]
 
         self.events_dict = {year: {} for year in self.years}
 
@@ -112,12 +123,12 @@ class Trainer:
                 self.events_dict[year] = load_samples(
                     year=year,
                     paths=self.data_paths[year],
+                    signals=sig_keys_ggf,
                     channels=list(CHANNELS.values()),
                     samples=self.samples,
                     filters_dict=filters_dict,
                     load_columns=columns,
                     restrict_data_to_channel=False,
-                    load_just_ggf=True,
                     load_bgs=True,
                     loaded_samples=True,
                 )
@@ -132,8 +143,8 @@ class Trainer:
                 leptons_assignment(self.events_dict[year], dR_cut=1.5)
 
         for ch in CHANNELS:
-            self.samples[f"bbtt{ch}"] = SAMPLES[f"bbtt{ch}"]
-        del self.samples["bbtt"]
+            self.samples[f"ggfbbtt{ch}"] = SAMPLES[f"ggfbbtt{ch}"]
+        del self.samples["ggfbbtt"]
 
     @staticmethod
     def shorten_df(df, N, seed=42):
@@ -203,10 +214,7 @@ class Trainer:
         sample_names_labels = []  # Store sample names for each event
 
         if self.loaded_dmatrix:
-            # Need to do this to keep a mapping of the sample labels
-            self.label_encoder = LabelEncoder()
-            y = self.label_encoder.fit_transform(list(self.samples.keys()))
-            self.classes = self.label_encoder.classes_
+            # legacy way to handle this case, used to have to execute some code.
             return
 
         # Store weight statistics aggregated across all years
@@ -430,13 +438,15 @@ class Trainer:
         weights_rescaled = np.concatenate(weights_rescaled_list)
 
         # Use LabelEncoder to convert sample names to numeric labels
-        self.label_encoder = LabelEncoder()
-        y = self.label_encoder.fit_transform(sample_names_labels)
-        self.classes = self.label_encoder.classes_
+        # self.label_encoder = LabelEncoder()
+        # y = self.label_encoder.fit_transform(sample_names_labels)
+        # self.classes = self.label_encoder.classes_
+
+        y = label_transform(self.classes, sample_names_labels)
 
         # Print class mapping
         print("\nClass mapping:")
-        for i, class_name in enumerate(self.label_encoder.classes_):
+        for i, class_name in enumerate(self.classes):
             print(f"Class {i}: {class_name}")
 
         # Split into training and validation sets for training and training evaluation
@@ -624,15 +634,17 @@ class Trainer:
         #########################################################
         #########################################################
         # This part configures what background outputs to put in the taggers
-
         bkg_tagger_groups = (
-            [
-                [bkg] for bkg in background_names if "ttbar" not in bkg
-            ]  # individual backgrounds w/o ttbar
-            + [["ttbarhad", "ttbarll", "ttbarsl"]]  # ttbar backgrounds
-            + [["qcd", "dyjets"]]  # qcd and dy backgrounds
+            [["qcd"]]
+            + [["qcd", "ttbarhad", "ttbarll", "ttbarsl"]]
+            # + [["qcd", "dyjets"]]  # qcd and dy backgrounds
             + [background_names]  # All backgrounds
         )
+
+        parT_discs = []
+        for sig in signal_names:
+            parT_discs.append(f"ttFatJetParTX{sig[-2:]}vsQCD")
+            parT_discs.append(f"ttFatJetParTX{sig[-2:]}vsQCDTop")
 
         #########################################################
         #########################################################
@@ -645,6 +657,9 @@ class Trainer:
                     signal_tagger=sig_tagger,
                     background_taggers=bkg_taggers,
                 )
+            rocAnalyzer.fill_discriminants(
+                parT_discs, signal_name=sig_tagger, background_names=background_names
+            )
 
         # Compute ROCs and comprehensive metrics
         rocAnalyzer.compute_rocs()
