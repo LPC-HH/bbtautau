@@ -757,7 +757,7 @@ class Analyser:
         if self.test_mode:
             gridlims = (0.3, 1) if use_thresholds else (0.2, 0.9)
         else:
-            gridlims = (0.7, 1) if use_thresholds else (0.3, 0.7)
+            gridlims = (0.7, 1) if use_thresholds else (0.25, 0.75)
 
         gridsize = 20 if self.test_mode else 50
 
@@ -820,8 +820,6 @@ class Analyser:
                     b_min_vals=successful_b_min_vals,
                     foms=foms,
                     channel=self.channel,
-                    use_bdt=self.use_bdt,
-                    taukey=self.taukey,
                     save_path=self.plot_dir / f"{'_'.join(years)}_thresholds",
                     show=False,
                 )
@@ -832,13 +830,10 @@ class Analyser:
                     b_min_vals=successful_b_min_vals,
                     foms=foms,
                     channel=self.channel,
-                    use_bdt=self.use_bdt,
-                    taukey=self.taukey,
                     save_path=self.plot_dir / f"{'_'.join(years)}_sigeff",
                     show=False,
                     use_log_scale=False,
-                    clip_values=True,
-                    max_fom_value=100,
+                    clip_value=100,
                 )
                 plot_optimization_sig_eff(
                     results=results,
@@ -846,8 +841,6 @@ class Analyser:
                     b_min_vals=successful_b_min_vals,
                     foms=foms,
                     channel=self.channel,
-                    use_bdt=self.use_bdt,
-                    taukey=self.taukey,
                     save_path=self.plot_dir / f"{'_'.join(years)}_sigeff_log",
                     show=False,
                     use_log_scale=True,

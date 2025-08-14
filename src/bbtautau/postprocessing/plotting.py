@@ -172,9 +172,7 @@ def plot_optimization_thresholds(
         optimum = results[foms[0].name][f"Bmin={B_min}"]  # only plot the first FOM
         if i == 0:
             # Assuming all optimums have same cut and signal maps
-            sigmap = ax.contourf(
-                optimum.BBcut, optimum.TTcut, optimum.sig_map, levels=20, cmap="viridis"
-            )
+            sigmap = ax.pcolormesh(optimum.BBcut, optimum.TTcut, optimum.sig_map, cmap="viridis")
             i += 1
 
         if B_min == 1:
@@ -232,8 +230,7 @@ def plot_optimization_sig_eff(
     save_path=None,
     show=False,
     use_log_scale=False,
-    clip_values=False,
-    max_fom_value=100,
+    clip_value=100,
 ):
     """
     Plot optimization results with signal efficiency on axes and FOM values as color.
@@ -253,8 +250,7 @@ def plot_optimization_sig_eff(
         save_path: Optional path to save plot
         show: Whether to show plot
         use_log_scale: Whether to use logarithmic color scaling for FOM values
-        clip_values: Whether to clip FOM values above max_fom_value
-        max_fom_value: Maximum FOM value when clipping (default: 100)
+        clip_value: Maximum FOM value when clipping (default: 100)
     """
     plt.rcdefaults()
     plt.style.use(hep.style.CMS)
@@ -271,7 +267,7 @@ def plot_optimization_sig_eff(
         lumi=f"{np.sum([hh_vars.LUMI[year] for year in years]) / 1000:.1f}",
     )
 
-    colors = ["orange", "r", "purple", "b"]
+    colors = ["b", "purple", "r", "orange"]
     markers = ["x", "o", "s", "D"]
 
     i = 0
@@ -281,9 +277,9 @@ def plot_optimization_sig_eff(
             # Prepare FOM data based on options
             fom_data = optimum.fom_map.copy()
 
-            if clip_values:
+            if clip_value:
                 # Clip values above max_fom_value
-                fom_data = np.clip(fom_data, None, max_fom_value)
+                fom_data = np.clip(fom_data, None, clip_value)
 
             # Set up normalization for log scale if requested
             norm = None
@@ -294,11 +290,10 @@ def plot_optimization_sig_eff(
                 norm = LogNorm(vmin=fom_data.min(), vmax=fom_data.max())
 
             # Plot FOM values on signal efficiency grid
-            fommap = ax.contourf(
+            fommap = ax.pcolormesh(
                 optimum.BBcut_sig_eff,
                 optimum.TTcut_sig_eff,
                 fom_data,
-                levels=20,
                 cmap="viridis_r",
                 norm=norm,  # Reverse colormap since lower FOM is better
             )
@@ -336,7 +331,7 @@ def plot_optimization_sig_eff(
     cbar.set_label("FOM value")
 
     handles, labels = ax.get_legend_handles_labels()
-    ax.legend(handles=handles, loc="lower left")
+    ax.legend(handles=handles, loc="upper right")
 
     text = channel.label + "\n" + foms[0].label
 
