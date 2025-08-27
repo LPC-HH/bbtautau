@@ -21,7 +21,6 @@ from coffea.nanoevents.methods.nanoaod import (
 
 from bbtautau.HLTs import HLTs
 
-from coffea.nanoevents.methods.vector import delta_r
 
 def trig_match_sel(events, leptons, trig_leptons, year, trigger, filterbit, ptcut, trig_dR=0.2):
     """
@@ -279,6 +278,13 @@ def good_boostedtaus(events, taus: TauArray):  # noqa: ARG001
 
     tau_sel = (taus.pt > 20) & (abs(taus.eta) < 2.5)
     return taus[tau_sel]
+
+
+#adopted from https://github.com/scikit-hep/coffea/blob/a315da1fa307f1ec0d21c29e908e5b733603d7c0/src/coffea/nanoevents/methods/vector.py#L106
+def delta_r(eta1, phi1, eta2, phi2):
+    deta = eta1 - eta2
+    dphi = (a - b + numpy.pi) % (2 * numpy.pi) - numpy.pi
+    return np.hypot(deta,dphi)
 
 
 def CA_got(met_pt, met_phi, fatjets_mass, fatjets_masscorr, tau0_eta, tau1_eta, tau0_phi, tau1_phi, tau0_pt, tau1_pt):
