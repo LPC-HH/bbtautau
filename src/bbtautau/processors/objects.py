@@ -283,7 +283,7 @@ def good_boostedtaus(events, taus: TauArray):  # noqa: ARG001
 #adopted from https://github.com/scikit-hep/coffea/blob/a315da1fa307f1ec0d21c29e908e5b733603d7c0/src/coffea/nanoevents/methods/vector.py#L106
 def delta_r(eta1, phi1, eta2, phi2):
     deta = eta1 - eta2
-    dphi = (a - b + numpy.pi) % (2 * numpy.pi) - numpy.pi
+    dphi = (phi1 - phi2 + numpy.pi) % (2 * numpy.pi) - numpy.pi
     return np.hypot(deta,dphi)
 
 
