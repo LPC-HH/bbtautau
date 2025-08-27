@@ -1,7 +1,9 @@
 """
 Plotting functions for bbtautau.
 
-Authors: Raghav Kansal, add your names
+Enhanced plotting functions with data blinding capability for signal regions.
+
+Authors: Raghav Kansal, Ludovico Mori
 """
 
 from __future__ import annotations
@@ -51,6 +53,44 @@ BG_COLOURS = {
 }
 
 
+def create_blinded_histogram(hists: Hist, blind_region: list, axis=0):
+    """
+    Create a copy of histogram with data points masked in the specified region.
+
+    Args:
+        hists: Input histogram
+        blind_region: [min_value, max_value] range to blind
+        axis: Which axis to blind on (default: 0, the first variable axis)
+
+    Returns:
+        Modified histogram with masked data
+    """
+    # Create a copy of the histogram to avoid modifying the original
+    masked_hists = hists.copy()
+
+    if axis > 0:
+        raise Exception("not implemented > 1D blinding yet")
+
+    bins = masked_hists.axes[axis + 1].edges
+    lv = int(np.searchsorted(bins, blind_region[0], "right"))
+    rv = int(np.searchsorted(bins, blind_region[1], "left") + 1)
+
+    # Find data sample index
+    sample_names = list(masked_hists.axes[0])
+    if data_key in sample_names:
+        data_key_index = sample_names.index(data_key)
+
+        # Create a mask for the blinded region
+        mask = np.ones(len(bins) - 1, dtype=bool)
+        mask[lv:rv] = False
+
+        print(type(masked_hists.view(flow=True)))
+
+        masked_hists.view(flow=True)[data_key_index][lv:rv] = np.nan
+
+    return masked_hists
+
+
 def ratioHistPlot(
     hists: Hist,
     year: str,
@@ -63,6 +103,7 @@ def ratioHistPlot(
     region_label: str = "",
     name: str = "",
     show: bool = False,
+    blind_region: list = None,
     **kwargs,
 ):
 
@@ -88,8 +129,13 @@ def ratioHistPlot(
         fig, axraxsax = plt.subplots(1, 1, figsize=(12, 11))
         ax = axraxsax
 
+    # Apply blinding if specified
+    plot_hists = hists
+    if blind_region is not None:
+        plot_hists = create_blinded_histogram(hists, blind_region)
+
     plotting.ratioHistPlot(
-        hists,
+        plot_hists,
         year,
         sig_keys,
         bg_keys,
