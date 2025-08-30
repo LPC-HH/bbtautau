@@ -19,7 +19,6 @@ from pathlib import Path
 
 import hist
 import matplotlib as mpl
-import numba
 import numpy as np
 import pandas as pd
 import vector
@@ -504,6 +503,10 @@ def get_columns(
         ("ak8FatJetPt", 3),
         ("ak8FatJetEta", 3),
         ("ak8FatJetPhi", 3),
+        ("ak4JetPt", 3),
+        ("ak4JetEta", 3),
+        ("ak4JetPhi", 3),
+        ("ak4JetMass", 3),
     ]
 
     # common columns
@@ -1044,22 +1047,23 @@ def bbtautau_assignment(
         sample.tt_mask = bbtt_masks["tt"]
 
 
-@numba.vectorize(
-    [
-        numba.float32(numba.float32, numba.float32),
-        numba.float64(numba.float64, numba.float64),
-    ]
-)
+# decorators give problems
+# @numba.vectorize(
+#     [
+#         numba.float32(numba.float32, numba.float32),
+#         numba.float64(numba.float64, numba.float64),
+#     ]
+# )
 def delta_phi(a, b):
     return (a - b + np.pi) % (2 * np.pi) - np.pi
 
 
-@numba.vectorize(
-    [
-        numba.float32(numba.float32, numba.float32),
-        numba.float64(numba.float64, numba.float64),
-    ]
-)
+# @numba.vectorize(
+#     [
+#         numba.float32(numba.float32, numba.float32),
+#         numba.float64(numba.float64, numba.float64),
+#     ]
+# )
 def delta_eta(a, b):
     return a - b
 
@@ -1253,35 +1257,58 @@ def derive_variables(events_dict: dict[str, LoadedSample], channel: Channel, num
 def derive_lepton_variables(events_dict: dict[str, LoadedSample]):
     for sample in events_dict.values():
 
-        sample.events["ElectronDeltaEta"] = PAD_VAL * np.ones_like(sample.get_var("ElectronPhi"))
-        sample.events["ElectronDeltaEta"][sample.e_mask] = delta_eta(
-            sample.get_var("ElectronEta"), sample.get_var("ttFatJetEta")
-        )[sample.e_mask]
+        for n in range(sample.get_var("ElectronEta").shape[-1]):
 
-        sample.events["ElectronDeltaPhi"] = PAD_VAL * np.ones_like(sample.get_var("ElectronPhi"))
-        sample.events["ElectronDeltaPhi"][sample.e_mask] = delta_phi(
-            sample.get_var("ElectronPhi"), sample.get_var("ttFatJetPhi")
-        )[sample.e_mask]
+            sample.events[("ElectronDeltaEta", str(n))] = (
+                PAD_VAL * np.ones_like(sample.get_var("ElectronPhi"))[:, n]
+            )
+            sample.events.loc[sample.e_mask[:, n], ("ElectronDeltaEta", str(n))] = delta_eta(
+                sample.get_var("ElectronEta")[:, n], sample.get_var("ttFatJetEta")
+            )[sample.e_mask[:, n]]
 
-        sample.events["Electron_dRak8Jet"] = PAD_VAL * np.ones_like(sample.get_var("ElectronPhi"))
-        sample.events["Electron_dRak8Jet"][sample.e_mask] = np.sqrt(
-            sample.events["ttElectronDeltaEta"] ** 2 + sample.events["ttElectronDeltaPhi"] ** 2
-        )[sample.e_mask]
+            sample.events[("ElectronDeltaPhi", str(n))] = (
+                PAD_VAL * np.ones_like(sample.get_var("ElectronPhi"))[:, n]
+            )
+            sample.events.loc[sample.e_mask[:, n], ("ElectronDeltaPhi", str(n))] = delta_phi(
+                sample.get_var("ElectronPhi")[:, n], sample.get_var("ttFatJetPhi")
+            )[sample.e_mask[:, n]]
 
-        sample.events["MuonDeltaEta"] = PAD_VAL * np.ones_like(sample.get_var("MuonEta"))
-        sample.events["MuonDeltaEta"][sample.m_mask] = delta_eta(
-            sample.get_var("MuonEta"), sample.get_var("ttFatJetEta")
-        )[sample.m_mask]
+        # need first to create the full branch before slicing
+        for n in range(sample.get_var("ElectronEta").shape[-1]):
 
-        sample.events["MuonDeltaPhi"] = PAD_VAL * np.ones_like(sample.get_var("MuonPhi"))
-        sample.events["MuonDeltaPhi"][sample.m_mask] = delta_phi(
-            sample.get_var("MuonPhi"), sample.get_var("ttFatJetPhi")
-        )[sample.m_mask]
+            sample.events[("Electron_dRak8Jet", str(n))] = (
+                PAD_VAL * np.ones_like(sample.get_var("ElectronPhi"))[:, n]
+            )
+            sample.events.loc[sample.e_mask[:, n], ("Electron_dRak8Jet", str(n))] = np.sqrt(
+                sample.get_var("ElectronDeltaEta")[:, n] ** 2
+                + sample.get_var("ElectronDeltaPhi")[:, n] ** 2
+            )[sample.e_mask[:, n]]
 
-        sample.events["Muon_dRak8Jet"] = PAD_VAL * np.ones_like(sample.get_var("MuonPhi"))
-        sample.events["Muon_dRak8Jet"][sample.m_mask] = np.sqrt(
-            sample.events["ttMuonDeltaEta"] ** 2 + sample.events["ttMuonDeltaPhi"] ** 2
-        )[sample.m_mask]
+        for n in range(sample.get_var("MuonEta").shape[-1]):
+
+            sample.events[("MuonDeltaEta", str(n))] = (
+                PAD_VAL * np.ones_like(sample.get_var("MuonPhi"))[:, n]
+            )
+            sample.events.loc[sample.m_mask[:, n], ("MuonDeltaEta", str(n))] = delta_eta(
+                sample.get_var("MuonEta")[:, n], sample.get_var("ttFatJetEta")
+            )[sample.m_mask[:, n]]
+
+            sample.events[("MuonDeltaPhi", str(n))] = (
+                PAD_VAL * np.ones_like(sample.get_var("MuonPhi"))[:, n]
+            )
+            sample.events.loc[sample.m_mask[:, n], ("MuonDeltaPhi", str(n))] = delta_phi(
+                sample.get_var("MuonPhi")[:, n], sample.get_var("ttFatJetPhi")
+            )[sample.m_mask[:, n]]
+
+        for n in range(sample.get_var("MuonEta").shape[-1]):
+
+            sample.events[("Muon_dRak8Jet", str(n))] = (
+                PAD_VAL * np.ones_like(sample.get_var("MuonPhi"))[:, n]
+            )
+            sample.events.loc[sample.m_mask[:, n], ("Muon_dRak8Jet", str(n))] = np.sqrt(
+                sample.get_var("MuonDeltaEta")[:, n] ** 2
+                + sample.get_var("MuonDeltaPhi")[:, n] ** 2
+            )[sample.m_mask[:, n]]
 
     return
 
@@ -1317,8 +1344,12 @@ def derive_httak4away(
 
         httak4away = htt + ak4away
 
-        sample.events["httak4away_dR"] = PAD_VAL * np.ones_like(sample.get_var("ak4JetPt"))
-        sample.events["httak4away_dR"][ak4_mask] = httak4away.delta_r()
+        for n in range(sample.get_var("ak4JetEta").shape[-1]):
+
+            sample.events[("httak4away_dR", str(n))] = (
+                PAD_VAL * np.ones_like(sample.get_var("ak4JetPt"))[:, n]
+            )
+            sample.events.loc[ak4_mask[:, n], ("httak4away_dR", str(n))] = httak4away.deltaR()
 
 
 def _add_bdt_scores(

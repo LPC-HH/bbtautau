@@ -239,8 +239,8 @@ def plot_optimization_thresholds(
                 marker=m,
             )
 
-    ax.set_xlabel(optimum.bb_disc_name)
-    ax.set_ylabel(optimum.tt_disc_name)
+    ax.set_xlabel(optimum.bb_disc_name + " score")
+    ax.set_ylabel(optimum.tt_disc_name + " score")
     cbar = plt.colorbar(sigmap, ax=ax)
     cbar.set_label("Signal yield")
     handles, labels = ax.get_legend_handles_labels()
@@ -333,7 +333,7 @@ def plot_optimization_sig_eff(
                 from matplotlib.colors import LogNorm
 
                 # Use LogNorm for logarithmic color scaling
-                norm = LogNorm(vmin=fom_data.min(), vmax=fom_data.max())
+                norm = LogNorm(vmin=np.nanmin(fom_data), vmax=np.nanmax(fom_data))
 
             # Plot FOM values on signal efficiency grid
             fommap = ax.pcolormesh(

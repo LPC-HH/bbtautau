@@ -79,6 +79,7 @@ class Trainer:
         self.bdt_config = bdt_config
         self.train_vars = self.bdt_config[self.modelname]["train_vars"]
         self.hyperpars = self.bdt_config[self.modelname]["hyperpars"]
+        self.feats = [feat for cat in self.train_vars for feat in self.train_vars[cat]]
 
         # find a better place for this
         self.classes = [
@@ -245,11 +246,10 @@ class Trainer:
             )
 
             avg_signal_weight = total_signal_weight / len_signal
-            feats = [feat for cat in self.train_vars for feat in self.train_vars[cat]]
 
             for sample_name, sample in self.events_dict[year].items():
 
-                X_sample = pd.DataFrame({feat: sample.get_var(feat) for feat in feats})
+                X_sample = pd.DataFrame({feat: sample.get_var(feat) for feat in self.feats})
 
                 weights = np.abs(sample.get_var("finalWeight").copy())
                 weights_rescaled = weights.copy()
@@ -588,7 +588,12 @@ class Trainer:
 
     def compute_rocs(self, discs=None, savedir=None):
 
+        time_start = time.time()
+
         y_pred = self.bst.predict(self.dval)
+
+        time_end = time.time()
+        print(f"Time taken to predict: {time_end - time_start} seconds")
 
         savedir = self.model_dir if savedir is None else Path(savedir)
         savedir.mkdir(parents=True, exist_ok=True)
@@ -605,8 +610,7 @@ class Trainer:
         print("background_names", background_names)
 
         event_filters = {name: self.dval.get_label() == i for i, name in enumerate(self.classes)}
-
-        time_start = time.time()
+        dval_df = pd.DataFrame(self.dval.get_data().toarray(), columns=self.feats)
 
         preds_dict = {}
         for class_name in self.classes:
@@ -616,12 +620,14 @@ class Trainer:
             events["finalWeight"] = self.dval.get_weight()[event_filters[class_name]]
             events = pd.DataFrame(events)
 
+            events = pd.concat(
+                [
+                    dval_df[event_filters[class_name]].reset_index(drop=True),
+                    events.reset_index(drop=True),
+                ],
+                axis=1,
+            )
             preds_dict[class_name] = LoadedSample(sample=self.samples[class_name], events=events)
-
-        time_end = time.time()
-        print(
-            f"Time taken to convert predictions to LoadedSamples: {time_end - time_start} seconds"
-        )
 
         multiclass_confusion_matrix(preds_dict, plot_dir=savedir)
 
@@ -634,40 +640,56 @@ class Trainer:
         #########################################################
         #########################################################
         # This part configures what background outputs to put in the taggers
+
+        # First do ParT taggers
+        parT_bkg_taggers = [["ttFatJetParTQCD", "ttFatJetParTTop"]]  # ["ttFatJetParTQCD"],
+
+        for sig_tagger in signal_names:
+            taukey = CHANNELS[sig_tagger[-2:]].tagger_label
+            parT_sig = f"ttFatJetParTX{taukey}"
+            for bkg_taggers in parT_bkg_taggers:
+                rocAnalyzer.process_discriminant(
+                    signal_name=sig_tagger,
+                    background_names=background_names,
+                    signal_tagger=parT_sig,
+                    background_taggers=bkg_taggers,
+                    custom_name=f"ParT {sig_tagger[-2:]}vsQCDTop",
+                )
+
+        # Then do BDT taggers
         bkg_tagger_groups = (
-            [["qcd"]]
-            + [["qcd", "ttbarhad", "ttbarll", "ttbarsl"]]
-            # + [["qcd", "dyjets"]]  # qcd and dy backgrounds
-            + [background_names]  # All backgrounds
+            # [["qcd"]] +
+            [["qcd", "ttbarhad", "ttbarll", "ttbarsl"]]
+            +
+            # [["qcd", "dyjets"]] + # qcd and dy backgrounds
+            [background_names]  # All backgrounds
         )
-
-        parT_discs = []
-        for sig in signal_names:
-            parT_discs.append(f"ttFatJetParTX{sig[-2:]}vsQCD")
-            parT_discs.append(f"ttFatJetParTX{sig[-2:]}vsQCDTop")
-
-        #########################################################
-        #########################################################
 
         for sig_tagger in signal_names:
             for bkg_taggers in bkg_tagger_groups:
+                name = (
+                    f"BDT {sig_tagger[-2:]}vsAll"
+                    if len(bkg_taggers) == 5
+                    else f"BDT {sig_tagger[-2:]}vsQCDTop"
+                )
                 rocAnalyzer.process_discriminant(
                     signal_name=sig_tagger,
                     background_names=background_names,
                     signal_tagger=sig_tagger,
                     background_taggers=bkg_taggers,
+                    custom_name=name,
                 )
-            rocAnalyzer.fill_discriminants(
-                parT_discs, signal_name=sig_tagger, background_names=background_names
-            )
+
+        #########################################################
+        #########################################################
 
         # Compute ROCs and comprehensive metrics
-        rocAnalyzer.compute_rocs()
-
         discs_by_sig = {
             sig: [disc for disc in rocAnalyzer.discriminants.values() if disc.signal_name == sig]
             for sig in signal_names
         }
+
+        rocAnalyzer.compute_rocs()
 
         # Initialize results structure
         eval_results = {"metrics": {}}
@@ -675,7 +697,7 @@ class Trainer:
         for sig, discs in discs_by_sig.items():
             disc_names = [disc.name for disc in discs]
             print("Plotting ROCs for", disc_names)
-            print(rocAnalyzer.discriminants[disc_names[0]])
+            print(discs)
             rocAnalyzer.plot_rocs(title=f"BDT {sig}", disc_names=disc_names, plot_dir=savedir)
 
             for disc in discs:

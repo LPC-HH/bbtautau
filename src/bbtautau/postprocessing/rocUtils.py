@@ -193,7 +193,9 @@ class Discriminant:
             sample_weight=self.get_weights(),
         )
         roc_auc = auc(fpr, tpr)
-        self.roc = ROC(fpr, tpr, thresholds, rename_jetbranch_ak8(self.get_name()), roc_auc)
+        roc = ROC(fpr, tpr, thresholds, rename_jetbranch_ak8(self.get_name()), roc_auc)
+        self.roc = roc
+        return roc
 
     def compute_metrics(self):
         """
@@ -249,7 +251,7 @@ class Discriminant:
         signal_weight = np.sum(weights[signal_mask])
         background_weight = np.sum(weights[~signal_mask])
 
-        self.metrics = Metrics(
+        metrics = Metrics(
             roc_auc=roc_auc,
             pr_auc=pr_auc,
             optimal_threshold=optimal_threshold,
@@ -268,6 +270,8 @@ class Discriminant:
             signal_weight=signal_weight,
             background_weight=background_weight,
         )
+        self.metrics = metrics
+        return metrics
 
     def get_discriminant_score(self):
         return self.disc_scores
@@ -596,6 +600,7 @@ class ROCAnalyzer:
             str
         ],  # names of the background taggers to include in the discriminant
         prefix: str = "",
+        custom_name: str = None,
     ):
         """
         Compute a discriminant from scratch using tagger scores and store it in the discriminants dict.
@@ -645,13 +650,17 @@ class ROCAnalyzer:
             [self.backgrounds[bg].get_var("finalWeight", pad_nan=True) for bg in background_names]
         )
 
-        bg_str = "".join(
-            [
-                SAMPLES[bg].label.replace(" ", "").replace("Multijet", "")
-                for bg in background_taggers
-            ]
-        ).replace("TTHadTTLLTTSL", "Top")
-        disc_name = f"{prefix}{signal_tagger}vs{bg_str}"
+        if custom_name:
+            disc_name = custom_name
+        else:
+            # this disc name works only when the name of the tagger score is also the name of the sample, for now default for the bdt setup
+            bg_str = "".join(
+                [
+                    SAMPLES[bg].label.replace(" ", "").replace("Multijet", "")
+                    for bg in background_taggers
+                ]
+            ).replace("TTHadTTLLTTSL", "Top")
+            disc_name = f"{prefix}{signal_tagger}vs{bg_str}"
 
         # Store the new discriminant object
         self.discriminants[disc_name] = Discriminant.from_raw_scores(
@@ -737,11 +746,17 @@ class ROCAnalyzer:
             print("Start computing ROCs...")
             t0 = time.time()
 
+        def _rocs_metrics(disc):
+            return disc.compute_roc(), disc.compute_metrics()
+
         # Compute both ROCs and comprehensive metrics
-        Parallel(n_jobs=-1, prefer="threads")(
-            delayed(lambda d: (d.compute_roc(), d.compute_metrics()))(disc)
-            for disc in self.discriminants.values()
+        results = Parallel(n_jobs=-1)(
+            delayed(_rocs_metrics)(disc) for disc in self.discriminants.values()
         )
+
+        for disc, (roc, metrics) in zip(self.discriminants.values(), results):
+            disc.roc = roc
+            disc.metrics = metrics
 
         if verbose:
             t1 = time.time()

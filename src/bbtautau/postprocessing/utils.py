@@ -110,7 +110,12 @@ class LoadedSample(utils.LoadedSampleABC):
     e_mask: np.ndarray = None
 
     def get_var(self, feat: str, pad_nan=False):
-        if feat.startswith("ttMuon"):
+        if feat in self.events:
+            if pad_nan:
+                return np.nan_to_num(self.events[feat].to_numpy().squeeze(), nan=PAD_VAL)
+            else:
+                return self.events[feat].to_numpy().squeeze()
+        elif feat.startswith("ttMuon"):
             if self.m_mask is None:
                 raise ValueError(f"m_mask is not set for {self.sample}")
             padded_array = np.full(len(self.events), PAD_VAL)
@@ -128,8 +133,6 @@ class LoadedSample(utils.LoadedSampleABC):
                 .squeeze()
             )
             return padded_array
-        elif feat in self.events:
-            return self.events[feat].to_numpy().squeeze()
 
         elif feat.startswith("bbFatJet"):
             if self.bb_mask is None:
