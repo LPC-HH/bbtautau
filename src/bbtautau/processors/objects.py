@@ -277,3 +277,52 @@ def good_boostedtaus(events, taus: TauArray):  # noqa: ARG001
 
     tau_sel = (taus.pt > 20) & (abs(taus.eta) < 2.5)
     return taus[tau_sel]
+
+
+def ak4_jets_awayfromak8(
+    jets: JetArray,
+    fatjets: FatJetArray,
+    events,
+    pt: float,
+    id: str,  # noqa: ARG001
+    eta_max: float,
+    dr_fatjets: float,
+    dr_leptons: float,
+    electron_pt: float,
+    muon_pt: float,
+    sort_by: str = "btag",
+):
+    """AK4 jets nonoverlapping with AK8 fatjets"""
+    electrons = events.Electron
+    electrons = electrons[electrons.pt > electron_pt]
+
+    muons = events.Muon
+    muons = muons[muons.pt > muon_pt]
+
+    ak4_sel = (
+        (jets.pt >= pt)
+        & (np.abs(jets.eta) <= eta_max)
+        & (ak.all(jets.metric_table(fatjets) > dr_fatjets, axis=2))
+        & ak.all(jets.metric_table(electrons) > dr_leptons, axis=2)
+        & ak.all(jets.metric_table(muons) > dr_leptons, axis=2)
+    )
+
+    # return top 2 jets sorted by btagPNetB
+    if sort_by == "btag":
+        jets_pnetb = jets[ak.argsort(jets.btagPNetB, ascending=False)]
+        return jets_pnetb[ak4_sel][:, :2]
+    # return 2 jets closet to fatjet0 and fatjet1, respectively
+    elif sort_by == "nearest":
+        jets_away = jets[ak4_sel]
+        FirstFatjet = ak.firsts(fatjets[:, 0:1])
+        SecondFatjet = ak.firsts(fatjets[:, 1:2])
+        jet_near_fatjet0 = jets_away[ak.argsort(jets_away.delta_r(FirstFatjet), ascending=True)][
+            :, 0:1
+        ]
+        jet_near_fatjet1 = jets_away[ak.argsort(jets_away.delta_r(SecondFatjet), ascending=True)][
+            :, 0:1
+        ]
+        return [jet_near_fatjet0, jet_near_fatjet1]
+    # return all nonoverlapping jets, no sorting
+    else:
+        return jets[ak4_sel]

@@ -351,14 +351,14 @@ class bbtautauSkimmer(SkimmerABC):
         # )
 
         # # AK4 objects away from first two fatjets
-        # ak4_jets_awayfromak8 = objects.ak4_jets_awayfromak8(
-        #     jets,
-        #     fatjets_xbb[:, :2],
-        #     events,
-        #     **self.ak4_bjet_selection,
-        #     **self.ak4_bjet_lepton_selection,
-        #     sort_by="nearest",
-        # )
+        ak4_jets_awayfromak8 = objects.ak4_jets_awayfromak8(
+            jets,
+            fatjets[:, :2],
+            events,
+            **self.ak4_bjet_selection,
+            **self.ak4_bjet_lepton_selection,
+            sort_by="nearest",
+        )
 
         # # JMSR
         # # TODO: add variations per variable
@@ -422,22 +422,22 @@ class bbtautauSkimmer(SkimmerABC):
             for (var, key) in jet_skimvars.items()
         }
 
-        # if len(ak4_jets_awayfromak8) == 2:
-        #     ak4JetAwayVars = {
-        #         f"AK4JetAway{key}": pad_val(
-        #             ak.concatenate(
-        #                 [ak4_jets_awayfromak8[0][var], ak4_jets_awayfromak8[1][var]], axis=1
-        #             ),
-        #             2,
-        #             axis=1,
-        #         )
-        #         for (var, key) in jet_skimvars.items()
-        #     }
-        # else:
-        #     ak4JetAwayVars = {
-        #         f"AK4JetAway{key}": pad_val(ak4_jets_awayfromak8[var], 2, axis=1)
-        #         for (var, key) in jet_skimvars.items()
-        #     }
+        if len(ak4_jets_awayfromak8) == 2:
+            ak4JetAwayVars = {
+                f"AK4JetAway{key}": pad_val(
+                    ak.concatenate(
+                        [ak4_jets_awayfromak8[0][var], ak4_jets_awayfromak8[1][var]], axis=1
+                    ),
+                    2,
+                    axis=1,
+                )
+                for (var, key) in jet_skimvars.items()
+            }
+        else:
+            ak4JetAwayVars = {
+                f"AK4JetAway{key}": pad_val(ak4_jets_awayfromak8[var], 2, axis=1)
+                for (var, key) in jet_skimvars.items()
+            }
 
         # AK8 Jet variables
         fatjet_skimvars = self.skim_vars["FatJet"]
@@ -536,7 +536,7 @@ class bbtautauSkimmer(SkimmerABC):
             **pileupVars,
             **trigMatchVars,
             **HLTVars,
-            # **ak4JetAwayVars,
+            **ak4JetAwayVars,
             **leptonVars,
             **ak4JetVars,
             **ak8FatJetVars,
