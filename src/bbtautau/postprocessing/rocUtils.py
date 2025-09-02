@@ -17,7 +17,19 @@ import numpy as np
 from boostedhh import hh_vars
 from boostedhh.utils import PAD_VAL
 from joblib import Parallel, delayed
-from sklearn.metrics import auc, roc_curve
+from scipy.interpolate import UnivariateSpline
+from sklearn.metrics import (
+    accuracy_score,
+    auc,
+    average_precision_score,
+    balanced_accuracy_score,
+    f1_score,
+    matthews_corrcoef,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    roc_curve,
+)
 from utils import LoadedSample, rename_jetbranch_ak8
 
 from bbtautau.postprocessing.plotting import plotting
@@ -31,6 +43,36 @@ class ROC:
     thresholds: np.ndarray
     label: str
     auc: float
+
+
+@dataclass
+class Metrics:
+    """Container for comprehensive performance metrics."""
+
+    # AUC-based metrics
+    roc_auc: float
+    pr_auc: float
+
+    # Threshold-dependent metrics at optimal point
+    optimal_threshold: float
+    f1_score: float
+    precision: float
+    recall: float
+    accuracy: float
+    balanced_accuracy: float
+    matthews_corr: float
+
+    # Threshold-dependent metrics at 0.5 threshold
+    f1_score_05: float
+    precision_05: float
+    recall_05: float
+    accuracy_05: float
+
+    # Additional info
+    n_signal: int
+    n_background: int
+    signal_weight: float
+    background_weight: float
 
 
 @dataclass
@@ -151,7 +193,85 @@ class Discriminant:
             sample_weight=self.get_weights(),
         )
         roc_auc = auc(fpr, tpr)
-        self.roc = ROC(fpr, tpr, thresholds, rename_jetbranch_ak8(self.get_name()), roc_auc)
+        roc = ROC(fpr, tpr, thresholds, rename_jetbranch_ak8(self.get_name()), roc_auc)
+        self.roc = roc
+        return roc
+
+    def compute_metrics(self):
+        """
+        Compute comprehensive performance metrics for the discriminant.
+        """
+        y_true = self.get_binary_labels()
+        y_scores = self.get_discriminant_score()
+        weights = self.get_weights()
+
+        # AUC-based metrics
+        roc_auc = roc_auc_score(y_true, y_scores, sample_weight=weights)
+        pr_auc = average_precision_score(y_true, y_scores, sample_weight=weights)
+
+        # Find optimal threshold using F1-score
+        thresholds = np.linspace(0, 1, 100)
+        f1_scores = []
+        for thresh in thresholds:
+            y_pred = (y_scores >= thresh).astype(int)
+            try:
+                f1 = f1_score(y_true, y_pred, sample_weight=weights, zero_division=0)
+                f1_scores.append(f1)
+            except:
+                f1_scores.append(0.0)
+
+        optimal_threshold = thresholds[np.argmax(f1_scores)]
+        y_pred_optimal = (y_scores >= optimal_threshold).astype(int)
+        y_pred_05 = (y_scores >= 0.5).astype(int)
+
+        # Compute metrics at optimal threshold
+        f1_optimal = f1_score(y_true, y_pred_optimal, sample_weight=weights, zero_division=0)
+        precision_optimal = precision_score(
+            y_true, y_pred_optimal, sample_weight=weights, zero_division=0
+        )
+        recall_optimal = recall_score(
+            y_true, y_pred_optimal, sample_weight=weights, zero_division=0
+        )
+        accuracy_optimal = accuracy_score(y_true, y_pred_optimal, sample_weight=weights)
+        balanced_acc_optimal = balanced_accuracy_score(
+            y_true, y_pred_optimal, sample_weight=weights
+        )
+        matthews_optimal = matthews_corrcoef(y_true, y_pred_optimal, sample_weight=weights)
+
+        # Compute metrics at 0.5 threshold
+        f1_05 = f1_score(y_true, y_pred_05, sample_weight=weights, zero_division=0)
+        precision_05 = precision_score(y_true, y_pred_05, sample_weight=weights, zero_division=0)
+        recall_05 = recall_score(y_true, y_pred_05, sample_weight=weights, zero_division=0)
+        accuracy_05 = accuracy_score(y_true, y_pred_05, sample_weight=weights)
+
+        # Sample statistics
+        signal_mask = y_true == 1
+        n_signal = np.sum(signal_mask)
+        n_background = np.sum(~signal_mask)
+        signal_weight = np.sum(weights[signal_mask])
+        background_weight = np.sum(weights[~signal_mask])
+
+        metrics = Metrics(
+            roc_auc=roc_auc,
+            pr_auc=pr_auc,
+            optimal_threshold=optimal_threshold,
+            f1_score=f1_optimal,
+            precision=precision_optimal,
+            recall=recall_optimal,
+            accuracy=accuracy_optimal,
+            balanced_accuracy=balanced_acc_optimal,
+            matthews_corr=matthews_optimal,
+            f1_score_05=f1_05,
+            precision_05=precision_05,
+            recall_05=recall_05,
+            accuracy_05=accuracy_05,
+            n_signal=n_signal,
+            n_background=n_background,
+            signal_weight=signal_weight,
+            background_weight=background_weight,
+        )
+        self.metrics = metrics
+        return metrics
 
     def get_discriminant_score(self):
         return self.disc_scores
@@ -188,6 +308,241 @@ class Discriminant:
             }
         else:
             return self.roc
+
+    def get_metrics(self, as_dict=False):
+        """Get comprehensive metrics for the discriminant."""
+        if not hasattr(self, "metrics"):
+            print(f"Warning: Metrics not computed for discriminant {self.get_name()}")
+            return None
+
+        if as_dict:
+            return {
+                "roc_auc": self.metrics.roc_auc,
+                "pr_auc": self.metrics.pr_auc,
+                "optimal_threshold": self.metrics.optimal_threshold,
+                "f1_score": self.metrics.f1_score,
+                "precision": self.metrics.precision,
+                "recall": self.metrics.recall,
+                "accuracy": self.metrics.accuracy,
+                "balanced_accuracy": self.metrics.balanced_accuracy,
+                "matthews_corr": self.metrics.matthews_corr,
+                "f1_score_05": self.metrics.f1_score_05,
+                "precision_05": self.metrics.precision_05,
+                "recall_05": self.metrics.recall_05,
+                "accuracy_05": self.metrics.accuracy_05,
+                "n_signal": self.metrics.n_signal,
+                "n_background": self.metrics.n_background,
+                "signal_weight": self.metrics.signal_weight,
+                "background_weight": self.metrics.background_weight,
+            }
+        else:
+            return self.metrics
+
+    def _spline_interpolate_threshold(self, tpr_values, threshold_values, target_tpr):
+        """
+        Interpolate threshold using spline with nearest neighbors around target TPR.
+
+        Args:
+            tpr_values (np.ndarray): Sorted unique TPR values
+            threshold_values (np.ndarray): Corresponding threshold values
+            target_tpr (float): Target TPR to find threshold for
+
+        Returns:
+            float: Interpolated threshold value
+        """
+        n_points = len(tpr_values)
+
+        # Find the index where target_tpr would be inserted to maintain order
+        insert_idx = np.searchsorted(tpr_values, target_tpr)
+
+        # Determine neighborhood around target point
+        # Use at least 4 points for cubic spline, more if available
+        min_points = min(4, n_points)
+        half_points = min_points // 2
+
+        # Calculate start and end indices for neighborhood
+        start_idx = max(0, insert_idx - half_points)
+        end_idx = min(n_points, start_idx + min_points)
+
+        # Adjust start if we hit the end boundary
+        if end_idx - start_idx < min_points:
+            start_idx = max(0, end_idx - min_points)
+
+        # Extract neighborhood points
+        tpr_neighborhood = tpr_values[start_idx:end_idx]
+        threshold_neighborhood = threshold_values[start_idx:end_idx]
+
+        # Handle edge cases
+        if len(tpr_neighborhood) < 2:
+            # Fall back to linear interpolation
+            return np.interp(target_tpr, tpr_values, threshold_values)
+
+        if len(tpr_neighborhood) == 2:
+            # Linear interpolation for 2 points
+            return np.interp(target_tpr, tpr_neighborhood, threshold_neighborhood)
+
+        # Check if target is exactly at a data point
+        exact_match = np.where(tpr_neighborhood == target_tpr)[0]
+        if len(exact_match) > 0:
+            return threshold_neighborhood[exact_match[0]]
+
+        try:
+            # Use cubic spline with smoothing
+            # s=0 for interpolation (passes through all points)
+            # k=min(3, len-1) for cubic or lower order if insufficient points
+            k = min(3, len(tpr_neighborhood) - 1)
+            spline = UnivariateSpline(tpr_neighborhood, threshold_neighborhood, k=k, s=0)
+            interpolated_value = float(spline(target_tpr))
+
+            # Sanity check: ensure result is within reasonable bounds
+            min_thresh = np.min(threshold_neighborhood)
+            max_thresh = np.max(threshold_neighborhood)
+
+            # If spline extrapolates beyond reasonable bounds, fall back to linear
+            if not (min_thresh <= interpolated_value <= max_thresh):
+                return np.interp(target_tpr, tpr_neighborhood, threshold_neighborhood)
+
+            return interpolated_value
+
+        except Exception as e:
+            # Fall back to linear interpolation if spline fails
+            print(f"Warning: Spline interpolation failed ({e}), using linear interpolation")
+            return np.interp(target_tpr, tpr_neighborhood, threshold_neighborhood)
+
+    def _vectorized_spline_interpolate(self, tpr_values, threshold_values, target_tprs):
+        """
+        Vectorized spline interpolation for multiple target TPR values.
+
+        Args:
+            tpr_values (np.ndarray): Sorted unique TPR values from ROC curve
+            threshold_values (np.ndarray): Corresponding threshold values
+            target_tprs (np.ndarray): Array of target TPR values to interpolate
+
+        Returns:
+            np.ndarray: Interpolated threshold values
+        """
+        n_points = len(tpr_values)
+
+        if n_points < 4:
+            # Use linear interpolation for insufficient points
+            return np.interp(target_tprs, tpr_values, threshold_values)
+
+        try:
+            # Create spline once and evaluate at all target points
+            k = min(3, n_points - 1)  # Cubic or lower order
+            # Check for problematic threshold values before spline creation
+            finite_mask = np.isfinite(threshold_values)
+            if not np.all(finite_mask):
+                tpr_values = tpr_values[finite_mask]
+                threshold_values = threshold_values[finite_mask]
+
+                if len(tpr_values) < 2:
+                    return np.full_like(target_tprs, np.nan)
+
+            spline = UnivariateSpline(tpr_values, threshold_values, k=k, s=0)
+
+            # Vectorized evaluation
+            interpolated_values = spline(target_tprs)
+
+            # Sanity check: ensure results are within reasonable bounds
+            min_thresh = np.min(threshold_values)
+            max_thresh = np.max(threshold_values)
+
+            # Check which values are out of bounds
+            out_of_bounds = (interpolated_values < min_thresh) | (interpolated_values > max_thresh)
+
+            if np.any(out_of_bounds):
+                # Fall back to linear interpolation for out-of-bounds values
+                linear_values = np.interp(target_tprs, tpr_values, threshold_values)
+                interpolated_values[out_of_bounds] = linear_values[out_of_bounds]
+
+            return interpolated_values
+
+        except Exception as e:
+            # Fall back to linear interpolation if spline fails
+            print(
+                f"Warning: Vectorized spline interpolation failed ({e}), using linear interpolation"
+            )
+            return np.interp(target_tprs, tpr_values, threshold_values)
+
+    def get_cut_from_sig_eff(self, target_sig_eff):
+        """
+        Get the discriminant threshold that yields a specific signal efficiency.
+
+        Signal efficiency is defined as TPR (True Positive Rate) = TP / (TP + FN).
+        This function interpolates the ROC curve to find the threshold corresponding
+        to the desired signal efficiency.
+
+        Args:
+            target_sig_eff (float or array-like): Desired signal efficiency between 0 and 1.
+                                                 Can be scalar or array for vectorized operation.
+
+        Returns:
+            float or ndarray: Discriminant threshold(s) that yield the target signal efficiency.
+                             Returns np.nan if target efficiency is not achievable or ROC not computed.
+
+        Examples:
+            >>> threshold_90pct = discriminant.get_cut_from_sig_eff(0.9)  # 90% signal efficiency
+            >>> thresholds = discriminant.get_cut_from_sig_eff([0.5, 0.7, 0.9])  # Vectorized
+        """
+        if not hasattr(self, "roc"):
+            print(f"Warning: ROC curve not computed for discriminant {self.get_name()}")
+            return np.nan if np.isscalar(target_sig_eff) else np.full_like(target_sig_eff, np.nan)
+
+        # Handle both scalar and array inputs
+        target_sig_eff = np.asarray(target_sig_eff)
+        is_scalar = target_sig_eff.ndim == 0
+
+        # Ensure we work with arrays for vectorized operations
+        if is_scalar:
+            target_sig_eff = target_sig_eff.reshape(1)
+
+        # Validate input range
+        invalid_mask = (target_sig_eff < 0) | (target_sig_eff > 1)
+        if np.any(invalid_mask):
+            print("Warning: Signal efficiency must be between 0 and 1, got invalid values")
+
+        tpr = self.roc.tpr
+        thresholds = self.roc.thresholds
+
+        # Prepare lookup data (do this once for all target efficiencies)
+        min_eff = np.min(tpr)
+        max_eff = np.max(tpr)
+
+        # Sort by TPR to ensure monotonic interpolation
+        sort_indices = np.argsort(tpr)
+        tpr_sorted = tpr[sort_indices]
+        thresholds_sorted = thresholds[sort_indices]
+
+        # Remove duplicate TPR values to avoid interpolation issues
+        unique_tpr, unique_indices = np.unique(tpr_sorted, return_index=True)
+        unique_thresholds = thresholds_sorted[unique_indices]
+
+        if len(unique_tpr) < 2:
+            print("Warning: Insufficient unique TPR values for interpolation")
+            result = np.full_like(target_sig_eff, thresholds[0], dtype=float)
+            return result[0] if is_scalar else result
+
+        # Vectorized bounds checking and interpolation
+        result = np.full_like(target_sig_eff, np.nan, dtype=float)
+
+        # Handle out-of-bounds cases
+        below_min = target_sig_eff < min_eff
+        above_max = target_sig_eff > max_eff
+        valid = ~below_min & ~above_max & ~invalid_mask
+
+        if np.any(below_min):
+            result[below_min] = thresholds[np.argmin(tpr)]
+        if np.any(above_max):
+            result[above_max] = thresholds[np.argmax(tpr)]
+
+        # Vectorized interpolation for valid points
+        if np.any(valid):
+            result[valid] = self._vectorized_spline_interpolate(
+                unique_tpr, unique_thresholds, target_sig_eff[valid]
+            )
+
+        return result[0] if is_scalar else result
 
 
 class ROCAnalyzer:
@@ -245,6 +600,7 @@ class ROCAnalyzer:
             str
         ],  # names of the background taggers to include in the discriminant
         prefix: str = "",
+        custom_name: str = None,
     ):
         """
         Compute a discriminant from scratch using tagger scores and store it in the discriminants dict.
@@ -294,13 +650,17 @@ class ROCAnalyzer:
             [self.backgrounds[bg].get_var("finalWeight", pad_nan=True) for bg in background_names]
         )
 
-        bg_str = "".join(
-            [
-                SAMPLES[bg].label.replace(" ", "").replace("Multijet", "")
-                for bg in background_taggers
-            ]
-        ).replace("TTHadTTLLTTSL", "Top")
-        disc_name = f"{prefix}{signal_tagger}vs{bg_str}"
+        if custom_name:
+            disc_name = custom_name
+        else:
+            # this disc name works only when the name of the tagger score is also the name of the sample, for now default for the bdt setup
+            bg_str = "".join(
+                [
+                    SAMPLES[bg].label.replace(" ", "").replace("Multijet", "")
+                    for bg in background_taggers
+                ]
+            ).replace("TTHadTTLLTTSL", "Top")
+            disc_name = f"{prefix}{signal_tagger}vs{bg_str}"
 
         # Store the new discriminant object
         self.discriminants[disc_name] = Discriminant.from_raw_scores(
@@ -386,15 +746,69 @@ class ROCAnalyzer:
             print("Start computing ROCs...")
             t0 = time.time()
 
-        Parallel(n_jobs=-1, prefer="threads")(
-            delayed(disc.compute_roc)() for disc in self.discriminants.values()
+        def _rocs_metrics(disc):
+            return disc.compute_roc(), disc.compute_metrics()
+
+        # Compute both ROCs and comprehensive metrics
+        results = Parallel(n_jobs=-1)(
+            delayed(_rocs_metrics)(disc) for disc in self.discriminants.values()
         )
+
+        for disc, (roc, metrics) in zip(self.discriminants.values(), results):
+            disc.roc = roc
+            disc.metrics = metrics
 
         if verbose:
             t1 = time.time()
             print(
                 f"Computed ROCs for {len(self.discriminants)} discriminants in {t1 - t0:.2f} seconds"
             )
+
+    def get_metrics_summary(self, signal_names=None, save_path=None):
+        """
+        Get a summary of all metrics for all discriminants.
+
+        Args:
+            signal_names: List of signal names to include. If None, include all.
+            save_path: Path to save CSV summary. If None, don't save.
+
+        Returns:
+            dict: Nested dictionary with metrics organized by signal and discriminant
+        """
+        summary = {}
+
+        for disc_name, disc in self.discriminants.items():
+            if not hasattr(disc, "metrics"):
+                continue
+
+            signal_name = disc.get_signal_name()
+            if signal_names is not None and signal_name not in signal_names:
+                continue
+
+            if signal_name not in summary:
+                summary[signal_name] = {}
+
+            summary[signal_name][disc_name] = disc.get_metrics(as_dict=True)
+
+        # Save to CSV if requested
+        if save_path is not None:
+            self._save_metrics_csv(summary, save_path)
+
+        return summary
+
+    def _save_metrics_csv(self, summary, save_path):
+        """Save metrics summary to CSV file."""
+        import pandas as pd
+
+        rows = []
+        for signal_name, disc_data in summary.items():
+            for disc_name, metrics in disc_data.items():
+                row = {"signal": signal_name, "discriminant": disc_name, **metrics}
+                rows.append(row)
+
+        summary_df = pd.DataFrame(rows)
+        summary_df.to_csv(save_path, index=False)
+        print(f"Metrics summary saved to {save_path}")
 
     def plot_disc_scores(
         self,
@@ -497,7 +911,7 @@ class ROCAnalyzer:
         (plot_dir / "rocs").mkdir(parents=True, exist_ok=True)
 
         if thresholds is None:
-            thresholds = [0.7, 0.9, 0.95, 0.99]
+            thresholds = [0.7, 0.9, 0.95]
 
         # check that all discriminants have the same signal name
         signal_name = self.discriminants[disc_names[0]].get_signal_name()
@@ -525,7 +939,7 @@ class ROCAnalyzer:
         )
 
     def compute_confusion_matrix(
-        self, discriminant_name, sig_vs_bkg=True, threshold=0.5, plot_dir=None, normalize=True
+        self, discriminant_name, threshold=0.5, plot_dir=None, normalize=True
     ):
         disc = self.discriminants[discriminant_name]
         disc_scores = disc.disc_scores
@@ -542,13 +956,8 @@ class ROCAnalyzer:
         label_to_col = {name: i for i, name in enumerate(col_names)}
 
         # Rows: 0 = predicted background, 1 = predicted signal
-        n_rows = 2 if sig_vs_bkg else len(col_names)
-
-        # Predicted class: 1 (signal) if disc_score >= threshold else 0 (background); otherwise just argmax of output
-        if sig_vs_bkg:
-            y_pred = (disc_scores >= threshold).astype(int)
-        else:
-            y_pred = np.argmax(disc_scores, axis=1)
+        n_rows = 2
+        y_pred = (disc_scores >= threshold).astype(int)
 
         # True class: index in col_names, determined from extended_labels
         y_true = np.array([label_to_col.get(lbl, n_cols - 1) for lbl in extended_labels])
@@ -607,10 +1016,12 @@ class ROCAnalyzer:
             (plot_dir / "confusion_matrix").mkdir(parents=True, exist_ok=True)
             suffix = "_normalized" if normalize else ""
             fig.savefig(
-                plot_dir / "confusion_matrix" / f"2byN_weighted{suffix}.png", bbox_inches="tight"
+                plot_dir / "confusion_matrix" / f"2byN_weighted{disc.get_name()}_{suffix}.png",
+                bbox_inches="tight",
             )
             fig.savefig(
-                plot_dir / "confusion_matrix" / f"2byN_weighted{suffix}.pdf", bbox_inches="tight"
+                plot_dir / "confusion_matrix" / f"2byN_weighted{disc.get_name()}_{suffix}.pdf",
+                bbox_inches="tight",
             )
         plt.close(fig)
 

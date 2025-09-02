@@ -91,11 +91,10 @@ python3 -m pip install -e .
 For submitting to condor, all you need is python >= 3.7.
 
 For running locally, follow the same virtual environment setup instructions
-above and install `coffea`
+above and activate the environment.
 
 ```bash
 micromamba activate hh
-pip install coffea
 ```
 
 Clone the repository:
@@ -110,7 +109,7 @@ pip install -e .
 For testing, e.g.:
 
 ```bash
-python src/run.py --samples HHbbtt --subsamples GluGlutoHHto2B2Tau_kl-1p00_kt-1p00_c2-0p00_LHEweights_TuneCP5_13p6TeV_powheg-pythia8 --starti 0 --endi 1 --year 2022 --processor skimmer
+python src/run.py --samples HHbbtt --subsamples GluGlutoHHto2B2Tau_kl-1p00_kt-1p00_c2-0p00 --starti 0 --endi 1 --year 2022 --processor skimmer
 ```
 
 ### Condor jobs
@@ -118,7 +117,7 @@ python src/run.py --samples HHbbtt --subsamples GluGlutoHHto2B2Tau_kl-1p00_kt-1p
 A single sample / subsample:
 
 ```bash
-python src/condor/submit.py --analysis bbtautau --git-branch BRANCH-NAME --site ucsd --save-sites ucsd lpc --processor skimmer --samples HHbbtt --subsamples GluGlutoHHto2B2Tau_kl-1p00_kt-1p00_c2-0p00_LHEweights_TuneCP5_13p6TeV_powheg-pythia8 --files-per-job 5 --tag 24Nov7Signal [--submit]
+python src/condor/submit.py --analysis bbtautau --git-branch BRANCH-NAME --site ucsd --save-sites ucsd lpc --processor skimmer --samples HHbbtt --subsamples  GluGlutoHHto2B2Tau_kl-1p00_kt-1p00_c2-0p00 --files-per-job 5 --tag 24Nov7Signal [--submit]
 ```
 
 Or from a YAML:
@@ -167,7 +166,7 @@ Arguments
 `--years` (list, default: 2022 2022EE 2023 2023BPix): List of years to include in the analysis.
 `--channels` (list, default: hh hm he): List of channels to run (default: all).
 `--test-mode` (flag, default: False): Run in test mode (reduced data size).
-`--use_bdt` (flag, default: False): Use BDT model for sensitivity study.
+`--use-bdt` (flag, default: False): Use BDT model for sensitivity study.
 `--modelname` (str, default: 28May25_baseline): Name of the BDT model to use.
 `--at-inference` (flag, default: False): Compute BDT predictions at inference time.
 `--actions` (list, required): Actions to perform. Choose one or more: `compute_rocs`, `plot_mass`, `sensitivity`, `time-methods`.
