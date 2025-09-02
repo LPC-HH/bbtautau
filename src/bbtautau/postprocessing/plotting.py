@@ -64,7 +64,6 @@ def ratioHistPlot(
     show: bool = False,
     **kwargs,
 ):
-
     if plot_significance:
         fig, axraxsax = plt.subplots(
             3,
