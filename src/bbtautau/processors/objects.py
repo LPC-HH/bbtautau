@@ -279,6 +279,37 @@ def good_boostedtaus(events, taus: TauArray):  # noqa: ARG001
     return taus[tau_sel]
 
 
+def vbf_jets(
+    # from HH4b https://github.com/LPC-HH/HH4b/blob/9d8038bcc31bf1872352e332eff84a4602934b3e/src/HH4b/processors/objects.py#L335
+    jets: JetArray,
+    fatjets: FatJetArray,
+    events,
+    pt: float,
+    id: str,  # noqa: ARG001
+    eta_max: float,
+    dr_fatjets: float,
+    dr_leptons: float,
+    electron_pt: float,
+    muon_pt: float,
+):
+    """Top 2 jets in pT passing the VBF selections"""
+    electrons = events.Electron
+    electrons = electrons[electrons.pt > electron_pt]
+
+    muons = events.Muon
+    muons = muons[muons.pt > muon_pt]
+
+    ak4_sel = (
+        (jets.pt >= pt)
+        & (np.abs(jets.eta) <= eta_max)
+        & (ak.all(jets.metric_table(fatjets) > dr_fatjets, axis=2))
+        & ak.all(jets.metric_table(electrons) > dr_leptons, axis=2)
+        & ak.all(jets.metric_table(muons) > dr_leptons, axis=2)
+    )
+
+    return jets[ak4_sel][:, :2]
+
+
 def ak4_jets_awayfromak8(
     jets: JetArray,
     fatjets: FatJetArray,
