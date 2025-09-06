@@ -342,18 +342,37 @@ def ak4_jets_awayfromak8(
     if sort_by == "btag":
         jets_pnetb = jets[ak.argsort(jets.btagPNetB, ascending=False)]
         return jets_pnetb[ak4_sel][:, :2]
-    # return 2 jets closet to fatjet0 and fatjet1, respectively
+    # return 2 jets closet to bbFatjet and ttFatjet, respectively
     elif sort_by == "nearest":
         jets_away = jets[ak4_sel]
-        FirstFatjet = ak.firsts(fatjets[:, 0:1])
-        SecondFatjet = ak.firsts(fatjets[:, 1:2])
-        jet_near_fatjet0 = jets_away[ak.argsort(jets_away.delta_r(FirstFatjet), ascending=True)][
+        bbFatjet = ak.firsts(
+            fatjets[
+                ak.argsort(
+                    fatjets["globalParT_XbbvsQCDTop"],
+                    ascending=False,
+                )
+            ][:, 0:1]
+        )
+
+        ttFatjet = ak.firsts(
+            fatjets[
+                ak.argsort(
+                    sum(
+                        fatjets[f"globalParT_X{tautau}vsQCDTop"]
+                        for tautau in ["tauhtauh", "tauhtaue", "tauhtaum"]
+                    ),
+                    ascending=False,
+                )
+            ][:, 0:1]
+        )
+
+        jet_near_bbFatjet = jets_away[ak.argsort(jets_away.delta_r(bbFatjet), ascending=True)][
             :, 0:1
         ]
-        jet_near_fatjet1 = jets_away[ak.argsort(jets_away.delta_r(SecondFatjet), ascending=True)][
+        jet_near_ttFatjet = jets_away[ak.argsort(jets_away.delta_r(ttFatjet), ascending=True)][
             :, 0:1
         ]
-        return [jet_near_fatjet0, jet_near_fatjet1]
+        return [jet_near_bbFatjet, jet_near_ttFatjet]
     # return all nonoverlapping jets, no sorting
     else:
         return jets[ak4_sel]
