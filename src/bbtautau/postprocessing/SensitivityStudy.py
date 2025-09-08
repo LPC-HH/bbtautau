@@ -33,7 +33,7 @@ from skopt import gp_minimize
 
 from bbtautau.postprocessing import utils
 from bbtautau.postprocessing.rocUtils import ROCAnalyzer
-from bbtautau.userConfig import DATA_PATHS, MODEL_DIR, SHAPE_VAR
+from bbtautau.userConfig import DATA_PATHS, MODEL_DIR, SHAPE_VAR, ABCD_SAMPLES
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("boostedhh.utils")
@@ -146,6 +146,7 @@ class Analyser:
             self.events_dict[year] = load_samples(
                 year=year,
                 paths=DATA_PATHS[year],
+                samples=ABCD_SAMPLES,
                 channels=[self.channel],
                 filters_dict=filters_dict,
                 load_columns=columns,
@@ -504,117 +505,6 @@ class Analyser:
 
         # signal, B(data), C(...), D(...), B(data-non_qcd_sim), C(...), D(...), TF = C(...)/D(...), sim_non_QCD_bg_in_A
         return sig_pass, bg_pass_sb, bg_fail_res, bg_fail_sb, qcd_pass_sb, qcd_fail_res, qcd_fail_sb, qcd_fail_res / qcd_fail_sb, non_qcd_bg_pass_res
-
-    def compute_sig_bkg_abcd_w_llsl_weight(self, years, txbbcut, txttcut, llsl_weight, mbb1, mbb2, mtt1, mtt2):
-        # calculate the tt BDT disc with the ttllsl_mod coefficient
-        for year in years:
-            for key in [self.sig_key] + self.channel.data_samples:
-                self.txbbs[year][key] = self.events_dict[year][key].get_var("bbFatJetParTXbbvsQCD")
-                if self.use_bdt:
-                    sig_score = self.events_dict[year][key].get_var(f"BDTScore{self.taukey}")
-                    QCD_score = self.events_dict[year][key].get_var("BDTScoreQCD")
-                    TThad_score = self.events_dict[year][key].get_var("BDTScoreTThad")
-                    TTll_score = self.events_dict[year][key].get_var("BDTScoreTTll")
-                    TTSL_score = self.events_dict[year][key].get_var("BDTScoreTTSL")
-                    DY_score = self.events_dict[year][key].get_var("BDTScoreDY")
-
-                    self.txtts[year][key] = np.nan_to_num(
-                            sig_score
-                            / (
-                                sig_score
-                                + QCD_score
-                                + TThad_score
-                                + llsl_weight * TTll_score
-                                + llsl_weight * TTSL_score
-                                + DY_score
-                            ),
-                            nan=PAD_VAL
-                    )
-
-        # pass/fail from taggers
-        sig_pass = 0  # resonant region pass, signal
-        bg_pass_sb = 0  # sideband region pass, data
-        bg_fail_res = 0  # resonant region fail, data
-        bg_fail_sb = 0  # sideband region fail, data
-        for year in years:
-
-            cut_sig_pass = (
-                (self.txbbs[year][self.sig_key] > txbbcut)
-                & (self.txtts[year][self.sig_key] > txttcut)
-                & (self.massbb[year][self.sig_key] > mbb1)
-                & (self.massbb[year][self.sig_key] < mbb2)
-                & (self.ptbb[year][self.sig_key] > 250)
-                & (self.pttt[year][self.sig_key] > 200)
-            )
-            if not self.use_bdt:
-                cut_sig_pass &= (self.masstt[year][self.sig_key] > mtt1) & (
-                    self.masstt[year][self.sig_key] < mtt2
-                )
-
-            sig_pass += np.sum(
-                self.events_dict[year][self.sig_key].events["finalWeight"][cut_sig_pass]
-            )
-
-            for key in self.channel.data_samples:
-                cut_bg_pass_sb = (
-                    (self.txbbs[year][key] > txbbcut)
-                    & (self.txtts[year][key] > txttcut)
-                    & (self.ptbb[year][key] > 250)
-                    & (self.pttt[year][key] > 200)
-                )
-                if not self.use_bdt:
-                    cut_bg_pass_sb &= (self.masstt[year][key] > mtt1) & (
-                        self.masstt[year][key] < mtt2
-                    )
-
-                msb1 = (self.massbb[year][key] > SHAPE_VAR["range"][0]) & (
-                    self.massbb[year][key] < mbb1
-                )
-                msb2 = (self.massbb[year][key] > mbb2) & (
-                    self.massbb[year][key] < SHAPE_VAR["range"][1]
-                )
-                bg_pass_sb += np.sum(
-                    self.events_dict[year][key].events["finalWeight"][cut_bg_pass_sb & msb1]
-                )
-                bg_pass_sb += np.sum(
-                    self.events_dict[year][key].events["finalWeight"][cut_bg_pass_sb & msb2]
-                )
-                cut_bg_fail_sb = (
-                    ((self.txbbs[year][key] < txbbcut) | (self.txtts[year][key] < txttcut))
-                    & (self.ptbb[year][key] > 250)
-                    & (self.pttt[year][key] > 200)
-                )
-                if not self.use_bdt:
-                    cut_bg_fail_sb &= (self.masstt[year][key] > mtt1) & (
-                        self.masstt[year][key] < mtt2
-                    )
-
-                bg_fail_sb += np.sum(
-                    self.events_dict[year][key].events["finalWeight"][cut_bg_fail_sb & msb1]
-                )
-                bg_fail_sb += np.sum(
-                    self.events_dict[year][key].events["finalWeight"][cut_bg_fail_sb & msb2]
-                )
-                cut_bg_fail_res = (
-                    ((self.txbbs[year][key] < txbbcut) | (self.txtts[year][key] < txttcut))
-                    & (self.massbb[year][key] > mbb1)
-                    & (self.massbb[year][key] < mbb2)
-                    & (self.ptbb[year][key] > 250)
-                    & (self.pttt[year][key] > 200)
-                )
-                if not self.use_bdt:
-                    cut_bg_fail_res &= (self.masstt[year][key] > mtt1) & (
-                        self.masstt[year][key] < mtt2
-                    )
-
-                bg_fail_res += np.sum(
-                    self.events_dict[year][key].events["finalWeight"][cut_bg_fail_res]
-                )
-
-        del cut_sig_pass, cut_bg_pass_sb, cut_bg_fail_sb, cut_bg_fail_res, msb1, msb2
-
-        # signal, B, C, D, TF = C/D
-        return sig_pass, bg_pass_sb, bg_fail_res, bg_fail_sb, bg_fail_res / bg_fail_sb
 
     def grid_search_opt(
         self,

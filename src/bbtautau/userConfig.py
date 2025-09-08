@@ -7,6 +7,8 @@ Authors: Ludovico Mori
 from __future__ import annotations
 
 from pathlib import Path
+from boostedhh import hh_vars
+from boostedhh.utils import Sample
 
 MAIN_DIR = Path("../../")
 MODEL_DIR = Path(
@@ -38,6 +40,54 @@ DATA_PATHS = {
         "bg": Path(data_dir_otheryears),
         "signal": Path(data_dir_otheryears),
     },
+}
+
+ABCD_SAMPLES = {
+    "jetmet": Sample(
+        selector="^(JetHT|JetMET)",
+        label="JetMET",
+        isData=True,
+    ),
+    "tau": Sample(
+        selector="^Tau_Run",
+        label="Tau",
+        isData=True,
+    ),
+    "muon": Sample(
+        selector="^Muon_Run",
+        label="Muon",
+        isData=True,
+    ),
+    "egamma": Sample(
+        selector="^EGamma_Run",
+        label="EGamma",
+        isData=True,
+    ),
+    "ttbarhad": Sample(
+        selector="^TTto4Q",
+        label="TT Had",
+        isSignal=False,
+    ),
+    "ttbarsl": Sample(
+        selector="^TTtoLNu2Q",
+        label="TT SL",
+        isSignal=False,
+    ),
+    "ttbarll": Sample(
+        selector="^TTto2L2Nu",
+        label="TT LL",
+        isSignal=False,
+    ),
+    "dyjets": Sample(
+        selector="^DYto2L",
+        label="DY+Jets",
+        isSignal=False,
+    ),
+    "bbtt": Sample(
+        selector=hh_vars.bbtt_sigs["bbtt"],
+        label=r"ggF HHbb$\tau\tau$",
+        isSignal=True,
+    ),
 }
 
 # Probably could make a file just to configure the fit
