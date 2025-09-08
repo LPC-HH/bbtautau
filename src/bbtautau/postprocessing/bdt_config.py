@@ -104,6 +104,7 @@ bdt_config = {
         "test_size": 0.8,
         "random_seed": 42,
         "train_vars": {
+            "misc": ["METPt", "METPhi"],
             "fatjet": [
                 "ttFatJetPt",
                 "ttFatJetPhi",
@@ -122,7 +123,6 @@ bdt_config = {
                 "ttFatJetParTXtauhtaum",
                 "ttFatJetParTXbb",
             ],
-            "misc": ["METPt", "METPhi"],
         },
     },
     "10July25_leptons": {
@@ -244,7 +244,7 @@ bdt_config = {
             "num_class": 8,
             # "device": "cuda",
         },
-        "num_rounds": 500,
+        "num_rounds": 300,
         "test_size": 0.2,
         "random_seed": 42,
         "var_classes": ["fatjet", "leptons", "misc"],

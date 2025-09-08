@@ -110,7 +110,7 @@ control_plot_vars = (
         )
         for i in range(3)
     ]
-    # ak8FatJetParTXbbvsQCD
+    # ak8FatJetParXbbvsQCD
     + [
         ShapeVar(
             var=f"ak8FatJetParTXbbvsQCD{i}",
@@ -224,7 +224,7 @@ def main(args: argparse.Namespace):
         args.bgs = {bkey: b for bkey, b in SAMPLES.items() if b.get_type() == "bg"}
 
     if args.templates:
-        filters = bb_filters(num_fatjets=3, bb_cut=0.3)
+        filters = bb_filters(num_fatjets=3, bb_cut=0.3, bb_disc=args.bb_disc)
         print("Using bb filters")
         # filters = tt_filters(CHANNEL, filters, num_fatjets=3, tt_cut=0.3)
     else:
@@ -258,7 +258,7 @@ def main(args: argparse.Namespace):
     derive_variables(events_dict, CHANNEL)
 
     print("\nbbtautau assignment")
-    bbtautau_assignment(events_dict, CHANNEL, agnostic=True)
+    bbtautau_assignment(events_dict, CHANNEL, agnostic=True, bb_disc=args.bb_disc)
     leptons_assignment(events_dict, dR_cut=1.5)
 
     if args.use_bdt:
@@ -306,7 +306,7 @@ def main(args: argparse.Namespace):
     gc.collect()
 
 
-def base_filter(test_mode: bool = False):
+def base_filter(test_mode: bool = False, bb_disc: str = "ak8FatJetParTXbbvsQCD"):
     """
     Returns the base filters for the data, signal, and background samples.
     """
@@ -316,25 +316,26 @@ def base_filter(test_mode: bool = False):
         for i in range(len(base_filters)):
             base_filters[i] += [
                 ("('ak8FatJetPhi', '0')", ">=", 2.9),
-                ("('ak8FatJetParTXbbvsQCD', '0')", ">=", 0.7),
+                (f"('{bb_disc}', '0')", ">=", 0.7),
             ]
 
     return {"data": base_filters, "signal": base_filters, "bg": base_filters}
 
 
 def bb_filters(
-    in_filters: dict[str, list[tuple]] = None, num_fatjets: int = 3, bb_cut: float = 0.3
+    in_filters: dict[str, list[tuple]] = None, num_fatjets: int = 3, bb_cut: float = 0.3,
+    bb_disc: str = "ak8FatJetParTXbbvsQCD",
 ):
     """
     0.3 corresponds to roughly, 85% signal efficiency, 2% QCD efficiency (pT: 250-400, mSD:0-250, mRegLegacy:40-250)
     """
     if in_filters is None:
-        in_filters = base_filter()
+        in_filters = base_filter(bb_disc=bb_disc)
 
     filters = {}
     for dtype, ifilters_bydtype in in_filters.items():
         filters[dtype] = [
-            ifilter + [(f"('ak8FatJetParTXbbvsQCD', '{n}')", ">=", bb_cut)]
+            ifilter + [(f"('{bb_disc}', '{n}')", ">=", bb_cut)]
             for n in range(num_fatjets)
             for ifilter in ifilters_bydtype
         ]
@@ -347,9 +348,10 @@ def tt_filters(
     in_filters: dict[str, list[tuple]] = None,
     num_fatjets: int = 3,
     tt_cut: float = 0.3,
+    bb_disc: str = "ak8FatJetParTXbbvsQCD",
 ):
     if in_filters is None:
-        in_filters = base_filter()
+        in_filters = base_filter(bb_disc=bb_disc)
 
     if channel.key == "hm":
         warnings.warn(
@@ -648,7 +650,7 @@ def load_samples(
             )
             return None
 
-        data_ = Parallel(n_jobs=len(samples))(
+        data_ = Parallel(n_jobs=2)(
             delayed(LoadedSample)(
                 sample=sample,
                 events=utils.load_sample(
@@ -970,6 +972,7 @@ def bbtautau_assignment(
     events_dict: dict[str, pd.DataFrame | LoadedSample],
     channel: Channel = None,
     agnostic: bool = False,
+    bb_disc: str = "ak8FatJetParTXbbvsQCD",
 ):
     """Assign bb and tautau jets per each event."""
 
@@ -1011,7 +1014,7 @@ def bbtautau_assignment(
             )
 
         # assign bb jet as the one with the highest ParTXbbvsQCD score, but prioritize tautau
-        bb_sorted = np.argsort(sample.get_var("ak8FatJetParTXbbvsQCD"), axis=1)
+        bb_sorted = np.argsort(sample.get_var(bb_disc), axis=1)
         bb_highest = bb_sorted[:, -1]
         bb_second_highest = bb_sorted[:, -2]
         bb_pick = np.where(bb_highest == tautau_pick, bb_second_highest, bb_highest)
@@ -1104,6 +1107,7 @@ def _add_bdt_scores(
     multiclass: bool,
     all_outs: bool = True,
     jshift: str = "",
+    llsl_weight: float = 1,
 ):
     """
     Assumes map to be
@@ -1153,8 +1157,8 @@ def _add_bdt_scores(
                     events[f"BDTScore{taukey+jshift}"]
                     + events["BDTScoreQCD"]
                     + events["BDTScoreTThad"]
-                    + events["BDTScoreTTll"]
-                    + events["BDTScoreTTSL"]
+                    + llsl_weight * events["BDTScoreTTll"]
+                    + llsl_weight * events["BDTScoreTTSL"]
                     + events["BDTScoreDY"]
                 ),
                 nan=PAD_VAL,
@@ -1165,6 +1169,7 @@ def compute_bdt_preds(
     data: dict[str, dict[str, LoadedSample]],
     modelname: str,
     model_dir: Path,
+    llsl_weight: float = 1,
 ) -> dict[str, dict[str, np.ndarray]]:
     """Compute BDT predictions for multiple years and samples.
 
@@ -1203,7 +1208,7 @@ def compute_bdt_preds(
             )
 
             y_pred = bst.predict(dsample)
-            _add_bdt_scores(data[year][sample_name].events, y_pred, multiclass=True, all_outs=True)
+            _add_bdt_scores(data[year][sample_name].events, y_pred, multiclass=True, all_outs=True, llsl_weight=llsl_weight)
 
 
 def load_bdt_preds(
@@ -1828,6 +1833,14 @@ def parse_args(parser=None):
         help="Minimum bkg yield for the TXbb/Txtt cuts. Need to be present in the csv file",
         default=1,
         type=int,
+    )
+
+    parser.add_argument(
+        "--bb-disc",
+        help="bb discriminator to optimize",
+        default="ak8FatJetParTXbbvsQCD",
+        choices=["ak8FatJetParTXbbvsQCD", "ak8FatJetParTXbbvsQCDTop", "ak8FatJetPNetXbbvsQCDLegacy"],
+        type=str
     )
 
     args = parser.parse_args()
