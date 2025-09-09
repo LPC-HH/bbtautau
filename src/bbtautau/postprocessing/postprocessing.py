@@ -61,6 +61,10 @@ control_plot_vars = (
         for jet, jlabel in [("bb", "bb"), ("tt", r"\tau\tau")]
     ]
     + [
+        ShapeVar(var=f"{jet}FatJetMass", label=rf"$m^{{{jlabel}}}$ [GeV]", bins=[20, 250, 1250])
+        for jet, jlabel in [("bb", "bb"), ("tt", r"\tau\tau")]
+    ]
+    + [
         ShapeVar(
             var="METPt", label=r"$p^{miss}_T$ [GeV]", bins=[20, 0, 300]
         ),  # METPt is used for resel samples
