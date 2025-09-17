@@ -82,11 +82,15 @@ class bbtautauSkimmer(SkimmerABC):
             "charge": "charge",
             "idMVAnewDM2017v2": "idMVAnewDM2017v2",
         },
+        "SubJet": {
+            **P4,
+        },
         "FatJet": {
             **P4,
             "msoftdrop": "Msd",
             "t32": "Tau3OverTau2",
             "rawFactor": "rawFactor",
+            "particleNet_massCorr": "particleNet_massCorr",
             # tagger variables added below
         },
         "GenHiggs": P4,
@@ -232,6 +236,33 @@ class bbtautauSkimmer(SkimmerABC):
             **{f"globalParT_{var}": f"ParT{var}" for var in glopart_vars},
         }
 
+        #CA variables
+        ca_vars = [
+            "mass",
+            "msoftdrop",
+            "globalParT_massVisApplied",
+            "globalParT_massResApplied",
+            "particleNet_mass_legacy",
+            "isDauTau",
+            "dau0_pt",
+            "dau1_pt",
+            "dau0_eta",
+            "dau1_eta",
+            "dau0_phi",
+            "dau1_phi",
+            "dau0_mass",
+            "dau1_mass",
+            "ntaus_perfatjets",
+            "mass_subjets",
+            "mass_boostedtaus",
+            "nsubjets_perfatjets",
+        ]
+
+        self.skim_vars["FatJet"] = {
+            **self.skim_vars["FatJet"],
+            **{f"CA_{var}": f"CA{var}" for var in ca_vars},
+        }
+
         # update fatjet pT cut
         if fatjet_pt_cut is not None:
             self.fatjet_selection["pt"] = fatjet_pt_cut
@@ -291,6 +322,10 @@ class bbtautauSkimmer(SkimmerABC):
         muons, mtrigvars = objects.good_muons(events, events.Muon, year)
         taus, ttrigvars = objects.good_taus(events, events.Tau, year)
         boostedtaus = objects.good_boostedtaus(events, events.boostedTau)
+
+        # SubJets
+        num_subjets = 3
+        subjets = events.SubJet
 
         # These are bools saying if the lepton is matched to a trigger object or not
         trigMatchVars = {**etrigvars, **mtrigvars, **ttrigvars}
@@ -376,6 +411,9 @@ class bbtautauSkimmer(SkimmerABC):
         #     isData=isData,
         # )
 
+        fatjets = objects.get_CA_MASS(fatjets, boostedtaus, met, subjets)
+        print("CA mass", f"{time.time() - start:.2f}")
+
         #########################
         # Save / derive variables
         #########################
@@ -413,6 +451,12 @@ class bbtautauSkimmer(SkimmerABC):
             for (var, key) in self.skim_vars["BoostedTau"].items()
         }
         leptonVars = {**electronVars, **muonVars, **tauVars, **boostedtauVars}
+
+        #Subjets
+        subjetVars = {
+            f"SubJet{key}": pad_val(subjets[var], num_subjets, axis=1)
+            for (var, key) in self.skim_vars["SubJet"].items()
+        }
 
         # AK4 Jet variables
         jet_skimvars = self.skim_vars["Jet"]
@@ -499,6 +543,14 @@ class bbtautauSkimmer(SkimmerABC):
         eventVars["nBoostedTaus"] = ak.num(boostedtaus).to_numpy()
         eventVars["nJets"] = ak.num(jets).to_numpy()
         eventVars["nFatJets"] = ak.num(fatjets).to_numpy()
+        eventVars["nSubJets"] = ak.num(subjets).to_numpy()
+
+        #jin for CA
+        # eventVars["CA_matched_tau_pt_sum"] = ca_tau_pt_sum.to_numpy()
+        # eventVars["CA_tau_idx_0"] = ca_tau_indices[:, 0].to_numpy()
+        # eventVars["CA_tau_idx_1"] = ca_tau_indices[:, 1].to_numpy()
+        # eventVars["CA_best_fatjet_idx"] = ca_best_fatjet_idx.to_numpy()
+
         if isData:
             pileupVars = {key: np.ones(len(events)) * PAD_VAL for key in self.skim_vars["Pileup"]}
         else:
@@ -545,6 +597,7 @@ class bbtautauSkimmer(SkimmerABC):
             **ak4JetVars,
             **ak8FatJetVars,
             **metVars,
+            **subjetVars,
             # **bbFatJetVars,
             # **trigObjFatJetVars,
             **vbfJetVars,

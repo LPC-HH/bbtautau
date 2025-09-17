@@ -106,7 +106,6 @@ def ratioHistPlot(
     blind_region: list = None,
     **kwargs,
 ):
-
     if plot_significance:
         fig, axraxsax = plt.subplots(
             3,
