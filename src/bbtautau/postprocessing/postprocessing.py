@@ -13,14 +13,15 @@ import logging
 import pickle
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 
 import hist
 import matplotlib as mpl
-import numba
 import numpy as np
 import pandas as pd
+import vector
 import xgboost as xgb
 from bdt_config import bdt_config
 from boostedhh import hh_vars, utils
@@ -159,66 +160,90 @@ shape_vars = [
 ]
 
 
+def extract_optimal_cuts_from_csv(
+    sensitivity_dir: Path, channel_name: str, model: str, use_bdt: bool, bmin: int
+):
+    """
+    Extract optimal cuts for a given bmin value from sensitivity study CSV files.
+
+    Args:
+        sensitivity_dir: Path to the sensitivity study's output directory
+        channel_name: Channel name (e.g., 'hh', 'hm', 'he')
+        model: Model name to use for path construction
+        use_bdt: Whether using BDT cuts
+        bmin: Minimum background yield value
+
+    Returns:
+        tuple: (txbb_cut, txtt_cut) - The optimal cuts for the given bmin
+    """
+    # read the first available FOM CSV file
+    csv_dir = Path(sensitivity_dir).joinpath(
+        f"full_presel/{model if use_bdt else 'ParT'}/{channel_name}"
+    )
+
+    # Look for any FOM-specific CSV files
+    csv_files = list(csv_dir.glob("*_opt_results_*.csv"))
+
+    if len(csv_files) == 0:
+        raise ValueError(f"No sensitivity CSV files found in {csv_dir}")
+
+    # Take the first CSV file found and extract FOM name
+    csv_file = sorted(csv_files)[0]  # Sort for reproducible behavior
+    print(f"Reading CSV: {csv_file}")
+
+    # Extract FOM name from filename like "2022_2022EE_opt_results_2sqrtB_S_var.csv"
+    if "_opt_results_" in csv_file.name:
+        fom_name = csv_file.name.split("_opt_results_")[1].replace(".csv", "")
+    else:
+        fom_name = "unknown"
+
+    # Read as simple CSV (no multi-level headers)
+    opt_results = pd.read_csv(csv_file, index_col=0)
+    print(f"Using FOM: {fom_name}")
+    print(f"Available B_min values: {opt_results.columns.tolist()}")
+
+    # Check if the target Bmin column exists
+    target_col = f"Bmin={bmin}"
+    if target_col not in opt_results.columns:
+        raise ValueError(
+            f"B_min={bmin} not found in CSV. Available: {opt_results.columns.tolist()}"
+        )
+
+    # Extract the cuts
+    txbb_cut = float(opt_results.loc["Cut_Xbb", target_col])
+    if use_bdt:
+        txtt_cut = float(opt_results.loc["Cut_Xtt", target_col])
+    else:
+        txtt_cut = float(opt_results.loc["Cut_Xtt", target_col])
+
+    print(f"Extracted cuts for Bmin={bmin}: TXbb={txbb_cut}, Txtt={txtt_cut}")
+
+    return txbb_cut, txtt_cut
+
+
 def main(args: argparse.Namespace):
-    CHANNEL = CHANNELS[args.channel]
+    """
+    Main function that handles multiple bmin values.
+    Data is loaded once, but templates are generated for each bmin value with updated cuts.
+    """
+    # Convert single bmin value to list for backward compatibility
+    if isinstance(args.bmin, int):
+        args.bmin = [args.bmin]
 
-    # update TXbb and Txtt cuts if a sensitivity output csv path is provided
-    if args.sensitivity_dir is not None:
-        CHANNEL = deepcopy(CHANNEL)
+    print(f"Processing bmin values: {args.bmin}")
 
-        # read the first available FOM CSV file
-        csv_dir = Path(args.sensitivity_dir).joinpath(
-            f"full_presel/{args.model if args.use_bdt else 'ParT'}/{args.channel}"
-        )
-
-        # Look for any FOM-specific CSV files
-        csv_files = list(csv_dir.glob("*_opt_results_*.csv"))
-
-        if len(csv_files) == 0:
-            raise ValueError(f"No sensitivity CSV files found in {csv_dir}")
-
-        # Take the first CSV file found and extract FOM name
-        csv_file = sorted(csv_files)[0]  # Sort for reproducible behavior
-        print(f"Reading CSV: {csv_file}")
-
-        # Extract FOM name from filename like "2022_2022EE_opt_results_2sqrtB_S_var.csv"
-        if "_opt_results_" in csv_file.name:
-            fom_name = csv_file.name.split("_opt_results_")[1].replace(".csv", "")
-        else:
-            fom_name = "unknown"
-
-        # Read as simple CSV (no multi-level headers)
-        opt_results = pd.read_csv(csv_file, index_col=0)
-        print(f"Using FOM: {fom_name}")
-        print(f"Available B_min values: {opt_results.columns.tolist()}")
-
-        # Check if the target Bmin column exists
-        target_col = f"Bmin={args.bmin}"
-        if target_col not in opt_results.columns:
-            raise ValueError(
-                f"B_min={args.bmin} not found in CSV. Available: {opt_results.columns.tolist()}"
-            )
-
-        # update the CHANNEL cuts
-        CHANNEL.txbb_cut = float(opt_results.loc["Cut_Xbb", target_col])
-        if args.use_bdt:
-            CHANNEL.txtt_BDT_cut = float(opt_results.loc["Cut_Xtt", target_col])
-        else:
-            CHANNEL.txtt_cut = float(opt_results.loc["Cut_Xtt", target_col])
-
-        print(
-            f"Updated TXbb and Txtt cuts to {CHANNEL.txbb_cut} and {CHANNEL.txtt_cut if not args.use_bdt else CHANNEL.txtt_BDT_cut} for {args.channel}"
-        )
-
+    # Set up data paths and sample configurations
     data_paths = {
         "signal": args.signal_data_dirs,
         "data": args.data_dir,
         "bg": args.bg_data_dirs,
     }
 
+    # Use base channel configuration (without cuts update yet)
+    BASE_CHANNEL = CHANNELS[args.channel]
+
     if args.sigs is None:
-        sigs = ["bbtt", "vbfbbtt-k2v0"]
-        args.sigs = {s + CHANNEL.key: SAMPLES[s + CHANNEL.key] for s in sigs}
+        args.sigs = ["ggfbbtt", "vbfbbtt-k2v0"]
 
     if args.bgs is None:
         args.bgs = {bkey: b for bkey, b in SAMPLES.items() if b.get_type() == "bg"}
@@ -226,17 +251,18 @@ def main(args: argparse.Namespace):
     if args.templates:
         filters = bb_filters(num_fatjets=3, bb_cut=0.3)
         print("Using bb filters")
-        # filters = tt_filters(CHANNEL, filters, num_fatjets=3, tt_cut=0.3)
+        # filters = tt_filters(BASE_CHANNEL, filters, num_fatjets=3, tt_cut=0.3)
     else:
         filters = None
 
-    print("Loading samples")
+    print("Loading samples (once for all bmin values)")
 
-    # dictionary that will contain all information (from all samples)
+    # Load data once
     events_dict = load_samples(
         args.year,
         data_paths,
-        [CHANNEL],
+        args.sigs,
+        [BASE_CHANNEL],
         load_data=True,
         load_bgs=True,
         filters_dict=filters,
@@ -244,66 +270,112 @@ def main(args: argparse.Namespace):
         multithread=True,
     )
 
+    args.sigs = {s + BASE_CHANNEL.key: SAMPLES[s + BASE_CHANNEL.key] for s in args.sigs}
+
     cutflow = utils.Cutflow(samples=events_dict)
     cutflow.add_cut(events_dict, "Preselection", "finalWeight")
     print(cutflow.cutflow)
 
     print("\nTriggers")
-    apply_triggers(events_dict, args.year, CHANNEL)
+    apply_triggers(events_dict, args.year, BASE_CHANNEL)
     cutflow.add_cut(events_dict, "Triggers", "finalWeight")
     print(cutflow.cutflow)
 
-    delete_columns(events_dict, args.year, channels=[CHANNEL])
+    delete_columns(events_dict, args.year, channels=[BASE_CHANNEL])
 
-    derive_variables(events_dict, CHANNEL)
+    derive_variables(events_dict, BASE_CHANNEL)
 
     print("\nbbtautau assignment")
-    bbtautau_assignment(events_dict, CHANNEL, agnostic=True)
+    bbtautau_assignment(events_dict, BASE_CHANNEL, agnostic=True)
     leptons_assignment(events_dict, dR_cut=1.5)
 
     if args.use_bdt:
         print("Predict BDT at inference")
         time_start = time.time()
         compute_bdt_preds(
-            data={args.year: events_dict},
+            events_dict={args.year: events_dict},
             modelname=args.model,
             model_dir=args.model_dir,
         )
         time_end = time.time()
         print(f"Time taken to predict BDT: {time_end - time_start} seconds")
 
-    print("\nTemplates")
-    templates = get_templates(
-        events_dict,
-        args.year,
-        args.sigs,
-        args.bgs,
-        CHANNEL,
-        shape_vars,
-        {},  # TODO: systematics
-        # pass_ylim=150,
-        # fail_ylim=1e5,
-        use_bdt=args.use_bdt,
-        sig_scale_dict={
-            f"bbtt{CHANNEL.key}": 300,
-            f"vbfbbtt{CHANNEL.key}": 40,
-            f"vbfbbtt-k2v0{CHANNEL.key}": 40,
-        },  # Added vbf to fix an error that I don't understand
-        template_dir=args.template_dir,
-        plot_dir=args.plot_dir,
-        show=False,
-    )
+    # Now process each bmin value
+    for bmin in args.bmin:
+        print(f"\n{'='*60}")
+        print(f"Processing bmin = {bmin}")
+        print(f"{'='*60}")
 
-    print("\nSaving templates")
-    save_templates(
-        templates,
-        args.template_dir / f"{args.year}_templates.pkl",
-        args.blinded,
-        shape_vars,
-    )
+        # Create a copy of the base channel for this bmin
+        CHANNEL = deepcopy(BASE_CHANNEL)
 
-    del templates
-    gc.collect()
+        # Update cuts if sensitivity directory is provided. If not use cuts written in Samples.py (keep denomination in files as bmin1)
+        if args.sensitivity_dir is not None:
+            print(f"Extracting optimal cuts for bmin={bmin}")
+            txbb_cut, txtt_cut = extract_optimal_cuts_from_csv(
+                Path(args.sensitivity_dir), CHANNEL.key, args.model, args.use_bdt, bmin
+            )
+
+            # Update the channel cuts
+            CHANNEL.txbb_cut = txbb_cut
+            if args.use_bdt:
+                CHANNEL.txtt_BDT_cut = txtt_cut
+            else:
+                CHANNEL.txtt_cut = txtt_cut
+
+            print(
+                f"Updated TXbb and Txtt cuts to {CHANNEL.txbb_cut} and "
+                f"{CHANNEL.txtt_cut if not args.use_bdt else CHANNEL.txtt_BDT_cut} for {CHANNEL.key}"
+            )
+
+        print(f"\nGenerating templates for bmin={bmin}")
+
+        # Create bmin-specific directories
+        template_dir_bmin = (
+            args.template_dir / f"bmin_{bmin}" / CHANNEL.key if args.template_dir else ""
+        )
+        plot_dir_bmin = args.plot_dir / f"bmin_{bmin}" / CHANNEL.key if args.plot_dir else ""
+
+        if template_dir_bmin:
+            (template_dir_bmin / "cutflows" / args.year).mkdir(parents=True, exist_ok=True)
+        if plot_dir_bmin:
+            plot_dir_bmin.mkdir(parents=True, exist_ok=True)
+
+        templates = get_templates(
+            events_dict,  # Same data for all bmin values
+            args.year,
+            args.sigs,
+            args.bgs,
+            CHANNEL,  # Updated channel with new cuts
+            shape_vars,
+            {},  # TODO: systematics
+            use_bdt=args.use_bdt,
+            sig_scale_dict={
+                f"ggfbbtt{CHANNEL.key}": 300,
+                f"vbfbbtt{CHANNEL.key}": 40,
+                f"vbfbbtt-k2v0{CHANNEL.key}": 40,
+            },
+            template_dir=template_dir_bmin,
+            plot_dir=plot_dir_bmin,
+            show=False,
+        )
+
+        if args.template_dir:
+            print(f"Saving templates for bmin={bmin}")
+            template_file = template_dir_bmin / f"{args.year}_templates.pkl"
+            save_templates(
+                templates,
+                template_file,
+                args.blinded,
+                shape_vars,
+            )
+
+        del templates
+        gc.collect()
+
+        print(f"Completed processing for bmin={bmin}")
+
+    print(f"\nCompleted processing all bmin values: {args.bmin}")
 
 
 def base_filter(test_mode: bool = False):
@@ -316,7 +388,7 @@ def base_filter(test_mode: bool = False):
         for i in range(len(base_filters)):
             base_filters[i] += [
                 ("('ak8FatJetPhi', '0')", ">=", 2.9),
-                ("('ak8FatJetParTXbbvsQCD', '0')", ">=", 0.7),
+                # ("('ak8FatJetParTXbbvsQCD', '0')", ">=", 0.7),
             ]
 
     return {"data": base_filters, "signal": base_filters, "bg": base_filters}
@@ -435,6 +507,10 @@ def get_columns(
         ("ak8FatJetPt", 3),
         ("ak8FatJetEta", 3),
         ("ak8FatJetPhi", 3),
+        ("ak4JetPt", 3),
+        ("ak4JetEta", 3),
+        ("ak4JetPhi", 3),
+        ("ak4JetMass", 3),
     ]
 
     # common columns
@@ -508,6 +584,7 @@ def get_columns(
 def load_samples(
     year: str,
     paths: dict[str],
+    signals: list[str],
     channels: list[Channel],
     samples: dict[str, Sample] = None,
     restrict_data_to_channel: bool = True,
@@ -515,7 +592,6 @@ def load_samples(
     load_columns: dict[str, list[tuple]] = None,
     load_bgs: bool = False,
     load_data: bool = True,
-    load_just_ggf: bool = False,
     loaded_samples: bool = False,
     multithread: bool = False,
 ) -> dict[str, LoadedSample | pd.DataFrame]:
@@ -601,6 +677,10 @@ def load_samples(
                 if key in samples:
                     del samples[key]
 
+        for key, sample in copy.deepcopy(samples).items():
+            if sample.isSignal and key not in signals:
+                del samples[key]
+
     else:
         print("Note: samples are provided. Ignoring load_samples kwargs load_bgs, load_data.")
 
@@ -610,25 +690,6 @@ def load_samples(
             for key in Samples.DATASETS:
                 if (key in samples) and (key not in channel.data_samples):
                     del samples[key]
-
-    signals = Samples.SIGNALS.copy()
-
-    if load_just_ggf:  # quite ad hoc but should become obsolete
-        if "vbfbbtt" in signals:
-            signals.remove("vbfbbtt")
-        if "vbfbbtt-k2v0" in signals:
-            signals.remove("vbfbbtt-k2v0")
-
-        if "vbfbbtt-k2v0" in samples:
-            del samples["vbfbbtt-k2v0"]
-        if "vbfbbtt" in samples:
-            del samples["vbfbbtt"]
-
-        for ch in CHANNELS:
-            if f"vbfbbtt-k2v0{ch}" in samples:
-                del samples[f"vbfbbtt-k2v0{ch}"]
-            if f"vbfbbtt{ch}" in samples:
-                del samples[f"vbfbbtt{ch}"]
 
     print(
         f"Loading year {year}, samples",
@@ -648,7 +709,7 @@ def load_samples(
             )
             return None
 
-        data_ = Parallel(n_jobs=len(samples))(
+        data_ = Parallel(n_jobs=2 * len(samples))(
             delayed(LoadedSample)(
                 sample=sample,
                 events=utils.load_sample(
@@ -687,9 +748,8 @@ def load_samples(
                     events_dict[key] = LoadedSample(sample=sample, events=events)
 
     # keep only the specified bbtt channels
-    for channel in channels:
-        for signal in signals:
-
+    for signal in signals:
+        for channel in channels:
             if not loaded_samples:
                 # quick fix due to old naming still in samples
                 events_dict[f"{signal}{channel.key}"] = events_dict[signal][
@@ -902,39 +962,6 @@ def delete_columns(
     return events_dict
 
 
-def derive_variables(events_dict: dict[str, LoadedSample], channel: Channel, num_fatjets: int = 3):
-    """Derive variables for each event."""
-    for sample in events_dict.values():
-        if "ak8FatJetPNetXbbvsQCDLegacy" not in sample.events:
-            Xbb = sample.get_var("ak8FatJetPNetXbbLegacy")
-            QCD = sample.get_var("ak8FatJetPNetQCDLegacy")
-            Xbb_vs_QCD = np.divide(Xbb, Xbb + QCD, out=np.zeros_like(Xbb), where=(Xbb + QCD) != 0)
-
-            for n in range(num_fatjets):
-                sample.events[("ak8FatJetPNetXbbvsQCDLegacy", str(n))] = Xbb_vs_QCD[:, n]
-
-        if channel.key == "hm" and "ak8FatJetParTXtauhtaumvsQCDTop" not in sample.events:
-            tauhtaum = sample.get_var("ak8FatJetParTXtauhtaum")
-            qcd = sample.get_var("ak8FatJetParTQCD")
-            top = sample.get_var("ak8FatJetParTTop")
-            tauhtaum_vs_QCDTop = np.divide(
-                tauhtaum,
-                tauhtaum + qcd + top,
-                out=np.zeros_like(tauhtaum),
-                where=(tauhtaum + qcd + top) != 0,
-            )
-
-            for n in range(num_fatjets):
-                sample.events[("ak8FatJetParTXtauhtaumvsQCDTop", str(n))] = tauhtaum_vs_QCDTop[:, n]
-
-        if channel.key == "hm" and "ak8FatJetParTXtauhtaumvsQCD" not in sample.events:
-            tauhtaum_vs_QCD = np.divide(
-                tauhtaum, tauhtaum + qcd, out=np.zeros_like(tauhtaum), where=(tauhtaum + qcd) != 0
-            )
-            for n in range(num_fatjets):
-                sample.events[("ak8FatJetParTXtauhtaumvsQCD", str(n))] = tauhtaum_vs_QCD[:, n]
-
-
 def bbtautau_assignment_old(events_dict: dict[str, pd.DataFrame], channel: Channel):
     """Assign bb and tautau jets per each event.
 
@@ -1024,18 +1051,25 @@ def bbtautau_assignment(
         sample.tt_mask = bbtt_masks["tt"]
 
 
-@numba.vectorize(
-    [
-        numba.float32(numba.float32, numba.float32),
-        numba.float64(numba.float64, numba.float64),
-    ]
-)
+# decorators give problems
+# @numba.vectorize(
+#     [
+#         numba.float32(numba.float32, numba.float32),
+#         numba.float64(numba.float64, numba.float64),
+#     ]
+# )
 def delta_phi(a, b):
-    """Compute difference in angle given two angles a and b
-
-    Returns a value within [-pi, pi)
-    """
     return (a - b + np.pi) % (2 * np.pi) - np.pi
+
+
+# @numba.vectorize(
+#     [
+#         numba.float32(numba.float32, numba.float32),
+#         numba.float64(numba.float64, numba.float64),
+#     ]
+# )
+def delta_eta(a, b):
+    return a - b
 
 
 def _get_lepton_mask(sample, lepton_type: str, dR_cut: float) -> np.ndarray:
@@ -1058,7 +1092,7 @@ def _get_lepton_mask(sample, lepton_type: str, dR_cut: float) -> np.ndarray:
     # print(np.sum(lepton_eta != PAD_VAL, axis=0)/len(lepton_eta))
 
     # 1. Calculate dR for all leptons and create an initial mask
-    dR = np.sqrt((lepton_eta - jet_eta) ** 2 + (delta_phi(lepton_phi, jet_phi)) ** 2)
+    dR = np.sqrt(delta_eta(lepton_eta, jet_eta) ** 2 + delta_phi(lepton_phi, jet_phi) ** 2)
     initial_mask = dR < dR_cut
 
     # 2. Find events that have at least one passing lepton
@@ -1080,6 +1114,99 @@ def _get_lepton_mask(sample, lepton_type: str, dR_cut: float) -> np.ndarray:
     return final_mask
 
 
+def _get_ak4_mask(sample, fatjet_dR_cut: float = 0.9, lepton_dR_cut: float = 0.4) -> np.ndarray:
+    # Parameters from https://github.com/LPC-HH/HH4b/blob/9d8038bcc31bf1872352e332eff84a4602934b3e/src/HH4b/processors/bbbbSkimmer.py#L170
+    """
+    Calculates a boolean mask to select the closest ak4 jet that is:
+    1. Outside the ttFatJet cone (dR > fatjet_dR_cut)
+    2. Not near any electrons (dR > lepton_dR_cut from all electrons)
+    3. Not near any muons (dR > lepton_dR_cut from all muons)
+
+    Among jets passing all criteria, selects the one closest to the ttFatJet.
+    Returns a boolean array of shape (N_events, N_ak4jets) with at most one 'True' per event.
+    """
+    # Get ak4 jet coordinates
+    ak4_eta = sample.get_var("ak4JetEta")  # Shape: (N_events, N_ak4jets)
+    ak4_phi = sample.get_var("ak4JetPhi")  # Shape: (N_events, N_ak4jets)
+
+    # Create mask for valid (non-padded) ak4 jets
+    valid_ak4_mask = ak4_eta != PAD_VAL
+
+    # Get fatjet coordinates
+    fatjet_eta = sample.get_var("ttFatJetEta")[:, np.newaxis]  # Shape: (N_events, 1)
+    fatjet_phi = sample.get_var("ttFatJetPhi")[:, np.newaxis]  # Shape: (N_events, 1)
+
+    # 1. Calculate dR from fatjet and require ak4 jets to be OUTSIDE the cone
+    dR_fatjet = np.sqrt(delta_eta(ak4_eta, fatjet_eta) ** 2 + delta_phi(ak4_phi, fatjet_phi) ** 2)
+    outside_fatjet_mask = dR_fatjet > fatjet_dR_cut
+
+    # 2. Check distance from electrons
+    electron_eta = sample.get_var("ElectronEta")  # Shape: (N_events, N_electrons)
+    electron_phi = sample.get_var("ElectronPhi")  # Shape: (N_events, N_electrons)
+    valid_electron_mask = electron_eta != PAD_VAL  # Shape: (N_events, N_electrons)
+
+    # Calculate dR between all ak4 jets and all electrons
+    # Need to reshape for broadcasting: ak4 (N, M, 1) vs electrons (N, 1, L)
+    ak4_eta_expanded = ak4_eta[:, :, np.newaxis]  # (N_events, N_ak4jets, 1)
+    ak4_phi_expanded = ak4_phi[:, :, np.newaxis]  # (N_events, N_ak4jets, 1)
+    electron_eta_expanded = electron_eta[:, np.newaxis, :]  # (N_events, 1, N_electrons)
+    electron_phi_expanded = electron_phi[:, np.newaxis, :]  # (N_events, 1, N_electrons)
+
+    dR_electrons = np.sqrt(
+        delta_eta(ak4_eta_expanded, electron_eta_expanded) ** 2
+        + delta_phi(ak4_phi_expanded, electron_phi_expanded) ** 2
+    )  # Shape: (N_events, N_ak4jets, N_electrons)
+
+    # Only consider valid electrons; set invalid electron distances to large value
+    valid_electron_expanded = valid_electron_mask[:, np.newaxis, :]  # (N_events, 1, N_electrons)
+    dR_electrons = np.where(valid_electron_expanded, dR_electrons, np.inf)
+
+    # For each ak4 jet, check if it's far from ALL valid electrons (min distance > threshold)
+    away_from_electrons_mask = np.all(dR_electrons > lepton_dR_cut, axis=2)  # (N_events, N_ak4jets)
+
+    # 3. Check distance from muons
+    muon_eta = sample.get_var("MuonEta")  # Shape: (N_events, N_muons)
+    muon_phi = sample.get_var("MuonPhi")  # Shape: (N_events, N_muons)
+    valid_muon_mask = muon_eta != PAD_VAL  # Shape: (N_events, N_muons)
+
+    muon_eta_expanded = muon_eta[:, np.newaxis, :]  # (N_events, 1, N_muons)
+    muon_phi_expanded = muon_phi[:, np.newaxis, :]  # (N_events, 1, N_muons)
+
+    dR_muons = np.sqrt(
+        delta_eta(ak4_eta_expanded, muon_eta_expanded) ** 2
+        + delta_phi(ak4_phi_expanded, muon_phi_expanded) ** 2
+    )  # Shape: (N_events, N_ak4jets, N_muons)
+
+    # Only consider valid muons; set invalid muon distances to large value
+    valid_muon_expanded = valid_muon_mask[:, np.newaxis, :]  # (N_events, 1, N_muons)
+    dR_muons = np.where(valid_muon_expanded, dR_muons, np.inf)
+
+    # For each ak4 jet, check if it's far from ALL valid muons (min distance > threshold)
+    away_from_muons_mask = np.all(dR_muons > lepton_dR_cut, axis=2)  # (N_events, N_ak4jets)
+
+    # 4. Combine all conditions, including validity of ak4 jets
+    passing_mask = (
+        valid_ak4_mask & outside_fatjet_mask & away_from_electrons_mask & away_from_muons_mask
+    )
+
+    # 5. Among passing jets, find the one closest to the fatjet (smallest dR)
+    # For events where no jets pass, np.argmin incorrectly returns 0
+    events_with_any_pass = passing_mask.any(axis=1)
+
+    # Set dR to infinity for jets that don't pass, so they won't be selected as minimum
+    dR_for_selection = np.where(passing_mask, dR_fatjet, np.inf)
+    closest_jet_idx = np.argmin(dR_for_selection, axis=1)
+
+    # 6. Create final mask with at most one True per event
+    final_mask = np.zeros_like(passing_mask, dtype=bool)
+
+    # Use advanced indexing to set only the closest jet to True, only for events that have passing jets
+    row_indices = np.arange(len(final_mask))
+    final_mask[row_indices, closest_jet_idx] = events_with_any_pass
+
+    return final_mask
+
+
 # TODO: make control plots
 def leptons_assignment(
     events_dict: dict[str, LoadedSample],
@@ -1096,6 +1223,137 @@ def leptons_assignment(
     for sample in events_dict.values():
         sample.e_mask = _get_lepton_mask(sample, "Electron", dR_cut)
         sample.m_mask = _get_lepton_mask(sample, "Muon", dR_cut)
+
+
+def derive_variables(events_dict: dict[str, LoadedSample], channel: Channel, num_fatjets: int = 3):
+    """Derive variables for each event."""
+    for sample in events_dict.values():
+        if "ak8FatJetPNetXbbvsQCDLegacy" not in sample.events:
+            Xbb = sample.get_var("ak8FatJetPNetXbbLegacy")
+            QCD = sample.get_var("ak8FatJetPNetQCDLegacy")
+            Xbb_vs_QCD = np.divide(Xbb, Xbb + QCD, out=np.zeros_like(Xbb), where=(Xbb + QCD) != 0)
+
+            for n in range(num_fatjets):
+                sample.events[("ak8FatJetPNetXbbvsQCDLegacy", str(n))] = Xbb_vs_QCD[:, n]
+
+        if channel.key == "hm" and "ak8FatJetParTXtauhtaumvsQCDTop" not in sample.events:
+            tauhtaum = sample.get_var("ak8FatJetParTXtauhtaum")
+            qcd = sample.get_var("ak8FatJetParTQCD")
+            top = sample.get_var("ak8FatJetParTTop")
+            tauhtaum_vs_QCDTop = np.divide(
+                tauhtaum,
+                tauhtaum + qcd + top,
+                out=np.zeros_like(tauhtaum),
+                where=(tauhtaum + qcd + top) != 0,
+            )
+
+            for n in range(num_fatjets):
+                sample.events[("ak8FatJetParTXtauhtaumvsQCDTop", str(n))] = tauhtaum_vs_QCDTop[:, n]
+
+        if channel.key == "hm" and "ak8FatJetParTXtauhtaumvsQCD" not in sample.events:
+            tauhtaum_vs_QCD = np.divide(
+                tauhtaum, tauhtaum + qcd, out=np.zeros_like(tauhtaum), where=(tauhtaum + qcd) != 0
+            )
+            for n in range(num_fatjets):
+                sample.events[("ak8FatJetParTXtauhtaumvsQCD", str(n))] = tauhtaum_vs_QCD[:, n]
+
+
+def derive_lepton_variables(events_dict: dict[str, LoadedSample]):
+    for sample in events_dict.values():
+
+        for n in range(sample.get_var("ElectronEta").shape[-1]):
+
+            sample.events[("ElectronDeltaEta", str(n))] = (
+                PAD_VAL * np.ones_like(sample.get_var("ElectronPhi"))[:, n]
+            )
+            sample.events.loc[sample.e_mask[:, n], ("ElectronDeltaEta", str(n))] = delta_eta(
+                sample.get_var("ElectronEta")[:, n], sample.get_var("ttFatJetEta")
+            )[sample.e_mask[:, n]]
+
+            sample.events[("ElectronDeltaPhi", str(n))] = (
+                PAD_VAL * np.ones_like(sample.get_var("ElectronPhi"))[:, n]
+            )
+            sample.events.loc[sample.e_mask[:, n], ("ElectronDeltaPhi", str(n))] = delta_phi(
+                sample.get_var("ElectronPhi")[:, n], sample.get_var("ttFatJetPhi")
+            )[sample.e_mask[:, n]]
+
+        # need first to create the full branch before slicing
+        for n in range(sample.get_var("ElectronEta").shape[-1]):
+
+            sample.events[("Electron_dRak8Jet", str(n))] = (
+                PAD_VAL * np.ones_like(sample.get_var("ElectronPhi"))[:, n]
+            )
+            sample.events.loc[sample.e_mask[:, n], ("Electron_dRak8Jet", str(n))] = np.sqrt(
+                sample.get_var("ElectronDeltaEta")[:, n] ** 2
+                + sample.get_var("ElectronDeltaPhi")[:, n] ** 2
+            )[sample.e_mask[:, n]]
+
+        for n in range(sample.get_var("MuonEta").shape[-1]):
+
+            sample.events[("MuonDeltaEta", str(n))] = (
+                PAD_VAL * np.ones_like(sample.get_var("MuonPhi"))[:, n]
+            )
+            sample.events.loc[sample.m_mask[:, n], ("MuonDeltaEta", str(n))] = delta_eta(
+                sample.get_var("MuonEta")[:, n], sample.get_var("ttFatJetEta")
+            )[sample.m_mask[:, n]]
+
+            sample.events[("MuonDeltaPhi", str(n))] = (
+                PAD_VAL * np.ones_like(sample.get_var("MuonPhi"))[:, n]
+            )
+            sample.events.loc[sample.m_mask[:, n], ("MuonDeltaPhi", str(n))] = delta_phi(
+                sample.get_var("MuonPhi")[:, n], sample.get_var("ttFatJetPhi")
+            )[sample.m_mask[:, n]]
+
+        for n in range(sample.get_var("MuonEta").shape[-1]):
+
+            sample.events[("Muon_dRak8Jet", str(n))] = (
+                PAD_VAL * np.ones_like(sample.get_var("MuonPhi"))[:, n]
+            )
+            sample.events.loc[sample.m_mask[:, n], ("Muon_dRak8Jet", str(n))] = np.sqrt(
+                sample.get_var("MuonDeltaEta")[:, n] ** 2
+                + sample.get_var("MuonDeltaPhi")[:, n] ** 2
+            )[sample.m_mask[:, n]]
+
+    return
+
+
+def derive_httak4away(
+    events_dict: dict[str, LoadedSample],
+    fatjet_dR_cut: float = 0.9,
+    lepton_dR_cut: float = 0.4,
+):
+
+    for sample in events_dict.values():
+        ak4_mask = _get_ak4_mask(sample, fatjet_dR_cut, lepton_dR_cut)
+
+        ak4away = vector.array(
+            {
+                "pt": sample.get_var("ak4JetPt")[ak4_mask].squeeze(),
+                "eta": sample.get_var("ak4JetEta")[ak4_mask].squeeze(),
+                "phi": sample.get_var("ak4JetPhi")[ak4_mask].squeeze(),
+                "mass": sample.get_var("ak4JetMass")[ak4_mask].squeeze(),
+            }
+        )
+
+        htt = vector.array(
+            {
+                "pt": sample.get_var("ttFatJetPt")[ak4_mask.any(axis=1)].squeeze(),
+                "eta": sample.get_var("ttFatJetEta")[ak4_mask.any(axis=1)].squeeze(),
+                "phi": sample.get_var("ttFatJetPhi")[ak4_mask.any(axis=1)].squeeze(),
+                "mass": sample.get_var("ttFatJetParTmassVisApplied")[
+                    ak4_mask.any(axis=1)
+                ].squeeze(),
+            }
+        )
+
+        httak4away = htt + ak4away
+
+        for n in range(sample.get_var("ak4JetEta").shape[-1]):
+
+            sample.events[("httak4away_dR", str(n))] = (
+                PAD_VAL * np.ones_like(sample.get_var("ak4JetPt"))[:, n]
+            )
+            sample.events.loc[ak4_mask[:, n], ("httak4away_dR", str(n))] = httak4away.deltaR()
 
 
 def _add_bdt_scores(
@@ -1124,7 +1382,7 @@ def _add_bdt_scores(
         events[f"BDTScore{jshift}"] = sample_bdt_preds
     else:
         # bg_tot = np.sum(sample_bdt_preds[:, 3:], axis=1)
-        he_score = sample_bdt_preds[:, 0]  # TODO must be de-hardcoded
+        he_score = sample_bdt_preds[:, 0]  # TODO could be de-hardcoded
         hh_score = sample_bdt_preds[:, 1]
         hm_score = sample_bdt_preds[:, 2]
 
@@ -1162,9 +1420,12 @@ def _add_bdt_scores(
 
 
 def compute_bdt_preds(
-    data: dict[str, dict[str, LoadedSample]],
+    events_dict: dict[str, dict[str, LoadedSample]],
     modelname: str,
     model_dir: Path,
+    channel: Channel = None,
+    test_mode: bool = False,
+    save_dir: Path = None,
 ) -> dict[str, dict[str, np.ndarray]]:
     """Compute BDT predictions for multiple years and samples.
 
@@ -1174,13 +1435,12 @@ def compute_bdt_preds(
     Args:
         data: Dictionary mapping years to dictionaries of samples. Each sample should be a LoadedSample
             object containing the features needed for prediction.
-        model_path: Path to the trained XGBoost model file (.json)
-        feature_names: List of feature names to use for prediction. These must be accessible via
-            the get_var() method of each LoadedSample.
+        modelname: Name of the model to load
+        model_dir: Path to the directory containing the model
 
     Returns:
         dict: Nested dictionary containing predictions for each year and sample:
-            {year: {sample_name: predictions_array}}
+            {year: {sample: predictions_array}}
 
     """
 
@@ -1192,25 +1452,84 @@ def compute_bdt_preds(
         for feat in bdt_config[modelname]["train_vars"][cat]
     ]
 
-    for year in data:
-        for sample_name in data[year]:
-            dsample = xgb.DMatrix(
-                np.stack(
-                    [data[year][sample_name].get_var(feat) for feat in feature_names],
-                    axis=1,
-                ),
-                feature_names=feature_names,
+    # Use ThreadPoolExecutor for parallel processing (threads share memory, no pickling needed)
+    total_samples = sum(len(events_dict[year]) for year in events_dict)
+    max_workers = min(4, total_samples)  # Use reasonable number of workers
+
+    def predict_sample(year, sample, sample_data, feature_names, bst):
+        """Worker function for parallel prediction"""
+        dsample = xgb.DMatrix(
+            np.stack(
+                [sample_data.get_var(feat) for feat in feature_names],
+                axis=1,
+            ),
+            feature_names=feature_names,
+        )
+        return year, sample, bst.predict(dsample)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+
+        # Submit all prediction tasks
+        for year in events_dict:
+            for sample in events_dict[year]:
+                future = executor.submit(
+                    predict_sample, year, sample, events_dict[year][sample], feature_names, bst
+                )
+                futures.append(future)
+
+        # Collect results and apply BDT scores
+        for future in futures:
+            year, sample, y_pred = future.result()
+            _add_bdt_scores(
+                events_dict[year][sample].events, y_pred, multiclass=True, all_outs=True
             )
 
-            y_pred = bst.predict(dsample)
-            _add_bdt_scores(data[year][sample_name].events, y_pred, multiclass=True, all_outs=True)
+            if save_dir:
+                file_dir = (
+                    Path(save_dir) / ("test" if test_mode else modelname) / channel.key / year
+                )
+                file_dir.mkdir(exist_ok=True, parents=True)
+                with (file_dir / f"{sample}_preds.pkl").open("wb") as f:
+                    pickle.dump(y_pred, f)
+                with (file_dir / f"{sample}_shapes.pkl").open("wb") as f:
+                    pickle.dump(events_dict[year][sample].events.shape, f)
+
+
+def check_bdt_prediction_shapes(
+    events_dict: dict[str, dict[str, LoadedSample]],
+    modelname: str,
+    channel: Channel,
+    bdt_preds_dir: Path,
+    test_mode: bool,
+):
+    for year in events_dict:
+        for sample in events_dict[year]:
+            shape_file = (
+                Path(bdt_preds_dir)
+                / ("test" if test_mode else modelname)
+                / channel.key
+                / year
+                / f"{sample}_shapes.pkl"
+            )
+            if not shape_file.exists():
+                print(f"Prediction file does not exist: {shape_file}")
+                return False
+            shape = pickle.load(shape_file.open("rb"))
+            if shape[0] != events_dict[year][sample].events.shape[0]:
+                print(
+                    f"Shape mismatch for {sample} in {year}: {shape} != {events_dict[year][sample].events.shape}"
+                )
+                return False
+    return True
 
 
 def load_bdt_preds(
     events_dict: dict[str, pd.DataFrame],
-    year: str,
-    bdt_preds_dir: Path,
     modelname: str,
+    channel: Channel,
+    bdt_preds_dir: Path,
+    test_mode: bool = False,
     # jec_jmsr_shifts: bool = False,
     all_outs: bool = True,
 ):
@@ -1219,13 +1538,15 @@ def load_bdt_preds(
     If ``jec_jmsr_shifts``, also loads BDT preds for every JEC / JMSR shift in MC.
 
     Args:
-        bdt_preds (str): Path to the bdt_preds .npy file.
-        bdt_sample_order (List[str]): Order of samples in the predictions file.
+        events_dict: Dictionary with structure {year: {sample: LoadedSample}}
+        modelname: Name of the BDT model
+        channel: Channel object
+        bdt_preds_dir: Directory containing BDT predictions
+        test_mode: Whether in test mode
+        all_outs: Whether to load all outputs
+        perform_safety_check: Whether to perform shape consistency check before loading
 
     """
-    # with (bdt_preds_dir / year / "sample_order.txt").open() as f:
-    #     sample_order_dict = eval(f.read())
-
     # if jec_jmsr_shifts:
     #     shift_preds = {
     #         jshift: np.load(f"{bdt_preds_dir}/{year}/preds_{jshift}.npy")
@@ -1240,14 +1561,20 @@ def load_bdt_preds(
     #     events
     # ), f"# of BDT predictions does not match # of events for sample {sample}"
 
-    for sample, loaded_sample in events_dict.items():
-        pred_file = Path(bdt_preds_dir) / year / sample / f"{modelname}_preds.npy"
-        if not pred_file.exists():
-            raise FileNotFoundError(f"Prediction file does not exist: {pred_file}")
+    for year in events_dict:
+        for sample in events_dict[year]:
+            pred_file = (
+                Path(bdt_preds_dir)
+                / ("test" if test_mode else modelname)
+                / channel.key
+                / year
+                / f"{sample}_preds.pkl"
+            )
 
-        bdt_preds = np.load(pred_file)
-        multiclass = len(bdt_preds.shape) > 1
-        _add_bdt_scores(loaded_sample.events, bdt_preds, multiclass, all_outs)
+            bdt_preds = pickle.load(pred_file.open("rb"))
+
+            multiclass = len(bdt_preds.shape) > 1
+            _add_bdt_scores(events_dict[year][sample].events, bdt_preds, multiclass, all_outs)
 
         # if jec_jmsr_shifts and sample != data_key:
         #     for jshift in jec_shifts + jmsr_shifts:
@@ -1819,14 +2146,15 @@ def parse_args(parser=None):
     parser.add_argument(
         "--sensitivity-dir",
         help="Path to the sensitivity study's output directory that has a csv file under {dir}/full_presel/{channel}. The TXbb/Txtt cuts will be extracted/ If not provided, the script will use the ones in Samples.py",
-        default="None",
+        default=None,
         type=str,
     )
 
     parser.add_argument(
         "--bmin",
-        help="Minimum bkg yield for the TXbb/Txtt cuts. Need to be present in the csv file",
-        default=1,
+        help="Minimum bkg yield(s) for the TXbb/Txtt cuts. Can be a single value or a list. Need to be present in the csv file",
+        default=[1],
+        nargs="*",
         type=int,
     )
 
@@ -1862,10 +2190,12 @@ def parse_args(parser=None):
         #         print(f"Error saving args: {e}")
 
     if args.template_dir:
-        args.template_dir = Path(args.template_dir) / args.channel
-        (args.template_dir / "cutflows" / args.year).mkdir(parents=True, exist_ok=True)
-        # with (args.template_dir / "args.json").open("w") as f:
-        #     json.dump(save_args.__dict__, f, indent=4)
+        args.template_dir = Path(args.template_dir)
+    #
+
+    # (args.template_dir / "cutflows" / args.year).mkdir(parents=True, exist_ok=True)
+    # with (args.template_dir / "args.json").open("w") as f:
+    #     json.dump(save_args.__dict__, f, indent=4)
 
     return args
 
