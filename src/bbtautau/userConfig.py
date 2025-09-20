@@ -47,12 +47,3 @@ SHAPE_VAR = {
     "nbins": 16,
     "blind_window": [110, 150],
 }
-
-
-# SAMPLE_MAPPING = {
-#     "he": 0,
-#     "hm": 1,
-#     "hh": 2,
-#     "QCD": 3,
-#     "all": 4,
-# }

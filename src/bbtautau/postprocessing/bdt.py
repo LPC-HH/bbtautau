@@ -23,7 +23,7 @@ from postprocessing import (
     leptons_assignment,
     load_samples,
 )
-from Samples import CHANNELS, SAMPLES, sig_keys_ggf
+from Samples import CHANNELS, SAMPLES, sig_keys_ggf, sig_keys_vbf
 from sklearn.model_selection import train_test_split
 from tabulate import tabulate
 
@@ -44,14 +44,13 @@ class Trainer:
 
     loaded_dmatrix = False
 
-    # Default samples for training / evaluation
+    # Default samples for training / evaluation - will be updated based on signal type
     sample_names: ClassVar[list[str]] = [
         "qcd",
         "ttbarhad",
         "ttbarll",
         "ttbarsl",
         "dyjets",
-        "ggfbbtt",
     ]
 
     def __init__(
@@ -60,6 +59,7 @@ class Trainer:
         sample_names: list[str] = None,
         modelname: str = None,
         output_dir: str = None,
+        signal_type: str = "ggfbbtt",
     ) -> None:
         if years[0] == "all":
             print("Using all years")
@@ -68,7 +68,15 @@ class Trainer:
             years = list(years)
         self.years = years
 
-        if sample_names is not None:
+        # Set signal type and update sample names accordingly
+        if signal_type not in ["ggfbbtt", "vbfbbtt"]:
+            raise ValueError(f"Invalid signal type: {signal_type}. Must be 'ggfbbtt' or 'vbfbbtt'")
+        self.signal_type = signal_type
+
+        # Add signal type to default sample names if not provided
+        if sample_names is None:
+            self.sample_names = self.sample_names + [signal_type]
+        else:
             self.sample_names = sample_names
 
         self.samples = {name: SAMPLES[name] for name in self.sample_names}
@@ -81,17 +89,12 @@ class Trainer:
         self.hyperpars = self.bdt_config[self.modelname]["hyperpars"]
         self.feats = [feat for cat in self.train_vars for feat in self.train_vars[cat]]
 
-        # find a better place for this
-        self.classes = [
-            "ggfbbtthe",
-            "ggfbbtthh",
-            "ggfbbtthm",
-            "dyjets",
-            "qcd",
-            "ttbarhad",
-            "ttbarll",
-            "ttbarsl",
-        ]
+        # Set classes based on signal type
+        signal_classes = [f"{signal_type}he", f"{signal_type}hh", f"{signal_type}hm"]
+        background_classes = ["dyjets", "qcd", "ttbarhad", "ttbarll", "ttbarsl"]
+
+        # Importantly, this is where the order of the bdt classes is hardcoded into the model.
+        self.classes = signal_classes + background_classes
 
         self.events_dict = {year: {} for year in self.years}
 
@@ -121,10 +124,13 @@ class Trainer:
 
                 columns = get_columns(year)
 
+                # Choose appropriate signal keys based on signal type
+                sig_keys = sig_keys_ggf if self.signal_type == "ggfbbtt" else sig_keys_vbf
+
                 self.events_dict[year] = load_samples(
                     year=year,
                     paths=self.data_paths[year],
-                    signals=sig_keys_ggf,
+                    signals=sig_keys,
                     channels=list(CHANNELS.values()),
                     samples=self.samples,
                     filters_dict=filters_dict,
@@ -144,8 +150,8 @@ class Trainer:
                 leptons_assignment(self.events_dict[year], dR_cut=1.5)
 
         for ch in CHANNELS:
-            self.samples[f"ggfbbtt{ch}"] = SAMPLES[f"ggfbbtt{ch}"]
-        del self.samples["ggfbbtt"]
+            self.samples[f"{self.signal_type}{ch}"] = SAMPLES[f"{self.signal_type}{ch}"]
+        del self.samples[self.signal_type]
 
     @staticmethod
     def shorten_df(df, N, seed=42):
@@ -805,7 +811,9 @@ class Trainer:
         print("=" * 80)
 
 
-def study_rescaling(output_dir: str = "rescaling_study", importance_only=False) -> dict:
+def study_rescaling(
+    output_dir: str = "rescaling_study", importance_only=False, signal_type: str = "ggfbbtt"
+) -> dict:
     """Study the impact of different rescaling rules on BDT performance.
     For now give little flexibility, but is not meant to be customized too much.
 
@@ -816,7 +824,12 @@ def study_rescaling(output_dir: str = "rescaling_study", importance_only=False) 
         Dictionary containing study results for each rescaling rule
     """
     # Create output directory
-    trainer = Trainer(years=["2022"], modelname="29July25_loweta_lowreg", output_dir=output_dir)
+    trainer = Trainer(
+        years=["2022"],
+        modelname="29July25_loweta_lowreg",
+        output_dir=output_dir,
+        signal_type=signal_type,
+    )
 
     print(f"importance_only: {importance_only}")
     if not importance_only:
@@ -1011,7 +1024,12 @@ def _create_cross_channel_comparison(results, scale_rules, balance_rules, model_
 
 
 def eval_bdt_preds(
-    years: list[str], eval_samples: list[str], model: str, save: bool = True, save_dir: str = None
+    years: list[str],
+    eval_samples: list[str],
+    model: str,
+    save: bool = True,
+    save_dir: str = None,
+    signal_type: str = "ggfbbtt",
 ):
     """Evaluate BDT predictions on data.
 
@@ -1036,14 +1054,18 @@ def eval_bdt_preds(
             raise PermissionError(f"Directory {save_dir} is not writable")
 
     # Load model globally for all years, evaluate by year to reduce memory usage
-    bst = Trainer(years=years, sample_names=eval_samples, modelname=model).load_model()
+    bst = Trainer(
+        years=years, sample_names=eval_samples, modelname=model, signal_type=signal_type
+    ).load_model()
 
     evals = {year: {sample_name: {} for sample_name in eval_samples} for year in years}
 
     for year in years:
 
         # To reduce memory usage, load data once for each year
-        trainer = Trainer(years=[year], sample_names=eval_samples, modelname=model)
+        trainer = Trainer(
+            years=[year], sample_names=eval_samples, modelname=model, signal_type=signal_type
+        )
         trainer.load_data(force_reload=True)
 
         feats = [feat for cat in trainer.train_vars for feat in trainer.train_vars[cat]]
@@ -1122,6 +1144,13 @@ if __name__ == "__main__":
         default=False,
         help="Only compute importance of features",
     )
+    parser.add_argument(
+        "--signal-type",
+        type=str,
+        default="ggfbbtt",
+        choices=["ggfbbtt", "vbfbbtt"],
+        help="Type of signal process to use for training (ggfbbtt or vbfbbtt)",
+    )
 
     # Add mutually exclusive group for train/load
     group = parser.add_mutually_exclusive_group()
@@ -1131,7 +1160,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.study_rescaling:
-        study_rescaling(importance_only=args.importance_only)
+        study_rescaling(importance_only=args.importance_only, signal_type=args.signal_type)
         exit()
 
     if args.eval_bdt_preds:
@@ -1144,11 +1173,16 @@ if __name__ == "__main__":
                 eval_samples=args.samples,
                 model=args.model,
                 save_dir=args.save_dir,
+                signal_type=args.signal_type,
             )
         exit()
 
     trainer = Trainer(
-        years=args.years, sample_names=args.samples, modelname=args.model, output_dir=args.save_dir
+        years=args.years,
+        sample_names=args.samples,
+        modelname=args.model,
+        output_dir=args.save_dir,
+        signal_type=args.signal_type,
     )
 
     if args.train:
