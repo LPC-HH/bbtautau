@@ -48,11 +48,26 @@ SHAPE_VAR = {
     "blind_window": [110, 150],
 }
 
-
-# SAMPLE_MAPPING = {
-#     "he": 0,
-#     "hm": 1,
-#     "hh": 2,
-#     "QCD": 3,
-#     "all": 4,
-# }
+def path_dict(path: str):
+    return {
+        "2022": {
+        "data": Path(path),
+            "bg": Path(path),
+            "signal": Path(path),
+        },
+        "2022EE": {
+            "data": Path(path),
+            "bg": Path(path),
+            "signal": Path(path),
+        },
+        "2023": {
+            "data": Path(path),
+            "bg": Path(path),
+            "signal": Path(path),
+        },
+        "2023BPix": {
+            "data": Path(path),
+            "bg": Path(path),
+            "signal": Path(path),
+        }
+    }

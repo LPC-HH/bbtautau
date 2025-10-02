@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bbtautauvolpod
+  labels:
+    app: bbtautauvol
+spec:
+  containers:
+  - name: container
+    image: gitlab-registry.nrp-nautilus.io/zichunhao/parcel:latest
+    command: ["/bin/bash", "-c", "sleep infinity"]
+    resources:
+      requests:
+        memory: 1Gi
+        cpu: "100m"
+      #  nvidia.com/gpu: "1"
+        ephemeral-storage: 512Gi
+    volumeMounts:
+    - mountPath: /bbtautauvol
+      name: bbtautauvol
+  restartPolicy: Never
+  volumes:
+    - name: bbtautauvol
+      persistentVolumeClaim:
+        claimName: bbtautauvol

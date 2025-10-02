@@ -59,6 +59,7 @@ class Trainer:
         years: list[str],
         sample_names: list[str] = None,
         modelname: str = None,
+        data_dir : str = None,
         output_dir: str = None,
     ) -> None:
         if years[0] == "all":
@@ -73,7 +74,8 @@ class Trainer:
 
         self.samples = {name: SAMPLES[name] for name in self.sample_names}
 
-        self.data_paths = DATA_PATHS
+        #ensure backwards compatibility
+        self.data_paths = path_dict(data_dir) if data_dir is not None else DATA_PATHS
 
         self.modelname = modelname
         self.bdt_config = bdt_config
@@ -1076,6 +1078,12 @@ if __name__ == "__main__":
         help="Subdirectory to save model and plots within `/home/users/lumori/bbtautau/src/bbtautau/postprocessing/classifier/` if training/evaluating. Full directory to store predictions if --eval-bdt-preds is specified (checks writing permissions).",
     )
     parser.add_argument(
+        "--data-dirs",
+        type=str,
+        default=None,
+        help="Path to the data directories",
+    )
+    parser.add_argument(
         "--force-reload", action="store_true", default=False, help="Force reload of data"
     )
 
@@ -1126,7 +1134,11 @@ if __name__ == "__main__":
         exit()
 
     trainer = Trainer(
-        years=args.years, sample_names=args.samples, modelname=args.model, output_dir=args.save_dir
+        years=args.years, 
+        sample_names=args.samples, 
+        modelname=args.model, 
+        output_dir=args.save_dir,
+        data_dirs=args.data_dirs,
     )
 
     if args.train:

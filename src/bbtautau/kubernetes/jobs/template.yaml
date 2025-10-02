@@ -1,0 +1,62 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bbtautau-bdt-$job_name
+  labels:
+    type: bbtautau
+spec:
+  template:
+    spec:
+      containers:
+      - name: bbtautau
+        image: gitlab-registry.nrp-nautilus.io/zichunhao/parcel:latest
+        command:
+        - "/bin/bash"
+        - "-c"
+        - >
+          pip install xgboost tabulate && mkdir -p /bbtautauvol/bdt/$name/ && ls /bbtautauvol &&
+          python /home/users/lumori/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --train --model test
+          --save-dir /bbtautauvol/bdt/$name --data-path /bbtautauvol/$datapath/
+          | tee /bbtautauvol/bdt/$name/log.txt`
+        volumeMounts:
+        - mountPath: /bbtautauvol
+          name: bbtautauvol
+        - name: git-repo
+          mountPath: /opt/repo
+        resources:
+          limits:
+            memory: 64Gi
+            cpu: "6"
+          requests:
+            memory: 64Gi
+            cpu: "4"
+      initContainers:
+      - name: init-clone-repo
+        image: alpine/git
+        args:
+          - clone
+          - --single-branch
+          - --branch
+          - kube
+          - https://github.com/LPC-HH/bbtautau.git
+          - /opt/repo/bbtautau
+        volumeMounts:
+          - name: git-repo
+            mountPath: /opt/repo
+      volumes:
+      - name: git-repo
+        emptyDir: {}
+      - name: bbtautauvol
+        persistentVolumeClaim:
+          claimName: bbtautauvol
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values:
+                      - service-02.nrp.mghpcc.org
+      restartPolicy: Never
+  backoffLimit: 0
