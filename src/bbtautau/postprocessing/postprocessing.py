@@ -406,7 +406,7 @@ def bb_filters(
     filters = {}
     for dtype, ifilters_bydtype in in_filters.items():
         filters[dtype] = [
-            ifilter + [(f"('ak8FatJetParTXbbvsQCD', '{n}')", ">=", bb_cut)]
+            ifilter + [(f"('ak8FatJetParTXbbvsQCDTop', '{n}')", ">=", bb_cut)]
             for n in range(num_fatjets)
             for ifilter in ifilters_bydtype
         ]
@@ -423,19 +423,10 @@ def tt_filters(
     if in_filters is None:
         in_filters = base_filter()
 
-    if channel.key == "hm":
-        warnings.warn(
-            "Temporarily applying vsQCD filter only for tauhtaum due to missing keys!", stacklevel=2
-        )
-        tt_cut = 0.05
-        vslabel = "vsQCD"
-    else:
-        vslabel = "vsQCDTop"
-
     filters = {}
     for dtype, ifilters_bydtype in in_filters.items():
         filters[dtype] = [
-            ifilter + [(f"('ak8FatJetParTX{channel.tagger_label}{vslabel}', '{n}')", ">=", tt_cut)]
+            ifilter + [(f"('ak8FatJetParTX{channel.tagger_label}vsQCDTop', '{n}')", ">=", tt_cut)]
             for n in range(num_fatjets)
             for ifilter in ifilters_bydtype
         ]
@@ -454,7 +445,6 @@ def tt_filters(
 #     """
 #     creates a list of filters for each trigger in the list of triggers. It is granular to triggers = {"data": { [...] , ...}, "signal": { [...]}, "bg": { [...]}}.
 #     """
-
 
 #     # TODO: this function has a bug: skipped triggers are just forgotten and those events are left out.
 
