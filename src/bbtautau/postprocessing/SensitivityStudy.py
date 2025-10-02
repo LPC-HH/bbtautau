@@ -89,20 +89,18 @@ class Optimum:
 
 
 def fom_2sqrtB_S(b, s, _tf):
-    return np.where(s > 0, 2 * np.sqrt(b * _tf) / s, -PAD_VAL)
+    return np.where(s > 0, 2 * np.sqrt(b * _tf) / s, np.nan)
 
 
 def fom_2sqrtB_S_var(b, s, _tf):
-    return np.where(
-        (b > 0) & (s > 0), 2 * np.sqrt(b * _tf + (b * _tf / np.sqrt(b)) ** 2) / s, -PAD_VAL
-    )
+    return np.where((b > 0) & (s > 0), 2 * np.sqrt(b * _tf * (1 + _tf)) / s, np.nan)
 
 
 def fom_punzi(b, s, _tf, a=3):
     """
     a is the number of sigmas of the test significance
     """
-    return np.where(s > 0, (np.sqrt(b * _tf) + a / 2) / s, -PAD_VAL)
+    return np.where(s > 0, (np.sqrt(b * _tf) + a / 2) / s, np.nan)
 
 
 FOMS = {
@@ -158,6 +156,8 @@ class Analyser:
         for year in self.years:
 
             filters_dict = base_filter(self.test_mode)
+
+            # Prefilters already applied in skimmer
             # filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3)
 
             if tt_pres:
@@ -180,9 +180,8 @@ class Analyser:
             apply_triggers(self.events_dict[year], year, self.channel)
             delete_columns(self.events_dict[year], year, channels=[self.channel])
 
-            derive_variables(
-                self.events_dict[year], CHANNELS["hm"]
-            )  # legacy issue, muon branches are misnamed
+            derive_variables(self.events_dict[year], self.channel)
+
             bbtautau_assignment(self.events_dict[year], agnostic=True)
             leptons_assignment(self.events_dict[year], dR_cut=1.5)
 
@@ -671,6 +670,8 @@ class Analyser:
                     "cuts": (bbcut_opt, ttcut_opt),  # Always actual thresholds
                     "BBcut": BBcut,
                     "TTcut": TTcut,
+                    "bb_disc_name": self.bb_disc_name,
+                    "tt_disc_name": self.tt_disc_name,
                     "sig_map": sigs,
                     "bg_map": bgs_scaled,
                     "sel_B_min": sel_B_min,
@@ -688,8 +689,6 @@ class Analyser:
                             "BBcut_sig_eff": BBcutSigEff,
                             "TTcut_sig_eff": TTcutSigEff,
                             "fom_map": limits,
-                            "bb_disc_name": self.bb_disc_name,
-                            "tt_disc_name": self.tt_disc_name,
                         }
                     )
 

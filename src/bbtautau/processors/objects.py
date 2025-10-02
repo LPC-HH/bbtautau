@@ -280,6 +280,104 @@ def good_boostedtaus(events, taus: TauArray):  # noqa: ARG001
     return taus[tau_sel]
 
 
+def vbf_jets(
+    # from HH4b https://github.com/LPC-HH/HH4b/blob/9d8038bcc31bf1872352e332eff84a4602934b3e/src/HH4b/processors/objects.py#L335
+    jets: JetArray,
+    fatjets: FatJetArray,
+    events,
+    pt: float,
+    id: str,  # noqa: ARG001
+    eta_max: float,
+    dr_fatjets: float,
+    dr_leptons: float,
+    electron_pt: float,
+    muon_pt: float,
+):
+    """Top 2 jets in pT passing the VBF selections"""
+    electrons = events.Electron
+    electrons = electrons[electrons.pt > electron_pt]
+
+    muons = events.Muon
+    muons = muons[muons.pt > muon_pt]
+
+    ak4_sel = (
+        (jets.pt >= pt)
+        & (np.abs(jets.eta) <= eta_max)
+        & (ak.all(jets.metric_table(fatjets) > dr_fatjets, axis=2))
+        & ak.all(jets.metric_table(electrons) > dr_leptons, axis=2)
+        & ak.all(jets.metric_table(muons) > dr_leptons, axis=2)
+    )
+
+    return jets[ak4_sel][:, :2]
+
+
+def ak4_jets_awayfromak8(
+    jets: JetArray,
+    fatjets: FatJetArray,
+    events,
+    pt: float,
+    id: str,  # noqa: ARG001
+    eta_max: float,
+    dr_fatjets: float,
+    dr_leptons: float,
+    electron_pt: float,
+    muon_pt: float,
+    sort_by: str = "btag",
+):
+    """AK4 jets nonoverlapping with AK8 fatjets"""
+    electrons = events.Electron
+    electrons = electrons[electrons.pt > electron_pt]
+
+    muons = events.Muon
+    muons = muons[muons.pt > muon_pt]
+
+    ak4_sel = (
+        (jets.pt >= pt)
+        & (np.abs(jets.eta) <= eta_max)
+        & (ak.all(jets.metric_table(fatjets) > dr_fatjets, axis=2))
+        & ak.all(jets.metric_table(electrons) > dr_leptons, axis=2)
+        & ak.all(jets.metric_table(muons) > dr_leptons, axis=2)
+    )
+
+    # return top 2 jets sorted by btagPNetB
+    if sort_by == "btag":
+        jets_pnetb = jets[ak.argsort(jets.btagPNetB, ascending=False)]
+        return jets_pnetb[ak4_sel][:, :2]
+    # return 2 jets closet to bbFatjet and ttFatjet, respectively
+    elif sort_by == "nearest":
+        jets_away = jets[ak4_sel]
+        bbFatjet = ak.firsts(
+            fatjets[
+                ak.argsort(
+                    fatjets["globalParT_XbbvsQCDTop"],
+                    ascending=False,
+                )
+            ][:, 0:1]
+        )
+
+        ttFatjet = ak.firsts(
+            fatjets[
+                ak.argsort(
+                    sum(
+                        fatjets[f"globalParT_X{tautau}vsQCDTop"]
+                        for tautau in ["tauhtauh", "tauhtaue", "tauhtaum"]
+                    ),
+                    ascending=False,
+                )
+            ][:, 0:1]
+        )
+
+        jet_near_bbFatjet = jets_away[ak.argsort(jets_away.delta_r(bbFatjet), ascending=True)][
+            :, 0:1
+        ]
+        jet_near_ttFatjet = jets_away[ak.argsort(jets_away.delta_r(ttFatjet), ascending=True)][
+            :, 0:1
+        ]
+        return [jet_near_bbFatjet, jet_near_ttFatjet]
+    # return all nonoverlapping jets, no sorting
+    else:
+        return jets[ak4_sel]
+
 #adopted from https://github.com/scikit-hep/coffea/blob/a315da1fa307f1ec0d21c29e908e5b733603d7c0/src/coffea/nanoevents/methods/vector.py#L106
 def delta_r(eta1, phi1, eta2, phi2):
     deta = eta1 - eta2

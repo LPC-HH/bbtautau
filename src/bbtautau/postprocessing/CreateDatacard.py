@@ -753,6 +753,11 @@ def alphabet_fit(
     # Now do signal regions
     ##########################
 
+    # Can count the bkg just once for all signal regions
+    data_qcd_fail = templates_summed["fail"][data_key, :].sum().value - np.sum(
+        [templates_summed["fail"][bg_key, :].sum().value for bg_key in bg_keys]
+    )
+
     for sr in signal_regions:
         # QCD overall pass / fail efficiency
 
@@ -760,9 +765,6 @@ def alphabet_fit(
             [templates_summed[sr][bg_key, :].sum().value for bg_key in bg_keys]
         )
 
-        data_qcd_fail = templates_summed["fail"][data_key, :].sum().value - np.sum(
-            [templates_summed["fail"][bg_key, :].sum().value for bg_key in bg_keys]
-        )
         print(data_qcd_pass, data_qcd_fail)
         qcd_eff = data_qcd_pass / data_qcd_fail
         # qcd_eff = (
