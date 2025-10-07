@@ -160,6 +160,7 @@ class bbtautauSkimmer(SkimmerABC):
         nano_version: str = "v12_private",
         fatjet_pt_cut: float = None,
         fatjet_bb_preselection: bool = False,
+        prescale_factor: int = None,
     ):
         super().__init__()
 
@@ -173,6 +174,7 @@ class bbtautauSkimmer(SkimmerABC):
         self._region = region
         self._accumulator = processor.dict_accumulator({})
         self._fatjet_bb_preselection = fatjet_bb_preselection
+        self._prescale_factor = prescale_factor
 
         # JMSR
         self.jmsr_vars = ["msoftdrop", "particleNet_mass_legacy", "ParTmassVis", "ParTmassRes"]
@@ -685,6 +687,12 @@ class bbtautauSkimmer(SkimmerABC):
                 >= 1
             )
             add_selection("ak8_bb_preselection", cut_bb, *selection_args)
+
+        if self._prescale_factor:
+            cut_prescale = (
+                events.event % self._prescale_factor == 0
+            )
+            add_selection("prescale", cut_prescale, *selection_args)
 
         print("Selection", f"{time.time() - start:.2f}")
 
