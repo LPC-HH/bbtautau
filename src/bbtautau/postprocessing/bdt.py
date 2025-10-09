@@ -22,6 +22,7 @@ from postprocessing import (
     get_columns,
     leptons_assignment,
     load_samples,
+    tt_filters,
 )
 from Samples import CHANNELS, SAMPLES, sig_keys_ggf
 from sklearn.model_selection import train_test_split
@@ -45,18 +46,12 @@ class Trainer:
     loaded_dmatrix = False
 
     # Default samples for training / evaluation
-    sample_names: ClassVar[list[str]] = [
-        "qcd",
-        "ttbarhad",
-        "ttbarll",
-        "ttbarsl",
-        "dyjets",
-        "ggfbbtt",
-    ]
+    bkg_sample_names: ClassVar[list[str]] = ["dyjets", "qcd", "ttbarhad", "ttbarll", "ttbarsl"]
 
     def __init__(
         self,
         years: list[str],
+        signal_key: str,
         sample_names: list[str] = None,
         modelname: str = None,
         data_path: str = None,
@@ -69,8 +64,14 @@ class Trainer:
             years = list(years)
         self.years = years
 
+        self.signal_key = signal_key
+
         if sample_names is not None:
             self.sample_names = sample_names
+        else:
+            self.sample_names = [
+                f"{self.signal_key}{ch.key}" for ch in CHANNELS.values()
+            ] + self.bkg_sample_names
 
         self.samples = {name: SAMPLES[name] for name in self.sample_names}
 
@@ -82,18 +83,6 @@ class Trainer:
         self.train_vars = self.bdt_config[self.modelname]["train_vars"]
         self.hyperpars = self.bdt_config[self.modelname]["hyperpars"]
         self.feats = [feat for cat in self.train_vars for feat in self.train_vars[cat]]
-
-        # find a better place for this
-        self.classes = [
-            "ggfbbtthe",
-            "ggfbbtthh",
-            "ggfbbtthm",
-            "dyjets",
-            "qcd",
-            "ttbarhad",
-            "ttbarll",
-            "ttbarsl",
-        ]
 
         self.events_dict = {year: {} for year in self.years}
 
@@ -120,6 +109,7 @@ class Trainer:
 
                 filters_dict = base_filter(test_mode=False)
                 # filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3) # not needed, events are already filtered by skimmer
+                filters_dict = tt_filters(filters_dict, num_fatjets=3, tt_cut=0.3)
 
                 columns = get_columns(year)
 
@@ -139,15 +129,13 @@ class Trainer:
                     self.events_dict[year], year, channels=list(CHANNELS.values())
                 )
 
-                derive_variables(
-                    self.events_dict[year], CHANNELS["hm"]
-                )  # legacy issue, muon branches are misnamed
+                derive_variables(self.events_dict[year])
                 bbtautau_assignment(self.events_dict[year], agnostic=True)
                 leptons_assignment(self.events_dict[year], dR_cut=1.5)
 
         for ch in CHANNELS:
-            self.samples[f"ggfbbtt{ch}"] = SAMPLES[f"ggfbbtt{ch}"]
-        del self.samples["ggfbbtt"]
+            self.samples[f"{self.signal_key}{ch}"] = SAMPLES[f"{self.signal_key}{ch}"]
+        del self.samples[self.signal_key]
 
     @staticmethod
     def shorten_df(df, N, seed=42):
@@ -439,16 +427,11 @@ class Trainer:
         weights = np.concatenate(weights_list)
         weights_rescaled = np.concatenate(weights_rescaled_list)
 
-        # Use LabelEncoder to convert sample names to numeric labels
-        # self.label_encoder = LabelEncoder()
-        # y = self.label_encoder.fit_transform(sample_names_labels)
-        # self.classes = self.label_encoder.classes_
-
-        y = label_transform(self.classes, sample_names_labels)
+        y = label_transform(self.sample_names, sample_names_labels)
 
         # Print class mapping
         print("\nClass mapping:")
-        for i, class_name in enumerate(self.classes):
+        for i, class_name in enumerate(self.sample_names):
             print(f"Class {i}: {class_name}")
 
         # Split into training and validation sets for training and training evaluation
@@ -611,13 +594,15 @@ class Trainer:
         print("signal_names", signal_names)
         print("background_names", background_names)
 
-        event_filters = {name: self.dval.get_label() == i for i, name in enumerate(self.classes)}
+        event_filters = {
+            name: self.dval.get_label() == i for i, name in enumerate(self.sample_names)
+        }
         dval_df = pd.DataFrame(self.dval.get_data().toarray(), columns=self.feats)
 
         preds_dict = {}
-        for class_name in self.classes:
+        for class_name in self.sample_names:
             events = {}
-            for i, pred_class_name in enumerate(self.classes):
+            for i, pred_class_name in enumerate(self.sample_names):
                 events[pred_class_name] = y_pred[event_filters[class_name], i]
             events["finalWeight"] = self.dval.get_weight()[event_filters[class_name]]
             events = pd.DataFrame(events)

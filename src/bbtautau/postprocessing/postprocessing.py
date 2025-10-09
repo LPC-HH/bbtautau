@@ -415,7 +415,8 @@ def bb_filters(
 
 
 def tt_filters(
-    channel: Channel,
+    # if channel is None, it is agnostic selection
+    channel: Channel = None,
     in_filters: dict[str, list[tuple]] = None,
     num_fatjets: int = 3,
     tt_cut: float = 0.3,
@@ -424,12 +425,24 @@ def tt_filters(
         in_filters = base_filter()
 
     filters = {}
-    for dtype, ifilters_bydtype in in_filters.items():
-        filters[dtype] = [
-            ifilter + [(f"('ak8FatJetParTX{channel.tagger_label}vsQCDTop', '{n}')", ">=", tt_cut)]
-            for n in range(num_fatjets)
-            for ifilter in ifilters_bydtype
-        ]
+
+    # Agnostic selection: at least one jet with ParT score in any channel is required. Note that cannot sum scores together at this stage.
+    if channel is None:
+        for dtype, ifilters_bydtype in in_filters.items():
+            filters[dtype] = [
+                ifilter + [(f"('ak8FatJetParTX{ch.tagger_label}vsQCDTop', '{n}')", ">=", tt_cut)]
+                for n in range(num_fatjets)
+                for ifilter in ifilters_bydtype
+                for ch in CHANNELS.values()
+            ]
+    else:
+        for dtype, ifilters_bydtype in in_filters.items():
+            filters[dtype] = [
+                ifilter
+                + [(f"('ak8FatJetParTX{channel.tagger_label}vsQCDTop', '{n}')", ">=", tt_cut)]
+                for n in range(num_fatjets)
+                for ifilter in ifilters_bydtype
+            ]
 
     return filters
 
@@ -1215,8 +1228,16 @@ def leptons_assignment(
         sample.m_mask = _get_lepton_mask(sample, "Muon", dR_cut)
 
 
-def derive_variables(events_dict: dict[str, LoadedSample], channel: Channel, num_fatjets: int = 3):
+def derive_variables(
+    events_dict: dict[str, LoadedSample], channel: Channel = None, num_fatjets: int = 3
+):
     """Derive variables for each event."""
+
+    if channel is not None:
+        print(
+            "Warning (postprocessing.derive_variables): indicating the channel is deprecated and needed only for data with tag < 25Sep23AddVars_v12_private_signal. Consider switching to new data in userConfig.py"
+        )
+
     for sample in events_dict.values():
         if "ak8FatJetPNetXbbvsQCDLegacy" not in sample.events:
             Xbb = sample.get_var("ak8FatJetPNetXbbLegacy")

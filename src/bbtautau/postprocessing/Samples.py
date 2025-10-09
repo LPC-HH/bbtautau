@@ -5,7 +5,20 @@ from boostedhh.utils import Sample
 
 from bbtautau.bbtautau_utils import Channel
 
-CHANNELS = {
+CHANNELS = {  # in alphabetical order
+    "he": Channel(
+        key="he",
+        label=r"$\tau_h e$",
+        hlt_types=["PNet", "PFJet", "EGamma", "ETau", "DiTau", "DitauJet", "SingleTau"],
+        data_samples=["jetmet", "tau", "egamma"],
+        lepton_dataset="egamma",
+        isLepton=True,
+        tagger_label="tauhtaue",
+        txbb_cut=0.91,
+        txtt_cut=0.999,
+        txtt_BDT_cut=0.9918,
+        tt_mass_cut=("ttFatJetParTmassResApplied", [70, 210]),
+    ),
     "hh": Channel(
         key="hh",
         label=r"$\tau_h\tau_h$",
@@ -29,19 +42,6 @@ CHANNELS = {
         txbb_cut=0.85,
         txtt_cut=0.99,
         txtt_BDT_cut=0.8,
-        tt_mass_cut=("ttFatJetParTmassResApplied", [70, 210]),
-    ),
-    "he": Channel(
-        key="he",
-        label=r"$\tau_h e$",
-        hlt_types=["PNet", "PFJet", "EGamma", "ETau", "DiTau", "DitauJet", "SingleTau"],
-        data_samples=["jetmet", "tau", "egamma"],
-        lepton_dataset="egamma",
-        isLepton=True,
-        tagger_label="tauhtaue",
-        txbb_cut=0.91,
-        txtt_cut=0.999,
-        txtt_BDT_cut=0.9918,
         tt_mass_cut=("ttFatJetParTmassResApplied", [70, 210]),
     ),
 }
