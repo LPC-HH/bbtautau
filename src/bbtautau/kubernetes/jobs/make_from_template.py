@@ -1,17 +1,17 @@
-import argparse
-from argparse import BooleanOptionalAction
+from __future__ import annotations
 
+import argparse
+import os
+import sys
+from argparse import BooleanOptionalAction
+from pathlib import Path
 from string import Template
 
-import sys
-import os
-from os.path import exists
+kubernetes_dir = Path("/home/users/lumori/bbtautau/src/bbtautau/kubernetes")
+templ_file = kubernetes_dir / "jobs" / "template.yaml"
 
 
-templ_file = "template.yml"
-
-
-class objectview(object):
+class objectview:
     """converts a dict into an object"""
 
     def __init__(self, d):
@@ -21,7 +21,7 @@ class objectview(object):
 def from_json(args):
     import json
 
-    with open(args.from_json, "r") as f:
+    with Path.open(args.from_json) as f:
         json_args = json.load(f)
 
     args_dict = vars(args)
@@ -46,9 +46,9 @@ def main(args):
 
     args.job_name = "_".join(args.job_name.split("-"))  # hyphens to underscores
 
-    file_name = f"bdt_trainings/{args.job_name}.yml"
+    file_name = kubernetes_dir / f"bdt_trainings/{args.job_name}.yml"
 
-    if exists(file_name):
+    if Path.exists(file_name):
         print("Job Exists")
         if args.overwrite:
             print("Overwriting")
@@ -56,7 +56,7 @@ def main(args):
             print("Exiting")
             sys.exit()
 
-    with open(templ_file, "r") as f:
+    with Path.open(templ_file) as f:
         lines = Template(f.read())
 
     train_args = {
@@ -66,7 +66,7 @@ def main(args):
         "datapath": args.datapath,
     }
 
-    with open(file_name, "w") as f:
+    with Path.open(file_name, "w") as f:
         f.write(lines.substitute(train_args))
 
     if args.submit:
@@ -78,7 +78,9 @@ if __name__ == "__main__":
     parser.add_argument("--from-json", default="", help="json file to load args from", type=str)
     parser.add_argument("--name", default="", help="", type=str)
     parser.add_argument("--job-name", default="", help="defaults to name", type=str)
-    parser.add_argument("--datapath", default="", help="", type=str)
+    parser.add_argument(
+        "--datapath", default="25Sep23AddVars_v12_private_signal", help="", type=str
+    )
     parser.add_argument(
         "--train-args",
         default="",
@@ -93,7 +95,7 @@ if __name__ == "__main__":
         type=bool,
         action=BooleanOptionalAction,
     )
-    
+
     parser.add_argument(
         "--submit",
         default=False,

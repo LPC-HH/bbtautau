@@ -9,15 +9,15 @@ spec:
     spec:
       containers:
       - name: bbtautau
-        image: gitlab-registry.nrp-nautilus.io/zichunhao/parcel:latest
+        image: gitlab-registry.nrp-nautilus.io/ludomori99/bbtautau-docker:latest
         command:
         - "/bin/bash"
         - "-c"
         - >
-          pip install xgboost tabulate && mkdir -p /bbtautauvol/bdt/$name/ && ls /bbtautauvol &&
-          python /home/users/lumori/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --train --model test
+          mkdir -p /bbtautauvol/bdt/$name/ && ls /bbtautauvol && pip install -e . && cd boostedhh && pip install -e . && cd .. && echo hello &&
+          python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --train --model test
           --save-dir /bbtautauvol/bdt/$name --data-path /bbtautauvol/$datapath/
-          | tee /bbtautauvol/bdt/$name/log.txt`
+          | tee /bbtautauvol/bdt/$name/log.txt
         volumeMounts:
         - mountPath: /bbtautauvol
           name: bbtautauvol
@@ -25,11 +25,11 @@ spec:
           mountPath: /opt/repo
         resources:
           limits:
-            memory: 64Gi
-            cpu: "6"
+            memory: 8Gi
+            cpu: "8"
           requests:
-            memory: 64Gi
-            cpu: "4"
+            memory: 8Gi
+            cpu: "6"
       initContainers:
       - name: init-clone-repo
         image: alpine/git
