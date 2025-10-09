@@ -11,13 +11,13 @@ spec:
       - name: bbtautau
         image: gitlab-registry.nrp-nautilus.io/ludomori99/bbtautau-docker:latest
         command:
-        - "/bin/bash"
-        - "-c"
-        - >
-          mkdir -p /bbtautauvol/bdt/$name/ && ls /bbtautauvol && pip install -e . && cd boostedhh && pip install -e . && cd .. && echo hello &&
-          python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --train --model test
-          --save-dir /bbtautauvol/bdt/$name --data-path /bbtautauvol/$datapath/
-          | tee /bbtautauvol/bdt/$name/log.txt
+          - "/bin/bash"
+          - "-c"
+          - >
+            mkdir -p /bbtautauvol/bdt/$name/ && pip install -e /opt/repo/bbtautau && pip install -e /opt/repo/bbtautau/boostedhh &&
+            python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --train --model $name
+            --save-dir /bbtautauvol/bdt/$name --data-path /bbtautauvol/$datapath/ $args
+            | tee /bbtautauvol/bdt/$name/log.txt
         volumeMounts:
         - mountPath: /bbtautauvol
           name: bbtautauvol
@@ -25,10 +25,10 @@ spec:
           mountPath: /opt/repo
         resources:
           limits:
-            memory: 8Gi
+            memory: 32Gi
             cpu: "8"
           requests:
-            memory: 8Gi
+            memory: 32Gi
             cpu: "6"
       initContainers:
       - name: init-clone-repo
@@ -36,6 +36,7 @@ spec:
         args:
           - clone
           - --single-branch
+          - --recurse-submodules
           - --branch
           - kube
           - https://github.com/LPC-HH/bbtautau.git
@@ -43,6 +44,13 @@ spec:
         volumeMounts:
           - name: git-repo
             mountPath: /opt/repo
+        resources:
+          limits:
+            memory: 32Gi
+            cpu: "8"
+          requests:
+            memory: 32Gi
+            cpu: "6"
       volumes:
       - name: git-repo
         emptyDir: {}

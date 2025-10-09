@@ -56,6 +56,7 @@ class Trainer:
         modelname: str = None,
         data_path: str = None,
         output_dir: str = None,
+        tt_preselection: bool = False,
     ) -> None:
         if years[0] == "all":
             print("Using all years")
@@ -80,6 +81,7 @@ class Trainer:
 
         self.modelname = modelname
         self.bdt_config = bdt_config
+        self.tt_preselection = tt_preselection
         self.train_vars = self.bdt_config[self.modelname]["train_vars"]
         self.hyperpars = self.bdt_config[self.modelname]["hyperpars"]
         self.feats = [feat for cat in self.train_vars for feat in self.train_vars[cat]]
@@ -109,7 +111,8 @@ class Trainer:
 
                 filters_dict = base_filter(test_mode=False)
                 # filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3) # not needed, events are already filtered by skimmer
-                filters_dict = tt_filters(filters_dict, num_fatjets=3, tt_cut=0.3)
+                if self.tt_preselection:
+                    filters_dict = tt_filters(filters_dict, num_fatjets=3, tt_cut=0.3)
 
                 columns = get_columns(year)
 
@@ -1079,6 +1082,12 @@ if __name__ == "__main__":
         help="Name of the model configuration to use",
     )
     parser.add_argument(
+        "--tt-preselection",
+        action="store_true",
+        default=False,
+        help="Apply tt preselection",
+    )
+    parser.add_argument(
         "--save-dir",
         type=str,
         default=None,
@@ -1146,6 +1155,7 @@ if __name__ == "__main__":
         modelname=args.model,
         output_dir=args.save_dir,
         data_path=args.data_path,
+        tt_preselection=args.tt_preselection,
     )
 
     if args.train:
