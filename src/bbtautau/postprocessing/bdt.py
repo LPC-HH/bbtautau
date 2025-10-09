@@ -112,7 +112,9 @@ class Trainer:
                 filters_dict = base_filter(test_mode=False)
                 # filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3) # not needed, events are already filtered by skimmer
                 if self.tt_preselection:
-                    filters_dict = tt_filters(filters_dict, num_fatjets=3, tt_cut=0.3)
+                    filters_dict = tt_filters(
+                        channel=None, in_filters=filters_dict, num_fatjets=3, tt_cut=0.3
+                    )
 
                 columns = get_columns(year)
 
