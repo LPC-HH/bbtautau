@@ -14,36 +14,16 @@ spec:
           - "/bin/bash"
           - "-c"
           - >
-            mkdir -p /bbtautauvol/bdt/$name/ && pip install -e /opt/repo/bbtautau && pip install -e /opt/repo/bbtautau/boostedhh &&
+            git clone --single-branch --recurse-submodules --branch kube https://github.com/LPC-HH/bbtautau.git /opt/repo/bbtautau &&
+            mkdir -p /bbtautauvol/bdt/$name/ &&
+            pip install -e /opt/repo/bbtautau &&
+            pip install -e /opt/repo/bbtautau/boostedhh &&
             python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --train --model $name
             --save-dir /bbtautauvol/bdt/$name --data-path /bbtautauvol/$datapath/ $args
             | tee /bbtautauvol/bdt/$name/log.txt
         volumeMounts:
         - mountPath: /bbtautauvol
           name: bbtautauvol
-        - name: git-repo
-          mountPath: /opt/repo
-        resources:
-          limits:
-            memory: 32Gi
-            cpu: "8"
-          requests:
-            memory: 32Gi
-            cpu: "6"
-      initContainers:
-      - name: init-clone-repo
-        image: alpine/git
-        args:
-          - clone
-          - --single-branch
-          - --recurse-submodules
-          - --branch
-          - kube
-          - https://github.com/LPC-HH/bbtautau.git
-          - /opt/repo/bbtautau
-        volumeMounts:
-          - name: git-repo
-            mountPath: /opt/repo
         resources:
           limits:
             memory: 32Gi
@@ -52,8 +32,6 @@ spec:
             memory: 32Gi
             cpu: "6"
       volumes:
-      - name: git-repo
-        emptyDir: {}
       - name: bbtautauvol
         persistentVolumeClaim:
           claimName: bbtautauvol

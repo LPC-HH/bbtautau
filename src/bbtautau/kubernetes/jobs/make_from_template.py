@@ -84,7 +84,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--train-args",
         default="",
-        help="Arguments for training. If it's a single argument, may need to add a space afterwards",
+        help="Arguments for training. Use = syntax for args with dashes: --train-args='--flag value'",
         type=str,
     )
 

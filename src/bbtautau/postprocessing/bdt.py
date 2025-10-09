@@ -24,7 +24,7 @@ from postprocessing import (
     load_samples,
     tt_filters,
 )
-from Samples import CHANNELS, SAMPLES, sig_keys_ggf
+from Samples import CHANNELS, SAMPLES
 from sklearn.model_selection import train_test_split
 from tabulate import tabulate
 
@@ -119,7 +119,7 @@ class Trainer:
                 self.events_dict[year] = load_samples(
                     year=year,
                     paths=self.data_paths[year],
-                    signals=sig_keys_ggf,
+                    signals=[self.signal_key],
                     channels=list(CHANNELS.values()),
                     samples=self.samples,
                     filters_dict=filters_dict,
@@ -1082,6 +1082,12 @@ if __name__ == "__main__":
         help="Name of the model configuration to use",
     )
     parser.add_argument(
+        "--signal-key",
+        type=str,
+        default="ggfbbtt",
+        help="Key for the signal sample",
+    )
+    parser.add_argument(
         "--tt-preselection",
         action="store_true",
         default=False,
@@ -1156,6 +1162,7 @@ if __name__ == "__main__":
         output_dir=args.save_dir,
         data_path=args.data_path,
         tt_preselection=args.tt_preselection,
+        signal_key=args.signal_key,
     )
 
     if args.train:
