@@ -1247,26 +1247,32 @@ def derive_variables(
             for n in range(num_fatjets):
                 sample.events[("ak8FatJetPNetXbbvsQCDLegacy", str(n))] = Xbb_vs_QCD[:, n]
 
-        if channel.key == "hm" and "ak8FatJetParTXtauhtaumvsQCDTop" not in sample.events:
-            tauhtaum = sample.get_var("ak8FatJetParTXtauhtaum")
-            qcd = sample.get_var("ak8FatJetParTQCD")
-            top = sample.get_var("ak8FatJetParTTop")
-            tauhtaum_vs_QCDTop = np.divide(
-                tauhtaum,
-                tauhtaum + qcd + top,
-                out=np.zeros_like(tauhtaum),
-                where=(tauhtaum + qcd + top) != 0,
-            )
+        if channel is not None:
+            if channel.key == "hm" and "ak8FatJetParTXtauhtaumvsQCDTop" not in sample.events:
+                tauhtaum = sample.get_var("ak8FatJetParTXtauhtaum")
+                qcd = sample.get_var("ak8FatJetParTQCD")
+                top = sample.get_var("ak8FatJetParTTop")
+                tauhtaum_vs_QCDTop = np.divide(
+                    tauhtaum,
+                    tauhtaum + qcd + top,
+                    out=np.zeros_like(tauhtaum),
+                    where=(tauhtaum + qcd + top) != 0,
+                )
 
-            for n in range(num_fatjets):
-                sample.events[("ak8FatJetParTXtauhtaumvsQCDTop", str(n))] = tauhtaum_vs_QCDTop[:, n]
+                for n in range(num_fatjets):
+                    sample.events[("ak8FatJetParTXtauhtaumvsQCDTop", str(n))] = tauhtaum_vs_QCDTop[
+                        :, n
+                    ]
 
-        if channel.key == "hm" and "ak8FatJetParTXtauhtaumvsQCD" not in sample.events:
-            tauhtaum_vs_QCD = np.divide(
-                tauhtaum, tauhtaum + qcd, out=np.zeros_like(tauhtaum), where=(tauhtaum + qcd) != 0
-            )
-            for n in range(num_fatjets):
-                sample.events[("ak8FatJetParTXtauhtaumvsQCD", str(n))] = tauhtaum_vs_QCD[:, n]
+            if channel.key == "hm" and "ak8FatJetParTXtauhtaumvsQCD" not in sample.events:
+                tauhtaum_vs_QCD = np.divide(
+                    tauhtaum,
+                    tauhtaum + qcd,
+                    out=np.zeros_like(tauhtaum),
+                    where=(tauhtaum + qcd) != 0,
+                )
+                for n in range(num_fatjets):
+                    sample.events[("ak8FatJetParTXtauhtaumvsQCD", str(n))] = tauhtaum_vs_QCD[:, n]
 
 
 def derive_lepton_variables(events_dict: dict[str, LoadedSample]):
