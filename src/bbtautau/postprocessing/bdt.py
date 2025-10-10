@@ -12,9 +12,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from bdt_config import bdt_config
 from boostedhh import hh_vars, plotting
-from postprocessing import (
+from Samples import CHANNELS, SAMPLES
+from sklearn.model_selection import train_test_split
+from tabulate import tabulate
+
+from bbtautau.postprocessing.bdt_config import bdt_config
+from bbtautau.postprocessing.postprocessing import (
     base_filter,
     bbtautau_assignment,
     delete_columns,
@@ -25,10 +29,6 @@ from postprocessing import (
     load_samples,
     tt_filters,
 )
-from Samples import CHANNELS, SAMPLES
-from sklearn.model_selection import train_test_split
-from tabulate import tabulate
-
 from bbtautau.postprocessing.rocUtils import ROCAnalyzer, multiclass_confusion_matrix
 from bbtautau.postprocessing.utils import LoadedSample, label_transform
 from bbtautau.userConfig import CLASSIFIER_DIR, DATA_PATHS, MODEL_DIR, path_dict
@@ -132,9 +132,9 @@ class Trainer:
                 )
 
                 derive_variables(self.events_dict[year])
-                derive_lepton_variables(self.events_dict[year])
                 bbtautau_assignment(self.events_dict[year], agnostic=True)
                 leptons_assignment(self.events_dict[year], dR_cut=1.5)
+                derive_lepton_variables(self.events_dict[year])
 
         for ch in CHANNELS:
             self.samples[f"{self.signal_key}{ch}"] = SAMPLES[f"{self.signal_key}{ch}"]
