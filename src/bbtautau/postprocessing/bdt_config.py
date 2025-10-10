@@ -279,8 +279,8 @@ bdt_config = {
             "misc": ["METPt", "METPhi", "ht"],
         },
     },
-    "20Aug25_loweta_lowreg": {
-        "modelname": "4Aug25_loweta_lowreg",
+    "20aug25_loweta_lowreg": {
+        "modelname": "20aug25_loweta_lowreg",
         "hyperpars": {
             "objective": "multi:softprob",
             "max_depth": 12,
@@ -294,7 +294,7 @@ bdt_config = {
             "eval_metric": "mlogloss",
             "tree_method": "hist",
             "num_class": 8,
-            # "device": "cuda",
+            "device": "cuda",
         },
         "num_rounds": 100,
         "test_size": 0.2,
