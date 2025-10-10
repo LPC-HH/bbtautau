@@ -52,7 +52,7 @@ class Trainer:
         self,
         years: list[str],
         signal_key: str,
-        sample_names: list[str] = None,
+        bkg_sample_names: list[str] = None,
         modelname: str = None,
         data_path: str = None,
         output_dir: str = None,
@@ -66,15 +66,11 @@ class Trainer:
         self.years = years
 
         self.signal_key = signal_key
+        if bkg_sample_names is not None:
+            self.bkg_sample_names = bkg_sample_names
 
-        if sample_names is not None:
-            self.sample_names = sample_names
-        else:
-            self.sample_names = [
-                f"{self.signal_key}{ch.key}" for ch in CHANNELS.values()
-            ] + self.bkg_sample_names
-
-        self.samples = {name: SAMPLES[name] for name in self.sample_names}
+        # need to load signal before splitting into channels
+        self.samples = {name: SAMPLES[name] for name in [self.signal_key] + self.bkg_sample_names}
 
         # ensure backwards compatibility. Choice of default data paths is done in userConfig.py
         self.data_paths = path_dict(data_path) if data_path is not None else DATA_PATHS
@@ -141,6 +137,11 @@ class Trainer:
         for ch in CHANNELS:
             self.samples[f"{self.signal_key}{ch}"] = SAMPLES[f"{self.signal_key}{ch}"]
         del self.samples[self.signal_key]
+
+        # define sample list as signals + bkg samples
+        self.sample_names = [
+            f"{self.signal_key}{ch}" for ch in CHANNELS.values()
+        ] + self.bkg_sample_names
 
     @staticmethod
     def shorten_df(df, N, seed=42):
@@ -1159,7 +1160,7 @@ if __name__ == "__main__":
 
     trainer = Trainer(
         years=args.years,
-        sample_names=args.samples,
+        bkg_sample_names=args.samples,
         modelname=args.model,
         output_dir=args.save_dir,
         data_path=args.data_path,
