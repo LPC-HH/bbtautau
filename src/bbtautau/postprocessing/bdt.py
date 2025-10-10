@@ -143,10 +143,6 @@ class Trainer:
         # define sample list as signals + bkg samples
         self.sample_names = [f"{self.signal_key}{ch}" for ch in CHANNELS] + self.bkg_sample_names
 
-        print("\n\n\n", self.sample_names, "\n\n\n\n")
-        print(self.samples.keys(), "\n\n\n\n")
-        print(self.events_dict["2022"].keys(), "\n\n\n\n")
-
     @staticmethod
     def shorten_df(df, N, seed=42):
         if len(df) < N:
@@ -723,14 +719,21 @@ class Trainer:
 
             # Plot BDT output score distributions
             weights_all = self.dval.get_weight()
-            for i, sample in enumerate(self.classes):
+            for i, sample in enumerate(self.sample_names):
                 plotting.plot_hist(
-                    [y_pred[self.dval.get_label() == i, _s] for _s in range(len(self.classes))],
-                    [self.samples[self.classes[_s]].label for _s in range(len(self.classes))],
+                    [
+                        y_pred[self.dval.get_label() == i, _s]
+                        for _s in range(len(self.sample_names))
+                    ],
+                    [
+                        self.samples[self.sample_names[_s]].label
+                        for _s in range(len(self.sample_names))
+                    ],
                     nbins=100,
                     xlim=(0, 1),
                     weights=[
-                        weights_all[self.dval.get_label() == i] for _s in range(len(self.classes))
+                        weights_all[self.dval.get_label() == i]
+                        for _s in range(len(self.sample_names))
                     ],
                     xlabel=f"BDT output score on {sample}",
                     lumi=f"{np.sum([hh_vars.LUMI[year] for year in self.years]) / 1000:.1f}",
