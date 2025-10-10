@@ -18,6 +18,7 @@ from postprocessing import (
     base_filter,
     bbtautau_assignment,
     delete_columns,
+    derive_lepton_variables,
     derive_variables,
     get_columns,
     leptons_assignment,
@@ -131,6 +132,7 @@ class Trainer:
                 )
 
                 derive_variables(self.events_dict[year])
+                derive_lepton_variables(self.events_dict[year])
                 bbtautau_assignment(self.events_dict[year], agnostic=True)
                 leptons_assignment(self.events_dict[year], dR_cut=1.5)
 
