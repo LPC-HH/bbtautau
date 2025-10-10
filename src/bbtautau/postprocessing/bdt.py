@@ -106,7 +106,7 @@ class Trainer:
         else:
             for year in self.years:
 
-                filters_dict = base_filter(test_mode=False)
+                filters_dict = base_filter(test_mode=True)
                 # filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3) # not needed, events are already filtered by skimmer
                 if self.tt_preselection:
                     filters_dict = tt_filters(
@@ -141,9 +141,11 @@ class Trainer:
         del self.samples[self.signal_key]
 
         # define sample list as signals + bkg samples
-        self.sample_names = [
-            f"{self.signal_key}{ch}" for ch in CHANNELS.values()
-        ] + self.bkg_sample_names
+        self.sample_names = [f"{self.signal_key}{ch}" for ch in CHANNELS] + self.bkg_sample_names
+
+        print("\n\n\n", self.sample_names, "\n\n\n\n")
+        print(self.samples.keys(), "\n\n\n\n")
+        print(self.events_dict["2022"].keys(), "\n\n\n\n")
 
     @staticmethod
     def shorten_df(df, N, seed=42):

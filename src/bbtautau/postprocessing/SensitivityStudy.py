@@ -161,7 +161,9 @@ class Analyser:
             # filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3)
 
             if tt_pres:
-                filters_dict = tt_filters(self.channel, filters_dict, num_fatjets=3, tt_cut=0.3)
+                filters_dict = tt_filters(
+                    channel=self.channel, in_filters=filters_dict, num_fatjets=3, tt_cut=0.3
+                )
 
             columns = get_columns(year, triggers_in_channel=self.channel)
 

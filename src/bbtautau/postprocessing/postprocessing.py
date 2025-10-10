@@ -750,7 +750,7 @@ def load_samples(
                 else:
                     events_dict[key] = LoadedSample(sample=sample, events=events)
 
-    # keep only the specified bbtt channels
+    # keep only the specified signal channels
     for signal in signals:
         for channel in channels:
             if not loaded_samples:
