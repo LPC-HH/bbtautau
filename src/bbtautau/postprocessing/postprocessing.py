@@ -650,7 +650,7 @@ def load_samples(
             )
             return None
 
-        data_ = Parallel(n_jobs=2)(
+        data_ = Parallel(n_jobs=16)(
             delayed(LoadedSample)(
                 sample=sample,
                 events=utils.load_sample(

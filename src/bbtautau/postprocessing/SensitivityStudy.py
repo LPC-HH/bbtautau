@@ -18,6 +18,7 @@ from joblib import Parallel, delayed
 from postprocessing import (
     apply_triggers,
     base_filter,
+    bb_filters,
     bbtautau_assignment,
     compute_bdt_preds,
     delete_columns,
@@ -57,12 +58,19 @@ class FOM:
 
 @dataclass
 class Optimum:
+    dataMinusSimABCD: bool
+    showNonDataDrivenPortion: bool
     limit: float
     signal_yield: float
-    bkg_yield: float
-    hmass_fail: float
-    sideband_fail: float
-    transfer_factor: float
+    bkg_data_yield: float
+    hmass_data_fail: float
+    sideband_data_fail: float
+    data_transfer_factor: float
+
+    bkg_qcd_yield: float
+    hmass_qcd_fail: float
+    sideband_qcd_fail: float
+    qcd_transfer_factor: float
     non_qcd_bg_in_A: float
     cuts: tuple[float, float]
 
@@ -81,9 +89,12 @@ def fom_2sqrtB_S(b_qcd, s, _tf, non_qcd_bg_in_A=0, b_data=None):
 
 
 def fom_2sqrtB_S_var(b_qcd, s, _tf, non_qcd_bg_in_A, b_data):
-    bg_in_A = b_qcd * _tf + non_qcd_bg_in_A 
+    # even tho the var name is qcd, it is actually data-ttbar
+    # TODO: better var names
+    qcd_in_A = b_qcd * _tf
+    bg_in_A = qcd_in_A + non_qcd_bg_in_A 
     return np.where(
-        (b_data > 0) & (s > 0), 2 * np.sqrt(bg_in_A + (bg_in_A / np.sqrt(b_data+bg_in_A)) ** 2) / s, -PAD_VAL
+        (b_data > 0) & (s > 0), 2 * np.sqrt(bg_in_A + (qcd_in_A / np.sqrt(b_qcd)) ** 2) / s, -PAD_VAL
     )
 
 
@@ -103,7 +114,7 @@ FOMS = {
 
 class Analyser:
     def __init__(
-        self, years, channel_key, test_mode, use_bdt, modelname, main_plot_dir, at_inference=False, llsl_weight=1, bb_disc='bbFatJetParTXbbvsQCD',
+        self, years, channel_key, test_mode, use_bdt, modelname, main_plot_dir, at_inference=False, llsl_weight=1, bb_disc='bbFatJetParTXbbvsQCD', dataMinusSimABCD=False, showNonDataDrivenPortion=True,
     ):
         self.channel = CHANNELS[channel_key]
         self.years = years
@@ -128,6 +139,9 @@ class Analyser:
         self.at_inference = at_inference
         self.llsl_weight = llsl_weight
         self.bb_disc = bb_disc
+        self.dataMinusSimABCD = dataMinusSimABCD
+        self.showNonDataDrivenPortion = showNonDataDrivenPortion
+        print("Using data minus simulated non-QCD backgrounds for ABCD estimation:", self.dataMinusSimABCD)
 
         self.model_dir = MODEL_DIR
 
@@ -136,7 +150,7 @@ class Analyser:
         for year in self.years:
 
             filters_dict = base_filter(self.test_mode)
-            # filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3)
+            filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3)
 
             if tt_pres:
                 filters_dict = tt_filters(self.channel, filters_dict, num_fatjets=3, tt_cut=0.3)
@@ -386,20 +400,22 @@ class Analyser:
                 self.pttt[year][key] = self.events_dict[year][key].get_var("ttFatJetPt")
 
     def compute_sig_bkg_abcd(self, years, txbbcut, txttcut, mbb1, mbb2, mtt1, mtt2):
+        print("Am I using the new ABCD?", self.dataMinusSimABCD)
         # pass/fail from taggers
         sig_pass = 0  # resonant region pass, signal
         bg_pass_sb = 0  # sideband region pass
         bg_fail_res = 0  # resonant region fail
         bg_fail_sb = 0  # sideband region fail
+
+        # variables to use if self.showNonDataDrivenPortion is True
+        non_qcd_bgs = ["ttbarhad", "ttbarsl", "ttbarll"]
         qcd_pass_sb = 0  # sideband region pass, data - simulated_non_QCD_bg
         qcd_fail_res = 0  # resonant region fail, data - simulated_non_QCD_bg
-        qcd_fail_sb = 0  # sideband region fail, data - simulated_non_QCD_bg
+        qcd_fail_sb = -1  # sideband region fail, data - simulated_non_QCD_bg
         non_qcd_bg_pass_res = 0 # resonant region pass, simulated backgrounds except QCD
 
-        non_qcd_bgs = ["ttbarhad", "ttbarsl", "ttbarll", "dyjets"]
-
         for year in years:
-            for key in [self.sig_key]+non_qcd_bgs:
+            for key in [self.sig_key]:
                 # Region A
                 cut_sig_pass = (
                     (self.txbbs[year][key] > txbbcut)
@@ -413,16 +429,11 @@ class Analyser:
                     cut_sig_pass &= (self.masstt[year][key] > mtt1) & (
                         self.masstt[year][key] < mtt2
                     )
-                if key is self.sig_key:
-                    sig_pass += np.sum(
-                        self.events_dict[year][self.sig_key].events["finalWeight"][cut_sig_pass]
-                    )
-                else:  # estimate the non-qcd contribution to region A
-                    non_qcd_bg_pass_res += np.sum(
-                        self.events_dict[year][key].events["finalWeight"][cut_sig_pass]
-                    )
+                sig_pass += np.sum(
+                    self.events_dict[year][self.sig_key].events["finalWeight"][cut_sig_pass]
+                )
 
-            for key in self.channel.data_samples+non_qcd_bgs:
+            for key in self.channel.data_samples:
                 # Region B
                 cut_bg_pass_sb = (
                     (self.txbbs[year][key] > txbbcut)
@@ -447,14 +458,12 @@ class Analyser:
                 sum_pass_msb2 =  np.sum(
                     self.events_dict[year][key].events["finalWeight"][cut_bg_pass_sb & msb2]
                 )
-                if key in self.channel.data_samples:
-                    bg_pass_sb += sum_pass_msb1
-                    bg_pass_sb += sum_pass_msb2
+                bg_pass_sb += sum_pass_msb1
+                bg_pass_sb += sum_pass_msb2
+                if self.showNonDataDrivenPortion:
                     qcd_pass_sb += sum_pass_msb1
                     qcd_pass_sb += sum_pass_msb2
-                else:  ## subtract non-QCD simulated background for more precise ABCD estimation of QCD
-                    qcd_pass_sb -= sum_pass_msb1
-                    qcd_pass_sb -= sum_pass_msb2
+
                 # Region D
                 cut_bg_fail_sb = (
                     ((self.txbbs[year][key] < txbbcut) | (self.txtts[year][key] < txttcut))
@@ -471,14 +480,11 @@ class Analyser:
                 sum_fail_msb2 = np.sum(
                     self.events_dict[year][key].events["finalWeight"][cut_bg_fail_sb & msb2]
                 )
-                if key in self.channel.data_samples:
-                    bg_fail_sb += sum_fail_msb1
-                    bg_fail_sb += sum_fail_msb2
+                bg_fail_sb += sum_fail_msb1
+                bg_fail_sb += sum_fail_msb2
+                if self.showNonDataDrivenPortion:
                     qcd_fail_sb += sum_fail_msb1
                     qcd_fail_sb += sum_fail_msb2
-                else:  ## subtract non-QCD simulated background for more precise ABCD estimation of QCD
-                    qcd_fail_sb -= sum_fail_msb1
-                    qcd_fail_sb -= sum_fail_msb2
 
                 # Region C
                 cut_bg_fail_res = (
@@ -495,16 +501,108 @@ class Analyser:
                 sum_fail_res = np.sum(
                     self.events_dict[year][key].events["finalWeight"][cut_bg_fail_res]
                 )
-                if key in self.channel.data_samples:
-                    bg_fail_res += sum_fail_res
+                bg_fail_res += sum_fail_res
+                if self.showNonDataDrivenPortion:
                     qcd_fail_res += sum_fail_res
-                else:  ## subtract non-QCD simulated background for more precise ABCD estimation of QCD
+
+            if self.showNonDataDrivenPortion:
+                for key in non_qcd_bgs:
+                    # Region A
+                    cut_sig_pass = (
+                        (self.txbbs[year][key] > txbbcut)
+                        & (self.txtts[year][key] > txttcut)
+                        & (self.massbb[year][key] > mbb1)
+                        & (self.massbb[year][key] < mbb2)
+                        & (self.ptbb[year][key] > 250)
+                        & (self.pttt[year][key] > 200)
+                    )
+                    if not self.use_bdt:
+                        cut_sig_pass &= (self.masstt[year][key] > mtt1) & (
+                            self.masstt[year][key] < mtt2
+                        )
+                    # estimate the non-qcd contribution to region A
+                    non_qcd_bg_pass_res += np.sum(
+                        self.events_dict[year][key].events["finalWeight"][cut_sig_pass]
+                    )
+                
+                    # Region B
+                    cut_bg_pass_sb = (
+                        (self.txbbs[year][key] > txbbcut)
+                        & (self.txtts[year][key] > txttcut)
+                        & (self.ptbb[year][key] > 250)
+                        & (self.pttt[year][key] > 200)
+                    )
+                    if not self.use_bdt:
+                        cut_bg_pass_sb &= (self.masstt[year][key] > mtt1) & (
+                            self.masstt[year][key] < mtt2
+                        )
+
+                    msb1 = (self.massbb[year][key] > SHAPE_VAR["range"][0]) & (
+                        self.massbb[year][key] < mbb1
+                    )
+                    msb2 = (self.massbb[year][key] > mbb2) & (
+                        self.massbb[year][key] < SHAPE_VAR["range"][1]
+                    )
+                    sum_pass_msb1 =  np.sum(
+                        self.events_dict[year][key].events["finalWeight"][cut_bg_pass_sb & msb1]
+                    )
+                    sum_pass_msb2 =  np.sum(
+                        self.events_dict[year][key].events["finalWeight"][cut_bg_pass_sb & msb2]
+                    )
+                    ## subtract non-QCD simulated background for more precise ABCD estimation of QCD
+                    qcd_pass_sb -= sum_pass_msb1
+                    qcd_pass_sb -= sum_pass_msb2
+
+                    # Region D
+                    cut_bg_fail_sb = (
+                        ((self.txbbs[year][key] < txbbcut) | (self.txtts[year][key] < txttcut))
+                        & (self.ptbb[year][key] > 250)
+                        & (self.pttt[year][key] > 200)
+                    )
+                    if not self.use_bdt:
+                        cut_bg_fail_sb &= (self.masstt[year][key] > mtt1) & (
+                            self.masstt[year][key] < mtt2
+                        )
+                    sum_fail_msb1 = np.sum(
+                        self.events_dict[year][key].events["finalWeight"][cut_bg_fail_sb & msb1]
+                    )
+                    sum_fail_msb2 = np.sum(
+                        self.events_dict[year][key].events["finalWeight"][cut_bg_fail_sb & msb2]
+                    )
+                    ## subtract non-QCD simulated background for more precise ABCD estimation of QCD
+                    qcd_fail_sb -= sum_fail_msb1
+                    qcd_fail_sb -= sum_fail_msb2
+
+                    # Region C
+                    cut_bg_fail_res = (
+                        ((self.txbbs[year][key] < txbbcut) | (self.txtts[year][key] < txttcut))
+                        & (self.massbb[year][key] > mbb1)
+                        & (self.massbb[year][key] < mbb2)
+                        & (self.ptbb[year][key] > 250)
+                        & (self.pttt[year][key] > 200)
+                    )
+                    if not self.use_bdt:
+                        cut_bg_fail_res &= (self.masstt[year][key] > mtt1) & (
+                            self.masstt[year][key] < mtt2
+                        )
+                    sum_fail_res = np.sum(
+                        self.events_dict[year][key].events["finalWeight"][cut_bg_fail_res]
+                    )
+                    ## subtract non-QCD simulated background for more precise ABCD estimation of QCD
                     qcd_fail_res -= sum_fail_res
 
         del cut_sig_pass, cut_bg_pass_sb, cut_bg_fail_sb, cut_bg_fail_res, msb1, msb2
 
-        # signal, B(data), C(...), D(...), B(data-non_qcd_sim), C(...), D(...), TF = C(...)/D(...), sim_non_QCD_bg_in_A
-        return sig_pass, bg_pass_sb, bg_fail_res, bg_fail_sb, qcd_pass_sb, qcd_fail_res, qcd_fail_sb, qcd_fail_res / qcd_fail_sb, non_qcd_bg_pass_res
+        # bg equal qcd when not considering ttbar
+        print("Am I showing the non QCD portion?", self.showNonDataDrivenPortion)
+        print(non_qcd_bg_pass_res)
+
+        # signal, B(data), C(...), D(...), TF = C(...)/D(...),
+        #   B(data-non_qcd_sim), C(...), D(...), TF = C(...)/D(...), 
+        #       sim_non_QCD_bg_in_A
+        return sig_pass, bg_pass_sb, bg_fail_res, bg_fail_sb, bg_fail_res / bg_fail_sb, \
+                qcd_pass_sb, qcd_fail_res, qcd_fail_sb, qcd_fail_res / qcd_fail_sb, \
+                    non_qcd_bg_pass_res
 
     def grid_search_opt(
         self,
@@ -541,18 +639,21 @@ class Analyser:
                 mtt2=mtt2,
             )
 
-        results = Parallel(n_jobs=2, verbose=1)(
+        results = Parallel(n_jobs=16, verbose=1)(
             delayed(sig_bg)(_b, _t) for _b, _t in zip(bbcut_flat, ttcut_flat)
         )
 
         # results is a list of (sig, bkg, tf) tuples
-        sigs, bgs_sb, bg_fails_res, bg_fails_sb, qcd_sb, qcd_fails_res, qcd_fails_sb, tfs, non_qcd_bg_pass_res = zip(*results)
+        sigs, bgs_sb, bg_fails_res, bg_fails_sb, data_tfs, qcd_sb, qcd_fails_res, qcd_fails_sb, qcd_tfs, non_qcd_bg_pass_res = zip(*results)
         sigs = np.array(sigs).reshape(BBcut.shape)
         bgs_sb = np.array(bgs_sb).reshape(BBcut.shape)
         bg_fails_res = np.array(bg_fails_res).reshape(BBcut.shape)
         bg_fails_sb = np.array(bg_fails_sb).reshape(BBcut.shape)
+        data_tfs = np.array(data_tfs).reshape(BBcut.shape)
         qcd_sb = np.array(qcd_sb).reshape(BBcut.shape)
-        tfs = np.array(tfs).reshape(BBcut.shape)
+        qcd_fails_res = np.array(qcd_fails_res).reshape(BBcut.shape)
+        qcd_fails_sb = np.array(qcd_fails_sb).reshape(BBcut.shape)
+        qcd_tfs = np.array(qcd_tfs).reshape(BBcut.shape)
         non_qcd_bg_pass_res = np.array(non_qcd_bg_pass_res).reshape(BBcut.shape)
 
         if normalize_sig:
@@ -563,8 +664,11 @@ class Analyser:
             )
             sigs = sigs / tot_sig_weight
 
-        bgs_scaled = qcd_sb * tfs + non_qcd_bg_pass_res
-
+        if self.dataMinusSimABCD:
+            bgs_scaled = qcd_sb * qcd_tfs + non_qcd_bg_pass_res
+        else:
+            bgs_scaled = bgs_sb * data_tfs
+            
         results = {}
         for fom in foms:
             results[fom.name] = {}
@@ -573,18 +677,28 @@ class Analyser:
                 results[fom.name][f"Bmin={B_min}"] = {}
 
                 sel_B_min = bgs_sb >= B_min
-                limits = fom.fom_func(qcd_sb, sigs, tfs, non_qcd_bg_in_A=non_qcd_bg_pass_res, b_data=bgs_sb)
+                if self.dataMinusSimABCD:
+                    limits = fom.fom_func(qcd_sb, sigs, qcd_tfs, non_qcd_bg_in_A=non_qcd_bg_pass_res, b_data=bgs_sb)
+                else:
+                    limits = fom.fom_func(bgs_sb, sigs, data_tfs, non_qcd_bg_in_A=0, b_data=bgs_sb)
                 if not np.any(sel_B_min):
                     print(f"Warning: No points satisfy B_min>{B_min} for FOM={fom.name}. Skipping.")
                     results[fom.name][f"Bmin={B_min}"] = Optimum(
+                        dataMinusSimABCD=np.nan,
+                        showNonDataDrivenPortion=np.nan,
                         limit=np.nan,
-                        signal_yield=np.nan,
-                        bkg_yield=np.nan,
-                        hmass_fail=np.nan,
-                        sideband_fail=np.nan,
-                        transfer_factor=np.nan,
+                        signal_data_yield=np.nan,
+                        bkg_data_yield=np.nan,
+                        hmass_data_fail=np.nan,
+                        sideband_data_fail=np.nan,
+                        data_transfer_factor=np.nan,
+                        bkg_qcd_yield=np.nan,
+                        hmass_qcd_fail=np.nan,
+                        sideband_qcd_fail=np.nan,
+                        qcd_transfer_factor=np.nan,
                         non_qcd_bg_in_A=np.nan,
                         cuts=(np.nan, np.nan),
+                        BBcut=np.nan,
                     )
                     continue
                 sel_indices = np.argwhere(sel_B_min)
@@ -599,12 +713,18 @@ class Analyser:
                 )
 
                 results[fom.name][f"Bmin={B_min}"] = Optimum(
+                    dataMinusSimABCD=self.dataMinusSimABCD,
+                    showNonDataDrivenPortion=self.showNonDataDrivenPortion,
                     limit=limit_opt,
                     signal_yield=sigs[idx_opt],
-                    bkg_yield=bgs_sb[idx_opt],
-                    hmass_fail=bg_fails_res[idx_opt],
-                    sideband_fail=bg_fails_sb[idx_opt],
-                    transfer_factor=tfs[idx_opt],
+                    bkg_data_yield=bgs_sb[idx_opt],
+                    hmass_data_fail=bg_fails_res[idx_opt],
+                    sideband_data_fail=bg_fails_sb[idx_opt],
+                    data_transfer_factor=data_tfs[idx_opt],
+                    bkg_qcd_yield=qcd_sb[idx_opt],
+                    hmass_qcd_fail=qcd_fails_res[idx_opt],
+                    sideband_qcd_fail=qcd_fails_sb[idx_opt],
+                    qcd_transfer_factor=qcd_tfs[idx_opt],
                     non_qcd_bg_in_A=non_qcd_bg_pass_res[idx_opt],
                     cuts=(bbcut_opt, ttcut_opt),
                     BBcut=BBcut,
@@ -765,7 +885,7 @@ class Analyser:
                         marker=m,
                     )
 
-            ax.set_xlabel("Xbb vs QCD cut")
+            ax.set_xlabel(f"{self.bb_disc} cut")
             ax.set_ylabel(
                 f"BDTScore{self.taukey} vs All" if self.use_bdt else f"X{self.taukey} vs QCDTop cut"
             )
@@ -1171,14 +1291,21 @@ class Analyser:
 
         limits = {}
         limits["Label"] = label
+        limits["use_dataMinusSimABCD"] = optimum.dataMinusSimABCD
+        limits["show_NonDataDrivenPortion"] = optimum.showNonDataDrivenPortion   
         limits["Cut_Xbb"] = optimum.cuts[0]
         limits["Cut_Xtt"] = optimum.cuts[1]
         limits["Sig_Yield"] = optimum.signal_yield
-        limits["Sideband Pass"] = optimum.bkg_yield
-        limits["Higgs Mass Fail"] = optimum.hmass_fail
-        limits["Sideband Fail"] = optimum.sideband_fail
-        limits["BG_Yield_scaled"] = optimum.bkg_yield * optimum.transfer_factor + optimum.non_qcd_bg_in_A
-        limits["TF"] = optimum.transfer_factor
+        limits["Sideband Data Pass"] = optimum.bkg_data_yield
+        limits["Higgs Mass Data Fail"] = optimum.hmass_data_fail
+        limits["Sideband Data Fail"] = optimum.sideband_data_fail
+        limits["Standard ABCD BG_Yield_scaled"] = optimum.bkg_data_yield * optimum.data_transfer_factor
+        limits["Data TF"] = optimum.data_transfer_factor
+        limits["Sideband QCD Pass"] = optimum.bkg_qcd_yield
+        limits["Higgs Mass QCD Fail"] = optimum.hmass_qcd_fail
+        limits["Sideband QCD Fail"] = optimum.sideband_qcd_fail
+        limits["Enhanced ABCD BG_Yield_scaled"] = optimum.bkg_qcd_yield * optimum.qcd_transfer_factor + optimum.non_qcd_bg_in_A
+        limits["QCD TF"] = optimum.qcd_transfer_factor
         limits["Non QCD bg in A"] = optimum.non_qcd_bg_in_A
         limits["FOM"] = optimum.fom.label
 
@@ -1205,11 +1332,12 @@ def analyse_channel(
     at_inference=False,
     llsl_weight=1,
     bb_disc='bbFatJetParTXbbvsQCD',
+    dataMinusSimABCD=False,
 ):
 
     print(f"Processing channel: {channel}. Test mode: {test_mode}.")
 
-    analyser = Analyser(years, channel, test_mode, use_bdt, modelname, main_plot_dir, at_inference, llsl_weight=llsl_weight)
+    analyser = Analyser(years, channel, test_mode, use_bdt, modelname, main_plot_dir, at_inference, llsl_weight=llsl_weight, bb_disc=bb_disc, dataMinusSimABCD=dataMinusSimABCD)
 
     analyser.load_data()
 
@@ -1302,6 +1430,11 @@ if __name__ == "__main__":
         choices=["bbFatJetParTXbbvsQCD", "bbFatJetParTXbbvsQCDTop", "bbFatJetPNetXbbvsQCDLegacy"],
         type=str
     )
+    parser.add_argument(
+        "--dataMinusSimABCD",
+        help="Use data minus sim ABCD method",
+        action="store_true"
+    )
 
 
     args = parser.parse_args()
@@ -1309,7 +1442,6 @@ if __name__ == "__main__":
     # check: test-mode and use-bdt are mutually exclusive
     if args.test_mode and args.use_bdt and not args.at_inference:
         raise ValueError("Test mode and use-bdt are mutually exclusive unless at-inference is True")
-
     for channel in args.channels:
         analyse_channel(
             years=args.years,
@@ -1322,4 +1454,5 @@ if __name__ == "__main__":
             at_inference=args.at_inference,
             llsl_weight=args.llsl_weight,
             bb_disc=args.bb_disc,
+            dataMinusSimABCD=args.dataMinusSimABCD,
         )
