@@ -9,6 +9,7 @@ from string import Template
 
 kubernetes_dir = Path("/home/users/lumori/bbtautau/src/bbtautau/kubernetes")
 templ_file = kubernetes_dir / "jobs" / "template.yaml"
+templ_compare_file = kubernetes_dir / "jobs" / "template_compare.yaml"
 
 
 class objectview:
@@ -38,15 +39,21 @@ def from_json(args):
 
 
 def main(args):
+
     if args.from_json != "":
         args = from_json(args)
     else:
         if args.job_name == "":
-            args.job_name = args.name
+            if args.compare_models:
+                models_key = "-".join(args.models) if args.models else "models"
+                args.job_name = "cmp_" + args.tag + "_" + models_key + "_" + args.signal_key
+            else:
+                args.job_name = "lm_" + args.tag + "_" + args.name + "_" + args.signal_key
 
     args.job_name = "_".join(args.job_name.split("-"))  # hyphens to underscores
 
-    file_name = kubernetes_dir / f"bdt_trainings/{args.job_name}.yml"
+    Path.mkdir(kubernetes_dir / f"bdt_trainings/{args.tag}", exist_ok=True)
+    file_name = kubernetes_dir / f"bdt_trainings/{args.tag}/{args.job_name}.yml"
 
     if Path.exists(file_name):
         print("Job Exists")
@@ -56,15 +63,44 @@ def main(args):
             print("Exiting")
             sys.exit()
 
-    with Path.open(templ_file) as f:
+    # Choose appropriate template based on mode
+    template_path = templ_compare_file if args.compare_models else templ_file
+
+    with Path.open(template_path) as f:
         lines = Template(f.read())
 
-    train_args = {
-        "job_name": "-".join(args.job_name.split("_")),  # change underscores to hyphens
-        "name": args.name,
-        "args": args.train_args,
-        "datapath": args.datapath,
-    }
+    # Build extra args string (shared between modes)
+    extra_args = args.train_args if args.train_args else ""
+    if getattr(args, "samples", None):
+        samples_str = " ".join(args.samples)
+        extra_args += (" " if extra_args else "") + f"--samples {samples_str}"
+    if getattr(args, "tt_preselection", False):
+        extra_args += (" " if extra_args else "") + "--tt-preselection"
+
+    if args.compare_models:
+        # Comparison mode arguments
+        years_str = " ".join(args.years)
+        models_str = " ".join(args.models)
+        save_dir = args.tag + "/compare_" + "-".join(args.models) + "_" + args.signal_key
+        train_args = {
+            "job_name": "-".join(args.job_name.split("_")),  # change underscores to hyphens
+            "signal_key": args.signal_key,
+            "save_dir": save_dir,
+            "args": extra_args,
+            "datapath": args.datapath,
+            "years": years_str,
+            "models": models_str,
+        }
+    else:
+        # Training mode arguments (backward compatible)
+        train_args = {
+            "job_name": "-".join(args.job_name.split("_")),  # change underscores to hyphens
+            "name": args.name,
+            "signal_key": args.signal_key,
+            "save_dir": args.tag + "/" + args.name + "_" + args.signal_key,
+            "args": extra_args,
+            "datapath": args.datapath,
+        }
 
     with Path.open(file_name, "w") as f:
         f.write(lines.substitute(train_args))
@@ -79,13 +115,55 @@ if __name__ == "__main__":
     parser.add_argument("--name", default="", help="", type=str)
     parser.add_argument("--job-name", default="", help="defaults to name", type=str)
     parser.add_argument(
+        "--compare-models",
+        default=False,
+        help="use comparison mode to compare multiple trained models",
+        type=bool,
+        action=BooleanOptionalAction,
+    )
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        default=None,
+        help="list of model names to compare when --compare-models is set",
+        type=str,
+    )
+    parser.add_argument(
+        "--years",
+        nargs="+",
+        default=["all"],
+        help="years to use for comparison/training",
+        type=str,
+    )
+    parser.add_argument("--tag", default="no_presel", help="tag for job / bdt", type=str)
+    parser.add_argument(
         "--datapath", default="25Sep23AddVars_v12_private_signal", help="", type=str
+    )
+    parser.add_argument(
+        "--signal-key",
+        default="ggfbbtt",
+        help="signal key",
+        type=str,
+    )
+    parser.add_argument(
+        "--samples",
+        nargs="+",
+        default=None,
+        help="samples to use in comparison/evaluation",
+        type=str,
     )
     parser.add_argument(
         "--train-args",
         default="",
         help="Arguments for training. Use = syntax for args with dashes: --train-args='--flag value'",
         type=str,
+    )
+    parser.add_argument(
+        "--tt-preselection",
+        default=False,
+        help="apply tt preselection",
+        type=bool,
+        action=BooleanOptionalAction,
     )
 
     parser.add_argument(

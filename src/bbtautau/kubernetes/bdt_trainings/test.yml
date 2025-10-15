@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: bbtautau-bdt-$job_name
+  name: bbtautau-bdt-test
   labels:
     type: bbtautau
 spec:
@@ -15,12 +15,12 @@ spec:
           - "-c"
           - >
             git clone --single-branch --recurse-submodules --branch kube https://github.com/LPC-HH/bbtautau.git /opt/repo/bbtautau &&
-            mkdir -p /bbtautauvol/bdt/$save_dir/ &&
+            mkdir -p /bbtautauvol/bdt/test/ &&
             pip install -e /opt/repo/bbtautau &&
             pip install -e /opt/repo/bbtautau/boostedhh &&
-            python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --train --model $name --signal-key $signal_key
-            --save-dir /bbtautauvol/bdt/$save_dir --data-path /bbtautauvol/$datapath/ $args
-            | tee /bbtautauvol/bdt/$save_dir/log.txt
+            python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --train --model test
+            --save-dir /bbtautauvol/bdt/test --data-path /bbtautauvol/25Sep23AddVars_v12_private_signal/ --tt-preselection --signal-key vbfbbtt
+            | tee /bbtautauvol/bdt/test/log.txt
         volumeMounts:
         - mountPath: /bbtautauvol
           name: bbtautauvol
@@ -28,11 +28,9 @@ spec:
           limits:
             memory: 32Gi
             cpu: "8"
-            nvidia.com/gpu: "1"
           requests:
             memory: 32Gi
             cpu: "6"
-            nvidia.com/gpu: "1"
       volumes:
       - name: bbtautauvol
         persistentVolumeClaim:

@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import ClassVar
 
-import matplotlib.pyplot as plt
+import matplotlib as mpl
 import numpy as np
 import pandas as pd
 import xgboost as xgb
@@ -32,6 +32,10 @@ from bbtautau.postprocessing.postprocessing import (
 from bbtautau.postprocessing.rocUtils import ROCAnalyzer, multiclass_confusion_matrix
 from bbtautau.postprocessing.utils import LoadedSample, label_transform
 from bbtautau.userConfig import CLASSIFIER_DIR, DATA_PATHS, MODEL_DIR, path_dict
+
+# Use non-interactive backend for containerized/CLI environments
+mpl.use("Agg")
+plt = mpl.pyplot
 
 # TODO
 # - k-fold cross validation
@@ -126,6 +130,7 @@ class Trainer:
                     restrict_data_to_channel=False,
                     load_bgs=True,
                     loaded_samples=True,
+                    multithread=True,
                 )
                 self.events_dict[year] = delete_columns(
                     self.events_dict[year], year, channels=list(CHANNELS.values())
@@ -142,27 +147,6 @@ class Trainer:
 
         # define sample list as signals + bkg samples
         self.sample_names = [f"{self.signal_key}{ch}" for ch in CHANNELS] + self.bkg_sample_names
-
-    @staticmethod
-    def shorten_df(df, N, seed=42):
-        if len(df) < N:
-            return df
-        return df.sample(n=N, random_state=seed)
-
-    @staticmethod
-    def record_stats(stats, stage, year, sample_name, weights):
-        stats.append(
-            {
-                "year": year,
-                "sample": sample_name,
-                "stage": stage,
-                "n_events": len(weights),
-                "total_weight": np.sum(weights),
-                "average_weight": np.mean(weights),
-                "std_weight": np.std(weights),
-            }
-        )
-        return stats
 
     @staticmethod
     def save_stats(stats, filename):
@@ -478,7 +462,7 @@ class Trainer:
             self.dval_rescaled.save_binary(self.model_dir / "dval_rescaled.buffer")
 
     def train_model(self, save=True, early_stopping_rounds=5):
-        """Trains BDT. ``classifier_params`` are hyperparameters for the classifier"""
+        """Train model using configured hyperparameters and evaluation sets."""
 
         evals_result = {}
 
@@ -511,6 +495,7 @@ class Trainer:
         return self.bst
 
     def evaluate_training(self, savedir=None):
+        """Plot training curves and feature importances from saved eval results."""
         # Load evaluation results from JSON
         with (self.model_dir / "evals_result.json").open("r") as f:
             evals_result = json.load(f)
@@ -555,13 +540,7 @@ class Trainer:
             print(f"Error plotting feature importance: {e}")
 
     def complete_train(self, training_info=True, force_reload=False, **kwargs):
-        """Train a multiclass BDT model.
-
-        Args:
-            year (str): Year of data to use
-            modelname (str): Name of the model configuration to use
-            save_dir (str, optional): Directory to save the model and plots. If None, uses default location.
-        """
+        """End-to-end training workflow including ROCs and optional plots."""
 
         # out-of-the-box for training
         self.load_data(force_reload=force_reload, **kwargs)
@@ -572,12 +551,14 @@ class Trainer:
         self.compute_rocs()
 
     def complete_load(self, force_reload=False, **kwargs):
+        """Load data, build evaluation sets, load model, and compute ROCs."""
         self.load_data(force_reload=force_reload, **kwargs)
         self.prepare_training_set(**kwargs)
         self.load_model(**kwargs)
         self.compute_rocs()
 
     def compute_rocs(self, discs=None, savedir=None):
+        """Compute and plot ROCs and summary metrics for the validation set."""
 
         time_start = time.time()
 
@@ -1011,7 +992,14 @@ def _create_cross_channel_comparison(results, scale_rules, balance_rules, model_
 
 
 def eval_bdt_preds(
-    years: list[str], eval_samples: list[str], model: str, save: bool = True, save_dir: str = None
+    years: list[str],
+    samples: list[str],
+    model: str,
+    signal_key: str,
+    save: bool = True,
+    save_dir: str | None = None,
+    data_path: str | None = None,
+    tt_preselection: bool = False,
 ):
     """Evaluate BDT predictions on data.
 
@@ -1024,8 +1012,8 @@ def eval_bdt_preds(
 
     years = hh_vars.years if years[0] == "all" else list(years)
 
-    if eval_samples[0] == "all":
-        eval_samples = list(SAMPLES.keys())
+    if samples[0] == "all":
+        samples = list(SAMPLES.keys())
 
     if save:
         if save_dir is None:
@@ -1036,14 +1024,28 @@ def eval_bdt_preds(
             raise PermissionError(f"Directory {save_dir} is not writable")
 
     # Load model globally for all years, evaluate by year to reduce memory usage
-    bst = Trainer(years=years, sample_names=eval_samples, modelname=model).load_model()
+    bst = Trainer(
+        years=years,
+        signal_key=signal_key,
+        bkg_sample_names=samples,
+        modelname=model,
+        data_path=data_path,
+        tt_preselection=tt_preselection,
+    ).load_model()
 
-    evals = {year: {sample_name: {} for sample_name in eval_samples} for year in years}
+    evals = {year: {sample_name: {} for sample_name in samples} for year in years}
 
     for year in years:
 
         # To reduce memory usage, load data once for each year
-        trainer = Trainer(years=[year], sample_names=eval_samples, modelname=model)
+        trainer = Trainer(
+            years=[year],
+            signal_key=signal_key,
+            bkg_sample_names=samples,
+            modelname=model,
+            data_path=data_path,
+            tt_preselection=tt_preselection,
+        )
         trainer.load_data(force_reload=True)
 
         feats = [feat for cat in trainer.train_vars for feat in trainer.train_vars[cat]]
@@ -1132,6 +1134,18 @@ if __name__ == "__main__":
         help="Evaluate BDT predictions on data if specified",
     )
     parser.add_argument(
+        "--compare-models",
+        action="store_true",
+        default=False,
+        help="Compare multiple trained models with ROC overlays and CSV metrics",
+    )
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        default=None,
+        help="List of model names to compare when --compare-models is set",
+    )
+    parser.add_argument(
         "--samples", nargs="+", default=None, help="Samples to evaluate BDT predictions on"
     )
     parser.add_argument(
@@ -1159,10 +1173,30 @@ if __name__ == "__main__":
             print(args.model)
             eval_bdt_preds(
                 years=args.years,
-                eval_samples=args.samples,
+                samples=args.samples,
                 model=args.model,
+                signal_key=args.signal_key,
                 save_dir=args.save_dir,
+                data_path=args.data_path,
+                tt_preselection=args.tt_preselection,
             )
+        exit()
+
+    if args.compare_models:
+        if not args.models or len(args.models) < 2:
+            parser.error("--compare-models requires at least two --models")
+        # Lazy import to avoid circular import issues
+        from bbtautau.postprocessing import bdt_utils as _bdt_utils
+
+        _bdt_utils.compare_models(
+            models=args.models,
+            years=args.years,
+            signal_key=args.signal_key,
+            samples=args.samples,
+            data_path=args.data_path,
+            tt_preselection=args.tt_preselection,
+            output_dir=args.save_dir,
+        )
         exit()
 
     trainer = Trainer(

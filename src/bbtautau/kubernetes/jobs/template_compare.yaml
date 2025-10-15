@@ -18,8 +18,12 @@ spec:
             mkdir -p /bbtautauvol/bdt/$save_dir/ &&
             pip install -e /opt/repo/bbtautau &&
             pip install -e /opt/repo/bbtautau/boostedhh &&
-            python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --train --model $name --signal-key $signal_key
-            --save-dir /bbtautauvol/bdt/$save_dir --data-path /bbtautauvol/$datapath/ $args
+            python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --compare-models \
+            --models $models \
+            --years $years \
+            --signal-key $signal_key \
+            --save-dir /bbtautauvol/bdt/$save_dir \
+            --data-path /bbtautauvol/$datapath/ $args \
             | tee /bbtautauvol/bdt/$save_dir/log.txt
         volumeMounts:
         - mountPath: /bbtautauvol
@@ -28,11 +32,9 @@ spec:
           limits:
             memory: 32Gi
             cpu: "8"
-            nvidia.com/gpu: "1"
           requests:
             memory: 32Gi
             cpu: "6"
-            nvidia.com/gpu: "1"
       volumes:
       - name: bbtautauvol
         persistentVolumeClaim:
