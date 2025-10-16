@@ -50,7 +50,7 @@ def main(args):
             else:
                 args.job_name = "lm_" + args.tag + "_" + args.name + "_" + args.signal_key
 
-    args.job_name = "_".join(args.job_name.split("-"))  # hyphens to underscores
+    args.job_name = "_".join(args.job_name.split("-")).lower()  # hyphens to underscores, lowercase
 
     Path.mkdir(kubernetes_dir / f"bdt_trainings/{args.tag}", exist_ok=True)
     file_name = kubernetes_dir / f"bdt_trainings/{args.tag}/{args.job_name}.yml"

@@ -13,7 +13,6 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from boostedhh import hh_vars, plotting
-from Samples import CHANNELS, SAMPLES
 from sklearn.model_selection import train_test_split
 from tabulate import tabulate
 
@@ -30,6 +29,7 @@ from bbtautau.postprocessing.postprocessing import (
     tt_filters,
 )
 from bbtautau.postprocessing.rocUtils import ROCAnalyzer, multiclass_confusion_matrix
+from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES
 from bbtautau.postprocessing.utils import LoadedSample, label_transform
 from bbtautau.userConfig import CLASSIFIER_DIR, DATA_PATHS, MODEL_DIR, path_dict
 
@@ -60,7 +60,7 @@ class Trainer:
         bkg_sample_names: list[str] = None,
         modelname: str = None,
         data_path: str = None,
-        output_dir: str = None,
+        save_dir: str = None,
         tt_preselection: bool = False,
     ) -> None:
         if years[0] == "all":
@@ -89,8 +89,8 @@ class Trainer:
 
         self.events_dict = {year: {} for year in self.years}
 
-        if output_dir is not None:
-            self.model_dir = CLASSIFIER_DIR / output_dir
+        if save_dir is not None:
+            self.model_dir = CLASSIFIER_DIR / save_dir
         else:
             self.model_dir = MODEL_DIR / self.modelname
         self.model_dir.mkdir(parents=True, exist_ok=True)
@@ -786,18 +786,18 @@ class Trainer:
         print("=" * 80)
 
 
-def study_rescaling(output_dir: str = "rescaling_study", importance_only=False) -> dict:
+def study_rescaling(save_dir: str = "rescaling_study", importance_only=False) -> dict:
     """Study the impact of different rescaling rules on BDT performance.
     For now give little flexibility, but is not meant to be customized too much.
 
     Args:
-        output_dir: Directory to save study results
+        save_dir: Directory to save study results
 
     Returns:
         Dictionary containing study results for each rescaling rule
     """
     # Create output directory
-    trainer = Trainer(years=["2022"], modelname="29July25_loweta_lowreg", output_dir=output_dir)
+    trainer = Trainer(years=["2022"], modelname="29July25_loweta_lowreg", save_dir=save_dir)
 
     print(f"importance_only: {importance_only}")
     if not importance_only:
@@ -1146,6 +1146,12 @@ if __name__ == "__main__":
         help="List of model names to compare when --compare-models is set",
     )
     parser.add_argument(
+        "--save-dirs",
+        nargs="+",
+        default=None,
+        help="List of save directories to compare when --compare-models is set",
+    )
+    parser.add_argument(
         "--samples", nargs="+", default=None, help="Samples to evaluate BDT predictions on"
     )
     parser.add_argument(
@@ -1183,19 +1189,20 @@ if __name__ == "__main__":
         exit()
 
     if args.compare_models:
-        if not args.models or len(args.models) < 2:
+        if not args.models or len(args.models) < 2 or len(args.models) != len(args.save_dirs):
             parser.error("--compare-models requires at least two --models")
         # Lazy import to avoid circular import issues
         from bbtautau.postprocessing import bdt_utils as _bdt_utils
 
         _bdt_utils.compare_models(
             models=args.models,
+            save_dirs=args.save_dirs,
             years=args.years,
             signal_key=args.signal_key,
             samples=args.samples,
             data_path=args.data_path,
             tt_preselection=args.tt_preselection,
-            output_dir=args.save_dir,
+            save_dir=args.save_dir,
         )
         exit()
 
@@ -1203,7 +1210,7 @@ if __name__ == "__main__":
         years=args.years,
         bkg_sample_names=args.samples,
         modelname=args.model,
-        output_dir=args.save_dir,
+        save_dir=args.save_dir,
         data_path=args.data_path,
         tt_preselection=args.tt_preselection,
         signal_key=args.signal_key,

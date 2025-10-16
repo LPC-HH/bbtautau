@@ -23,12 +23,13 @@ def _ensure_dir(path: Path) -> Path:
 
 def compare_models(
     models: list[str],
+    save_dirs: list[str],
     years: list[str],
     signal_key: str,
     samples: list[str] | None = None,
     data_path: str | None = None,
     tt_preselection: bool = False,
-    output_dir: str | None = None,
+    save_dir: str | None = None,
 ) -> dict[str, dict[str, float]]:
     """Load multiple trained models, evaluate, and produce comparison outputs.
 
@@ -42,7 +43,7 @@ def compare_models(
         samples = ["dyjets", "qcd", "ttbarhad", "ttbarll", "ttbarsl"]
 
     # Use a top-level comparison directory
-    base_out = Path(output_dir) if output_dir is not None else Path("comparison")
+    base_out = Path(save_dir) if save_dir is not None else Path("comparison")
     _ensure_dir(base_out)
 
     # Build a base trainer for data and validation split
@@ -51,7 +52,7 @@ def compare_models(
         signal_key=signal_key,
         bkg_sample_names=list(samples),
         modelname=models[0],
-        output_dir=None,
+        save_dir=save_dirs[0],
         data_path=data_path,
         tt_preselection=tt_preselection,
     )
@@ -60,13 +61,13 @@ def compare_models(
 
     # Load boosters for all models
     boosters: dict[str, object] = {}
-    for model in models:
+    for model, save_dir in zip(models, save_dirs):
         tr = Trainer(
             years=list(years),
             signal_key=signal_key,
             bkg_sample_names=list(samples),
             modelname=model,
-            output_dir=None,
+            save_dir=save_dir,
             data_path=data_path,
             tt_preselection=tt_preselection,
         )
