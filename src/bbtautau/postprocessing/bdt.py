@@ -60,7 +60,7 @@ class Trainer:
         bkg_sample_names: list[str] = None,
         modelname: str = None,
         data_path: str = None,
-        save_dir: str = None,
+        model_dir: str = None,
         tt_preselection: bool = False,
     ) -> None:
         if years[0] == "all":
@@ -89,8 +89,8 @@ class Trainer:
 
         self.events_dict = {year: {} for year in self.years}
 
-        if save_dir is not None:
-            self.model_dir = CLASSIFIER_DIR / save_dir
+        if model_dir is not None:
+            self.model_dir = CLASSIFIER_DIR / model_dir
         else:
             self.model_dir = MODEL_DIR / self.modelname
         self.model_dir.mkdir(parents=True, exist_ok=True)
@@ -786,18 +786,18 @@ class Trainer:
         print("=" * 80)
 
 
-def study_rescaling(save_dir: str = "rescaling_study", importance_only=False) -> dict:
+def study_rescaling(model_dir: str = "rescaling_study", importance_only=False) -> dict:
     """Study the impact of different rescaling rules on BDT performance.
     For now give little flexibility, but is not meant to be customized too much.
 
     Args:
-        save_dir: Directory to save study results
+        model_dir: Directory to save study results
 
     Returns:
         Dictionary containing study results for each rescaling rule
     """
     # Create output directory
-    trainer = Trainer(years=["2022"], modelname="29July25_loweta_lowreg", save_dir=save_dir)
+    trainer = Trainer(years=["2022"], modelname="29July25_loweta_lowreg", model_dir=model_dir)
 
     print(f"importance_only: {importance_only}")
     if not importance_only:
@@ -997,7 +997,7 @@ def eval_bdt_preds(
     model: str,
     signal_key: str,
     save: bool = True,
-    save_dir: str | None = None,
+    model_dir: str | None = None,
     data_path: str | None = None,
     tt_preselection: bool = False,
 ):
@@ -1016,12 +1016,12 @@ def eval_bdt_preds(
         samples = list(SAMPLES.keys())
 
     if save:
-        if save_dir is None:
-            save_dir = DATA_DIR
+        if model_dir is None:
+            model_dir = DATA_DIR
 
-        # check if save_dir is writable
-        if not os.access(save_dir, os.W_OK):
-            raise PermissionError(f"Directory {save_dir} is not writable")
+        # check if model_dir is writable
+        if not os.access(model_dir, os.W_OK):
+            raise PermissionError(f"Directory {model_dir} is not writable")
 
     # Load model globally for all years, evaluate by year to reduce memory usage
     bst = Trainer(
@@ -1063,7 +1063,7 @@ def eval_bdt_preds(
             y_pred = bst.predict(dsample)
             evals[year][sample_name] = y_pred
             if save:
-                pred_dir = Path(save_dir) / "BDT_predictions" / year / sample_name
+                pred_dir = Path(model_dir) / "BDT_predictions" / year / sample_name
                 pred_dir.mkdir(parents=True, exist_ok=True)
                 np.save(pred_dir / f"{model}_preds.npy", y_pred)
                 with Path.open(pred_dir / f"{model}_preds_shape.txt", "w") as f:
@@ -1182,7 +1182,7 @@ if __name__ == "__main__":
                 samples=args.samples,
                 model=args.model,
                 signal_key=args.signal_key,
-                save_dir=args.save_dir,
+                model_dir=args.model_dir,
                 data_path=args.data_path,
                 tt_preselection=args.tt_preselection,
             )
@@ -1202,7 +1202,7 @@ if __name__ == "__main__":
             samples=args.samples,
             data_path=args.data_path,
             tt_preselection=args.tt_preselection,
-            save_dir=args.save_dir,
+            output_dir=args.output_dir,
         )
         exit()
 
@@ -1210,7 +1210,7 @@ if __name__ == "__main__":
         years=args.years,
         bkg_sample_names=args.samples,
         modelname=args.model,
-        save_dir=args.save_dir,
+        model_dir=args.model_dir,
         data_path=args.data_path,
         tt_preselection=args.tt_preselection,
         signal_key=args.signal_key,
