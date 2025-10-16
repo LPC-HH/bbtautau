@@ -10,10 +10,13 @@ spec:
     image: gitlab-registry.nrp-nautilus.io/zichunhao/parcel:latest
     command: ["/bin/bash", "-c", "sleep infinity"]
     resources:
+      limits:
+        memory: 1Gi
+        cpu: "100m"
+        ephemeral-storage: 512Gi
       requests:
         memory: 1Gi
         cpu: "100m"
-      #  nvidia.com/gpu: "1"
         ephemeral-storage: 512Gi
     volumeMounts:
     - mountPath: /bbtautauvol

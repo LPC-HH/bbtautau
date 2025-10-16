@@ -1146,10 +1146,10 @@ if __name__ == "__main__":
         help="List of model names to compare when --compare-models is set",
     )
     parser.add_argument(
-        "--save-dirs",
+        "--model-dirs",
         nargs="+",
         default=None,
-        help="List of save directories to compare when --compare-models is set",
+        help="List of model directories to compare when --compare-models is set",
     )
     parser.add_argument(
         "--samples", nargs="+", default=None, help="Samples to evaluate BDT predictions on"
@@ -1189,14 +1189,14 @@ if __name__ == "__main__":
         exit()
 
     if args.compare_models:
-        if not args.models or len(args.models) < 2 or len(args.models) != len(args.save_dirs):
+        if not args.models or len(args.models) < 2 or len(args.models) != len(args.model_dirs):
             parser.error("--compare-models requires at least two --models")
         # Lazy import to avoid circular import issues
         from bbtautau.postprocessing import bdt_utils as _bdt_utils
 
         _bdt_utils.compare_models(
             models=args.models,
-            save_dirs=args.save_dirs,
+            model_dirs=args.model_dirs,
             years=args.years,
             signal_key=args.signal_key,
             samples=args.samples,

@@ -277,13 +277,14 @@ Use `src/bbtautau/kubernetes/jobs/make_from_template.py` to generate Kubernetes 
 Key flags:
 - `--compare-models`: switch to comparison mode (uses `template_compare.yaml`)
 - `--models`: list of model names to compare (required with `--compare-models`)
+- `--model-dirs`: list of per-model output directories mounted under the PVC (e.g. `/bbtautauvol/bdt/<dir>`), same order as `--models`
 - `--years`: years to use for training/comparison (space-separated)
 - `--signal-key`: signal key (e.g. `ggfbbtt`)
 - `--samples`: background sample names to include (space-separated)
-- `--datapath`: data key/path (passed through the template; matches your environment)
+- `--datapath`: data subdirectory on the PVC (joined to `/bbtautauvol`)
 - `--train-args`: extra CLI args forwarded to `bdt.py` (quote this string)
 - `--tt-preselection`: append flag into `train-args`
-- `--job-name`: override auto-generated name
+- `--job-name`: override auto-generated name (auto-generated names are lowercased)
 - `--tag`: folder under `kubernetes/bdt_trainings/` for output YAMLs
 - `--overwrite`: allow overwriting an existing YAML
 - `--submit`: immediately `kubectl create -f <yaml>` in namespace `cms-ml`
@@ -300,30 +301,28 @@ python src/bbtautau/kubernetes/jobs/make_from_template.py \
   --train-args "--years 2022 2023 --model 29July25_loweta_lowreg" \
   --submit
 ```
-This writes `kubernetes/bdt_trainings/no_presel/lm_no_presel_29July25_loweta_lowreg_ggfbbtt.yml` (unless `--job-name` is provided) and submits it.
+This writes `kubernetes/bdt_trainings/no_presel/lm_no_presel_29july25_loweta_lowreg_ggfbbtt.yml` (unless `--job-name` is provided) and submits it. Logs and artifacts are stored under `/bbtautauvol/bdt/<save_dir>`.
 
 Comparison mode example:
 ```bash
-python src/bbtautau/kubernetes/jobs/make_from_template.py \
+python make_from_template.py \
   --compare-models \
-  --models 28May25_baseline 29July25_loweta_lowreg \
-  --years 2022 \
+  --models 20aug25_loweta_lowreg 29july25-loweta-lowreg \
+  --model-dirs 20aug25_loweta_lowreg_ggfbbtt 29july25-loweta-lowreg_ggfbbtt \
   --signal-key ggfbbtt \
-  --samples dyjets qcd ttbarhad ttbarll ttbarsl \
-  --datapath 25Sep23AddVars_v12_private_signal \
-  --train-args "--data-path /some/path" \
+  --job-name lm_cmp_ggf_july_aug_nopresel
   --submit
 ```
 The script auto-generates `job_name` when not provided:
-- Training: `lm_<tag>_<name>_<signal_key>`
-- Comparison: `cmp_<tag>_<model1>-<model2>-..._<signal_key>`
+- Training: `lm_<tag>_<name>_<signal_key>` (lowercased, hyphens -> underscores for the YAML filename)
+- Comparison: `cmp_<tag>_<model1>-<model2>-..._<signal_key>` (lowercased)
 Hyphens are normalized to underscores in file names; for Kubernetes object names they are converted back to hyphens.
 
 You can also place all arguments in a JSON file and run:
 ```bash
 python src/bbtautau/kubernetes/jobs/make_from_template.py --from-json my_job.json --submit
 ```
-Where `my_job.json` can contain fields like `compare-models`, `models`, `years`, `tag`, `signal_key`, `samples`, `datapath`, `train_args`, etc.
+Where `my_job.json` can contain fields like `compare-models`, `models`, `model-dirs`, `years`, `tag`, `signal_key`, `samples`, `datapath`, `train_args`, etc.
 
 
 ### Templates

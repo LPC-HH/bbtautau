@@ -22,9 +22,9 @@ spec:
             --models $models \
             --years $years \
             --signal-key $signal_key \
-            --save-dir /bbtautauvol/bdt/$save_dir \
-            --data-path /bbtautauvol/$datapath/ $args \
-            | tee /bbtautauvol/bdt/$save_dir/log.txt
+            --model-dirs $model_dirs \
+            --data-path $datapath/ $args \
+            | tee $save_dir/log.txt
         volumeMounts:
         - mountPath: /bbtautauvol
           name: bbtautauvol

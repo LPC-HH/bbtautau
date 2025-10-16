@@ -11,6 +11,9 @@ kubernetes_dir = Path("/home/users/lumori/bbtautau/src/bbtautau/kubernetes")
 templ_file = kubernetes_dir / "jobs" / "template.yaml"
 templ_compare_file = kubernetes_dir / "jobs" / "template_compare.yaml"
 
+PVC = Path("/bbtautauvol")
+BDT_DIR = PVC / "bdt"
+
 
 class objectview:
     """converts a dict into an object"""
@@ -56,12 +59,19 @@ def main(args):
     file_name = kubernetes_dir / f"bdt_trainings/{args.tag}/{args.job_name}.yml"
 
     if Path.exists(file_name):
-        print("Job Exists")
+        print(f"Job exists: {file_name}")
         if args.overwrite:
             print("Overwriting")
         else:
-            print("Exiting")
-            sys.exit()
+            try:
+                resp = input(f"{file_name} exists. Overwrite? [y/N]: ").strip().lower()
+            except EOFError:
+                resp = ""
+            if resp in ("y", "yes"):
+                print("Overwriting")
+            else:
+                print("Exiting")
+                sys.exit()
 
     # Choose appropriate template based on mode
     template_path = templ_compare_file if args.compare_models else templ_file
@@ -81,29 +91,33 @@ def main(args):
         # Comparison mode arguments
         years_str = " ".join(args.years)
         models_str = " ".join(args.models)
-        save_dir = args.tag + "/compare_" + "-".join(args.models) + "_" + args.signal_key
-        train_args = {
+        model_dirs = " ".join([str(BDT_DIR / model_dir) for model_dir in args.model_dirs])
+        save_dir = (
+            str(BDT_DIR / args.tag / "compare_") + "-".join(args.models) + "_" + args.signal_key
+        )
+        args_dict = {
             "job_name": "-".join(args.job_name.split("_")),  # change underscores to hyphens
             "signal_key": args.signal_key,
             "save_dir": save_dir,
             "args": extra_args,
-            "datapath": args.datapath,
+            "datapath": PVC / args.datapath,
             "years": years_str,
             "models": models_str,
+            "model_dirs": model_dirs,
         }
     else:
         # Training mode arguments (backward compatible)
-        train_args = {
+        args_dict = {
             "job_name": "-".join(args.job_name.split("_")),  # change underscores to hyphens
             "name": args.name,
             "signal_key": args.signal_key,
-            "save_dir": args.tag + "/" + args.name + "_" + args.signal_key,
+            "save_dir": str(BDT_DIR / args.tag / args.name + "_" + args.signal_key),
             "args": extra_args,
-            "datapath": args.datapath,
+            "datapath": PVC / args.datapath,
         }
 
     with Path.open(file_name, "w") as f:
-        f.write(lines.substitute(train_args))
+        f.write(lines.substitute(args_dict))
 
     if args.submit:
         os.system(f"kubectl create -f {file_name} -n cms-ml")
@@ -126,6 +140,13 @@ if __name__ == "__main__":
         nargs="+",
         default=None,
         help="list of model names to compare when --compare-models is set",
+        type=str,
+    )
+    parser.add_argument(
+        "--model-dirs",
+        nargs="+",
+        default=None,
+        help="list of model directories to compare when --compare-models is set",
         type=str,
     )
     parser.add_argument(
