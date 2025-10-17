@@ -88,19 +88,29 @@ def main(args):
         extra_args += (" " if extra_args else "") + "--tt-preselection"
 
     if args.compare_models:
+        # Validation for comparison mode
+        if not args.models or not args.model_dirs:
+            raise ValueError(
+                "--compare-models requires both --models and --model-dirs to be specified"
+            )
+        if len(args.models) != len(args.model_dirs):
+            raise ValueError("--models and --model-dirs must have the same number of arguments")
+        if len(args.models) < 2:
+            raise ValueError("--compare-models requires at least two models to compare")
+
         # Comparison mode arguments
         years_str = " ".join(args.years)
         models_str = " ".join(args.models)
         model_dirs = " ".join([str(BDT_DIR / model_dir) for model_dir in args.model_dirs])
-        save_dir = (
+        output_dir = (
             str(BDT_DIR / args.tag / "compare_") + "-".join(args.models) + "_" + args.signal_key
         )
         args_dict = {
             "job_name": "-".join(args.job_name.split("_")),  # change underscores to hyphens
             "signal_key": args.signal_key,
-            "save_dir": save_dir,
+            "output_dir": output_dir,
             "args": extra_args,
-            "datapath": PVC / args.datapath,
+            "datapath": str(PVC / args.datapath),
             "years": years_str,
             "models": models_str,
             "model_dirs": model_dirs,
@@ -111,9 +121,9 @@ def main(args):
             "job_name": "-".join(args.job_name.split("_")),  # change underscores to hyphens
             "name": args.name,
             "signal_key": args.signal_key,
-            "save_dir": str(BDT_DIR / args.tag / args.name + "_" + args.signal_key),
+            "output_dir": str(BDT_DIR / args.tag / args.name + "_" + args.signal_key),
             "args": extra_args,
-            "datapath": PVC / args.datapath,
+            "datapath": str(PVC / args.datapath),
         }
 
     with Path.open(file_name, "w") as f:

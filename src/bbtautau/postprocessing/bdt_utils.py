@@ -45,7 +45,7 @@ def compare_models(
     base_out = Path(output_dir) if output_dir is not None else Path("comparison")
     _ensure_dir(base_out)
 
-    # Build a base trainer for data and validation split
+    # Build a base trainer for data loading and getting sample information
     base_trainer = Trainer(
         years=list(years),
         signal_key=signal_key,
@@ -55,11 +55,11 @@ def compare_models(
         data_path=data_path,
         tt_preselection=tt_preselection,
     )
-    base_trainer.load_data(force_reload=False)
-    base_trainer.prepare_training_set(save_buffer=False)
+    # Load data only once
+    base_trainer.load_data(force_reload=True)
 
-    # Load boosters for all models
-    boosters: dict[str, object] = {}
+    # Load boosters and prepare training sets for all models
+    trainers: dict[str, Trainer] = {}
     for model, model_dir in zip(models, model_dirs):
         tr = Trainer(
             years=list(years),
@@ -70,7 +70,14 @@ def compare_models(
             data_path=data_path,
             tt_preselection=tt_preselection,
         )
-        boosters[model] = tr.load_model()
+        # Share the loaded raw events data from base_trainer instead of reloading
+        tr.events_dict = base_trainer.events_dict
+        tr.samples = base_trainer.samples
+        tr.sample_names = base_trainer.sample_names
+        # Prepare training set for this specific model (will use its own feature set)
+        tr.prepare_training_set(save_buffer=False)
+        tr.load_model()
+        trainers[model] = tr
 
     # Construct combined preds_dict holding per-class events with per-model scores
     event_filters = {
@@ -87,8 +94,9 @@ def compare_models(
         )
 
     # Fill events DataFrames incrementally with model-specific columns
-    for model, booster in boosters.items():
-        y_pred = booster.predict(base_trainer.dval)
+    for model, tr in trainers.items():
+        # Use the model-specific prepared dval for predictions
+        y_pred = tr.bst.predict(tr.dval)
         # Sanity check: classifier outputs must match the class set used by base_trainer
         if y_pred.ndim != 2 or y_pred.shape[1] != len(base_trainer.sample_names):
             raise ValueError(
@@ -104,7 +112,8 @@ def compare_models(
                     "finalWeight": base_trainer.dval.get_weight()[mask],
                 }
             # Add per-model per-class score column
-            preds_dict[class_name].events[f"{model}::{class_name}"] = y_pred[mask, class_index]
+            y_pred_class = y_pred[mask, class_index]
+            preds_dict[class_name].events[f"{model}::{class_name}"] = y_pred_class
 
     # Convert dicts to DataFrames
     for class_name in preds_dict:

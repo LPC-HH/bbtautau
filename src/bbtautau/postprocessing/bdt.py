@@ -90,7 +90,11 @@ class Trainer:
         self.events_dict = {year: {} for year in self.years}
 
         if model_dir is not None:
-            self.model_dir = CLASSIFIER_DIR / model_dir
+            model_dir_path = Path(model_dir)
+            # If absolute, use as-is; otherwise resolve under CLASSIFIER_DIR
+            self.model_dir = (
+                model_dir_path if model_dir_path.is_absolute() else CLASSIFIER_DIR / model_dir
+            )
         else:
             self.model_dir = MODEL_DIR / self.modelname
         self.model_dir.mkdir(parents=True, exist_ok=True)
