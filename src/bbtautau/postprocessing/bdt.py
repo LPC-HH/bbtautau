@@ -1195,12 +1195,27 @@ if __name__ == "__main__":
     if args.compare_models:
         if not args.models or len(args.models) < 2 or len(args.models) != len(args.model_dirs):
             parser.error("--compare-models requires at least two --models")
+        # Validate that provided model directories and model files exist
+        resolved_model_dirs = []
+        for model, model_dir_str in zip(args.models, args.model_dirs):
+            model_dir_path = Path(model_dir_str)
+            resolved_dir = (
+                model_dir_path if model_dir_path.is_absolute() else CLASSIFIER_DIR / model_dir_str
+            )
+            if not resolved_dir.exists():
+                parser.error(f"Model directory does not exist: {resolved_dir}")
+            if not resolved_dir.is_dir():
+                parser.error(f"Model directory is not a directory: {resolved_dir}")
+            model_file = resolved_dir / f"{model}.json"
+            if not model_file.is_file():
+                parser.error(f"Model file not found for '{model}': {model_file}")
+            resolved_model_dirs.append(str(resolved_dir))
         # Lazy import to avoid circular import issues
         from bbtautau.postprocessing import bdt_utils as _bdt_utils
 
         _bdt_utils.compare_models(
             models=args.models,
-            model_dirs=args.model_dirs,
+            model_dirs=resolved_model_dirs,
             years=args.years,
             signal_key=args.signal_key,
             samples=args.samples,

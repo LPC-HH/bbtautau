@@ -29,6 +29,7 @@ from bbtautau.postprocessing.postprocessing import (
     check_bdt_prediction_shapes,
     compute_bdt_preds,
     delete_columns,
+    derive_lepton_variables,
     derive_variables,
     get_columns,
     leptons_assignment,
@@ -182,9 +183,9 @@ class Analyser:
             delete_columns(self.events_dict[year], year, channels=[self.channel])
 
             derive_variables(self.events_dict[year], self.channel)
-
             bbtautau_assignment(self.events_dict[year], agnostic=True)
             leptons_assignment(self.events_dict[year], dR_cut=1.5)
+            derive_lepton_variables(self.events_dict[year])
 
             if self.use_bdt:
                 if self.at_inference:
