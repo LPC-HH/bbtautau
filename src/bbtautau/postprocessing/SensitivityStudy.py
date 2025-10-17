@@ -156,6 +156,8 @@ class Analyser:
         for year in self.years:
 
             filters_dict = base_filter(self.test_mode)
+
+            # Prefilters already applied in skimmer
             # filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3)
 
             if tt_pres:
@@ -178,9 +180,11 @@ class Analyser:
             apply_triggers(self.events_dict[year], year, self.channel)
             delete_columns(self.events_dict[year], year, channels=[self.channel])
 
-            derive_variables(
-                self.events_dict[year], CHANNELS["hm"]
-            )  # legacy issue, muon branches are misnamed
+            # Keep this for legacy issue, with old ntuples some branches are misnamed
+            # derive_variables(self.events_dict[year], CHANNELS["hm"])
+
+            derive_variables(self.events_dict[year], self.channel)
+
             bbtautau_assignment(self.events_dict[year], agnostic=True)
             leptons_assignment(self.events_dict[year], dR_cut=1.5)
 

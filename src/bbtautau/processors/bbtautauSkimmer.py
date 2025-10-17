@@ -160,6 +160,7 @@ class bbtautauSkimmer(SkimmerABC):
         nano_version: str = "v12_private",
         fatjet_pt_cut: float = None,
         fatjet_bb_preselection: bool = False,
+        prescale_factor: int = None,
     ):
         super().__init__()
 
@@ -173,6 +174,7 @@ class bbtautauSkimmer(SkimmerABC):
         self._region = region
         self._accumulator = processor.dict_accumulator({})
         self._fatjet_bb_preselection = fatjet_bb_preselection
+        self._prescale_factor = prescale_factor
 
         # JMSR
         self.jmsr_vars = ["msoftdrop", "particleNet_mass_legacy", "ParTmassVis", "ParTmassRes"]
@@ -236,7 +238,7 @@ class bbtautauSkimmer(SkimmerABC):
             **{f"globalParT_{var}": f"ParT{var}" for var in glopart_vars},
         }
 
-        #CA variables
+        # CA variables
         ca_vars = [
             "mass",
             "msoftdrop",
@@ -452,7 +454,7 @@ class bbtautauSkimmer(SkimmerABC):
         }
         leptonVars = {**electronVars, **muonVars, **tauVars, **boostedtauVars}
 
-        #Subjets
+        # Subjets
         subjetVars = {
             f"SubJet{key}": pad_val(subjets[var], num_subjets, axis=1)
             for (var, key) in self.skim_vars["SubJet"].items()
@@ -545,7 +547,7 @@ class bbtautauSkimmer(SkimmerABC):
         eventVars["nFatJets"] = ak.num(fatjets).to_numpy()
         eventVars["nSubJets"] = ak.num(subjets).to_numpy()
 
-        #jin for CA
+        # jin for CA
         # eventVars["CA_matched_tau_pt_sum"] = ca_tau_pt_sum.to_numpy()
         # eventVars["CA_tau_idx_0"] = ca_tau_indices[:, 0].to_numpy()
         # eventVars["CA_tau_idx_1"] = ca_tau_indices[:, 1].to_numpy()
@@ -676,15 +678,21 @@ class bbtautauSkimmer(SkimmerABC):
         # add_selection("vbf_veto", ~(cut_vbf), *selection_args)
 
         if self._fatjet_bb_preselection:
-            # at least 1 jet with ParTXbbvsQCD > 0.8
+            # at least 1 jet with ParTXbbvsQCDTop > 0.3
             cut_bb = (
                 np.sum(
-                    ak8FatJetVars["ak8FatJetParTXbbvsQCD"] >= self.preselection["glopart-v2"],
+                    ak8FatJetVars["ak8FatJetParTXbbvsQCDTop"] >= self.preselection["glopart-v2"],
                     axis=1,
                 )
                 >= 1
             )
             add_selection("ak8_bb_preselection", cut_bb, *selection_args)
+
+        if self._prescale_factor:
+            cut_prescale = (
+                events.event % self._prescale_factor == 0
+            )
+            add_selection("prescale", cut_prescale, *selection_args)
 
         print("Selection", f"{time.time() - start:.2f}")
 
