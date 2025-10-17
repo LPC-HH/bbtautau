@@ -180,6 +180,9 @@ class Analyser:
             apply_triggers(self.events_dict[year], year, self.channel)
             delete_columns(self.events_dict[year], year, channels=[self.channel])
 
+            # Keep this for legacy issue, with old ntuples some branches are misnamed
+            # derive_variables(self.events_dict[year], CHANNELS["hm"])
+
             derive_variables(self.events_dict[year], self.channel)
 
             bbtautau_assignment(self.events_dict[year], agnostic=True)
