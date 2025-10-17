@@ -1106,7 +1106,7 @@ if __name__ == "__main__":
         help="Apply tt preselection",
     )
     parser.add_argument(
-        "--save-dir",
+        "--output-dir",
         type=str,
         default=None,
         help="Subdirectory to save model and plots within `/home/users/lumori/bbtautau/src/bbtautau/postprocessing/classifier/` if training/evaluating. Full directory to store predictions if --eval-bdt-preds is specified (checks writing permissions).",
