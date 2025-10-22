@@ -60,7 +60,7 @@ class Trainer:
         bkg_sample_names: list[str] = None,
         modelname: str = None,
         data_path: str = None,
-        model_dir: str = None,
+        output_dir: str = None,
         tt_preselection: bool = False,
     ) -> None:
         if years[0] == "all":
@@ -89,26 +89,29 @@ class Trainer:
 
         self.events_dict = {year: {} for year in self.years}
 
-        if model_dir is not None:
-            model_dir_path = Path(model_dir)
+        if output_dir is not None:
+            output_dir_path = Path(output_dir)
             # If absolute, use as-is; otherwise resolve under CLASSIFIER_DIR
-            self.model_dir = (
-                model_dir_path if model_dir_path.is_absolute() else CLASSIFIER_DIR / model_dir
+            self.output_dir = (
+                output_dir_path if output_dir_path.is_absolute() else CLASSIFIER_DIR / output_dir
             )
         else:
-            self.model_dir = MODEL_DIR / self.modelname
-        self.model_dir.mkdir(parents=True, exist_ok=True)
+            self.output_dir = MODEL_DIR / self.modelname
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def load_data(self, force_reload=False):
         # Check if data buffer file exists
-        if self.model_dir / "dtrain.buffer" in self.model_dir.glob("*.buffer") and not force_reload:
+        if (
+            self.output_dir / "dtrain.buffer" in self.output_dir.glob("*.buffer")
+            and not force_reload
+        ):
             print("Loading data from buffer file")
-            self.dtrain = xgb.DMatrix(self.model_dir / "dtrain.buffer")
-            self.dval = xgb.DMatrix(self.model_dir / "dval.buffer")
+            self.dtrain = xgb.DMatrix(self.output_dir / "dtrain.buffer")
+            self.dval = xgb.DMatrix(self.output_dir / "dval.buffer")
 
-            print(self.model_dir)
-            self.dtrain_rescaled = xgb.DMatrix(self.model_dir / "dtrain_rescaled.buffer")
-            self.dval_rescaled = xgb.DMatrix(self.model_dir / "dval_rescaled.buffer")
+            print(self.output_dir)
+            self.dtrain_rescaled = xgb.DMatrix(self.output_dir / "dtrain_rescaled.buffer")
+            self.dval_rescaled = xgb.DMatrix(self.output_dir / "dval_rescaled.buffer")
 
             self.loaded_dmatrix = True
         else:
@@ -414,7 +417,7 @@ class Trainer:
             )
 
         # Save only the aggregated stats
-        self.save_stats(weight_stats, self.model_dir / "weight_stats.csv")
+        self.save_stats(weight_stats, self.output_dir / "weight_stats.csv")
 
         # Combine all samples
         X = pd.concat(X_list, axis=0)
@@ -460,10 +463,10 @@ class Trainer:
 
         # save buffer for quicker loading
         if save_buffer:
-            self.dtrain.save_binary(self.model_dir / "dtrain.buffer")
-            self.dval.save_binary(self.model_dir / "dval.buffer")
-            self.dtrain_rescaled.save_binary(self.model_dir / "dtrain_rescaled.buffer")
-            self.dval_rescaled.save_binary(self.model_dir / "dval_rescaled.buffer")
+            self.dtrain.save_binary(self.output_dir / "dtrain.buffer")
+            self.dval.save_binary(self.output_dir / "dval.buffer")
+            self.dtrain_rescaled.save_binary(self.output_dir / "dtrain_rescaled.buffer")
+            self.dval_rescaled.save_binary(self.output_dir / "dval_rescaled.buffer")
 
     def train_model(self, save=True, early_stopping_rounds=5):
         """Train model using configured hyperparameters and evaluation sets."""
@@ -480,10 +483,10 @@ class Trainer:
             early_stopping_rounds=early_stopping_rounds,
         )
         if save:
-            self.bst.save_model(self.model_dir / f"{self.modelname}.json")
+            self.bst.save_model(self.output_dir / f"{self.modelname}.json")
 
         # Save evaluation results as JSON
-        with (self.model_dir / "evals_result.json").open("w") as f:
+        with (self.output_dir / "evals_result.json").open("w") as f:
             json.dump(evals_result, f, indent=2)
 
         return
@@ -492,7 +495,7 @@ class Trainer:
         self.bst = xgb.Booster()
         print(f"loading model {self.modelname}")
         try:
-            self.bst.load_model(self.model_dir / f"{self.modelname}.json")
+            self.bst.load_model(self.output_dir / f"{self.modelname}.json")
             print("loading successful")
         except Exception as e:
             print(e)
@@ -501,10 +504,10 @@ class Trainer:
     def evaluate_training(self, savedir=None):
         """Plot training curves and feature importances from saved eval results."""
         # Load evaluation results from JSON
-        with (self.model_dir / "evals_result.json").open("r") as f:
+        with (self.output_dir / "evals_result.json").open("r") as f:
             evals_result = json.load(f)
 
-        savedir = self.model_dir if savedir is None else Path(savedir)
+        savedir = self.output_dir if savedir is None else Path(savedir)
         savedir.mkdir(parents=True, exist_ok=True)
 
         plt.figure(figsize=(10, 8))
@@ -571,7 +574,7 @@ class Trainer:
         time_end = time.time()
         print(f"Time taken to predict: {time_end - time_start} seconds")
 
-        savedir = self.model_dir if savedir is None else Path(savedir)
+        savedir = self.output_dir if savedir is None else Path(savedir)
         savedir.mkdir(parents=True, exist_ok=True)
         (savedir / "rocs").mkdir(parents=True, exist_ok=True)
         (savedir / "outputs").mkdir(parents=True, exist_ok=True)
@@ -790,18 +793,18 @@ class Trainer:
         print("=" * 80)
 
 
-def study_rescaling(model_dir: str = "rescaling_study", importance_only=False) -> dict:
+def study_rescaling(output_dir: str = "rescaling_study", importance_only=False) -> dict:
     """Study the impact of different rescaling rules on BDT performance.
     For now give little flexibility, but is not meant to be customized too much.
 
     Args:
-        model_dir: Directory to save study results
+        output_dir: Directory to save study results
 
     Returns:
         Dictionary containing study results for each rescaling rule
     """
     # Create output directory
-    trainer = Trainer(years=["2022"], modelname="29July25_loweta_lowreg", model_dir=model_dir)
+    trainer = Trainer(years=["2022"], modelname="29July25_loweta_lowreg", output_dir=output_dir)
 
     print(f"importance_only: {importance_only}")
     if not importance_only:
@@ -821,7 +824,7 @@ def study_rescaling(model_dir: str = "rescaling_study", importance_only=False) -
     results = {}
 
     # Store the original study directory
-    study_dir = trainer.model_dir
+    study_dir = trainer.output_dir
 
     # Train models with different rescaling rules
     for scale_rule in scale_rules:
@@ -835,8 +838,8 @@ def study_rescaling(model_dir: str = "rescaling_study", importance_only=False) -
                 current_test_dir = study_dir / f"{scale_rule}_{balance_rule}"
                 current_test_dir.mkdir(exist_ok=True)
 
-                # Override model_dir to save in subdirectory
-                trainer.model_dir = current_test_dir
+                # Override output_dir to save in subdirectory
+                trainer.output_dir = current_test_dir
 
                 if importance_only:
                     trainer.load_model()
@@ -864,17 +867,17 @@ def study_rescaling(model_dir: str = "rescaling_study", importance_only=False) -
     return results
 
 
-def _rescaling_comparison(results: dict, model_dir: Path) -> None:
+def _rescaling_comparison(results: dict, output_dir: Path) -> None:
     """Enhanced comparison of different rescaling rules with comprehensive metrics.
 
     Args:
         results: Dictionary containing study results with comprehensive metrics
-        model_dir: Directory to save comparison plots and tables
+        output_dir: Directory to save comparison plots and tables
     """
     # Safety check in debugging
-    if not isinstance(model_dir, Path):
-        print(f"model_dir is not a Path, converting to Path: {model_dir}")
-        model_dir = Path(model_dir)
+    if not isinstance(output_dir, Path):
+        print(f"output_dir is not a Path, converting to Path: {output_dir}")
+        output_dir = Path(output_dir)
 
     # Get unique scale and balance rules
     scale_rules = list(results.keys())
@@ -912,7 +915,7 @@ def _rescaling_comparison(results: dict, model_dir: Path) -> None:
             print(f"\n{metric_name} for {sig} channel:")
             print(tabulate(table_data, headers=["Scale"] + balance_rules, tablefmt="grid"))
 
-            with (model_dir / f"{metric_key}_{sig}.txt").open("w") as f:
+            with (output_dir / f"{metric_key}_{sig}.txt").open("w") as f:
                 f.write(f"{metric_name} for {sig} channel:\n")
                 f.write(tabulate(table_data, headers=["Scale"] + balance_rules, tablefmt="grid"))
 
@@ -957,15 +960,15 @@ def _rescaling_comparison(results: dict, model_dir: Path) -> None:
         print(f"\nComprehensive metrics for {sig} channel:")
         print(tabulate(summary_data, headers=headers, tablefmt="grid"))
 
-        with (model_dir / f"comprehensive_{sig}.txt").open("w") as f:
+        with (output_dir / f"comprehensive_{sig}.txt").open("w") as f:
             f.write(f"Comprehensive metrics for {sig} channel:\n")
             f.write(tabulate(summary_data, headers=headers, tablefmt="grid"))
 
     # Create cross-channel comparison for key metrics
-    _create_cross_channel_comparison(results, scale_rules, balance_rules, model_dir)
+    _create_cross_channel_comparison(results, scale_rules, balance_rules, output_dir)
 
 
-def _create_cross_channel_comparison(results, scale_rules, balance_rules, model_dir):
+def _create_cross_channel_comparison(results, scale_rules, balance_rules, output_dir):
     """Create comparison tables across all channels for key metrics."""
     key_metrics = ["roc_auc", "f1_score", "precision", "recall"]
     channels = ["hh", "he", "hm"]
@@ -990,7 +993,7 @@ def _create_cross_channel_comparison(results, scale_rules, balance_rules, model_
         print(tabulate(table_data, headers=headers, tablefmt="grid"))
 
         # Save to file
-        with (model_dir / f"cross_channel_{metric}.txt").open("w") as f:
+        with (output_dir / f"cross_channel_{metric}.txt").open("w") as f:
             f.write(f"Cross-channel comparison: {metric.upper()}\n")
             f.write(tabulate(table_data, headers=headers, tablefmt="grid"))
 
@@ -1001,7 +1004,7 @@ def eval_bdt_preds(
     model: str,
     signal_key: str,
     save: bool = True,
-    model_dir: str | None = None,
+    output_dir: str | None = None,
     data_path: str | None = None,
     tt_preselection: bool = False,
 ):
@@ -1020,12 +1023,12 @@ def eval_bdt_preds(
         samples = list(SAMPLES.keys())
 
     if save:
-        if model_dir is None:
-            model_dir = DATA_DIR
+        if output_dir is None:
+            output_dir = DATA_DIR
 
-        # check if model_dir is writable
-        if not os.access(model_dir, os.W_OK):
-            raise PermissionError(f"Directory {model_dir} is not writable")
+        # check if output_dir is writable
+        if not os.access(output_dir, os.W_OK):
+            raise PermissionError(f"Directory {output_dir} is not writable")
 
     # Load model globally for all years, evaluate by year to reduce memory usage
     bst = Trainer(
@@ -1067,7 +1070,7 @@ def eval_bdt_preds(
             y_pred = bst.predict(dsample)
             evals[year][sample_name] = y_pred
             if save:
-                pred_dir = Path(model_dir) / "BDT_predictions" / year / sample_name
+                pred_dir = Path(output_dir) / "BDT_predictions" / year / sample_name
                 pred_dir.mkdir(parents=True, exist_ok=True)
                 np.save(pred_dir / f"{model}_preds.npy", y_pred)
                 with Path.open(pred_dir / f"{model}_preds_shape.txt", "w") as f:
@@ -1186,7 +1189,7 @@ if __name__ == "__main__":
                 samples=args.samples,
                 model=args.model,
                 signal_key=args.signal_key,
-                model_dir=args.model_dir,
+                output_dir=args.output_dir,
                 data_path=args.data_path,
                 tt_preselection=args.tt_preselection,
             )
@@ -1229,7 +1232,7 @@ if __name__ == "__main__":
         years=args.years,
         bkg_sample_names=args.samples,
         modelname=args.model,
-        model_dir=args.model_dir,
+        output_dir=args.output_dir,
         data_path=args.data_path,
         tt_preselection=args.tt_preselection,
         signal_key=args.signal_key,
