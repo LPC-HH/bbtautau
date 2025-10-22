@@ -15,12 +15,12 @@ spec:
           - "-c"
           - >
             git clone --single-branch --recurse-submodules --branch kube https://github.com/LPC-HH/bbtautau.git /opt/repo/bbtautau &&
-            mkdir -p $output_dir/ &&
+            mkdir -p $model_dir/ &&
             pip install -e /opt/repo/bbtautau &&
             pip install -e /opt/repo/bbtautau/boostedhh &&
             python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --train --model $name --signal-key $signal_key
-            --save-dir $output_dir --data-path /bbtautauvol/$datapath/ $args
-            | tee $output_dir/log.txt
+            --model-dir $model_dir --data-path /bbtautauvol/$datapath/ $args
+            | tee $model_dir/log.txt
         volumeMounts:
         - mountPath: /bbtautauvol
           name: bbtautauvol

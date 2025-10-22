@@ -121,7 +121,7 @@ def main(args):
             "job_name": "-".join(args.job_name.split("_")),  # change underscores to hyphens
             "name": args.name,
             "signal_key": args.signal_key,
-            "output_dir": str(BDT_DIR / args.tag / args.name + "_" + args.signal_key),
+            "model_dir": str(BDT_DIR / args.tag / args.name) + "_" + args.signal_key,
             "args": extra_args,
             "datapath": str(PVC / args.datapath),
         }
