@@ -168,6 +168,16 @@ class LoadedSample(utils.LoadedSampleABC):
                 .squeeze()
             )
 
+        elif feat.startswith("bbJetAway"):
+            return self.events[feat.replace("bbJetAway", "AK4JetAway")].to_numpy()[
+                :, 0
+            ]  # first col is bb away, second is tt away
+
+        elif feat.startswith("ttJetAway"):
+            return self.events[feat.replace("ttJetAway", "AK4JetAway")].to_numpy()[
+                :, 1
+            ]  # first col is bb away, second is tt away
+
         # Not sure if should pad also this case.
         elif utils.is_int(feat[-1]):
             return self.events[feat[:-1]].to_numpy()[:, int(feat[-1])].squeeze()

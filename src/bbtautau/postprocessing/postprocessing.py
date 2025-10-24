@@ -514,6 +514,10 @@ def get_columns(
         ("ak4JetEta", 3),
         ("ak4JetPhi", 3),
         ("ak4JetMass", 3),
+        ("AK4JetAwayPt", 2),
+        ("AK4JetAwayEta", 2),
+        ("AK4JetAwayPhi", 2),
+        ("AK4JetAwayMass", 2),
     ]
 
     # common columns
