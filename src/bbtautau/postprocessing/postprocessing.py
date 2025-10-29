@@ -23,7 +23,6 @@ import numpy as np
 import pandas as pd
 import vector
 import xgboost as xgb
-from bdt_config import bdt_config
 from boostedhh import hh_vars, utils
 from boostedhh.hh_vars import data_key
 from boostedhh.utils import PAD_VAL, Sample, ShapeVar, add_bool_arg
@@ -34,6 +33,7 @@ import bbtautau.postprocessing.utils as putils
 from bbtautau.bbtautau_utils import Channel
 from bbtautau.HLTs import HLTs
 from bbtautau.postprocessing import Regions, Samples, plotting
+from bbtautau.postprocessing.bdt_config import bdt_config
 from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES
 from bbtautau.postprocessing.utils import LoadedSample
 from bbtautau.userConfig import MODEL_DIR, SHAPE_VAR

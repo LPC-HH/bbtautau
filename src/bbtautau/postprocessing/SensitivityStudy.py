@@ -187,11 +187,44 @@ class Analyser:
             leptons_assignment(self.events_dict[year], dR_cut=1.5)
             derive_lepton_variables(self.events_dict[year])
 
-            if self.use_bdt:
-                if self.at_inference:
-                    # evaluate bdt at inference time
-                    # Store the evals by default
-                    start_time = time.time()
+        if self.use_bdt:
+            if self.at_inference:
+                # evaluate bdt at inference time
+                # Store the evals by default
+                start_time = time.time()
+                compute_bdt_preds(
+                    events_dict=self.events_dict,
+                    model_dir=self.model_dir,
+                    modelname=self.modelname,
+                    channel=self.channel,
+                    test_mode=self.test_mode,
+                    save_dir=BDT_EVAL_DIR,
+                )
+                print(
+                    f"BDT predictions computed at inference time in {time.time() - start_time} seconds"
+                )
+
+            else:
+                shapes_ok = check_bdt_prediction_shapes(
+                    self.events_dict,
+                    self.modelname,
+                    self.channel,
+                    BDT_EVAL_DIR,
+                    self.test_mode,
+                )
+                if shapes_ok:
+                    load_bdt_preds(
+                        self.events_dict,
+                        modelname=self.modelname,
+                        channel=self.channel,
+                        bdt_preds_dir=BDT_EVAL_DIR,
+                        test_mode=self.test_mode,
+                        all_outs=True,
+                    )
+                else:
+                    print(
+                        "BDT prediction don't exist or shapes do not match with data. You might have changed the preselection. I will recompute the predictions."
+                    )
                     compute_bdt_preds(
                         events_dict=self.events_dict,
                         model_dir=self.model_dir,
@@ -200,39 +233,6 @@ class Analyser:
                         test_mode=self.test_mode,
                         save_dir=BDT_EVAL_DIR,
                     )
-                    print(
-                        f"BDT predictions computed at inference time in {time.time() - start_time} seconds"
-                    )
-
-                else:
-                    shapes_ok = check_bdt_prediction_shapes(
-                        self.events_dict,
-                        self.modelname,
-                        self.channel,
-                        BDT_EVAL_DIR,
-                        self.test_mode,
-                    )
-                    if shapes_ok:
-                        load_bdt_preds(
-                            self.events_dict,
-                            modelname=self.modelname,
-                            channel=self.channel,
-                            bdt_preds_dir=BDT_EVAL_DIR,
-                            test_mode=self.test_mode,
-                            all_outs=True,
-                        )
-                    else:
-                        print(
-                            "BDT prediction don't exist or shapes do not match with data. You might have changed the preselection. I will recompute the predictions."
-                        )
-                        compute_bdt_preds(
-                            events_dict=self.events_dict,
-                            model_dir=self.model_dir,
-                            modelname=self.modelname,
-                            channel=self.channel,
-                            test_mode=self.test_mode,
-                            save_dir=BDT_EVAL_DIR,
-                        )
         return
 
     @staticmethod
