@@ -11,9 +11,7 @@ import copy
 import gc
 import logging
 import pickle
-import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 
@@ -22,7 +20,6 @@ import matplotlib as mpl
 import numpy as np
 import pandas as pd
 import vector
-import xgboost as xgb
 from boostedhh import hh_vars, utils
 from boostedhh.hh_vars import data_key
 from boostedhh.utils import PAD_VAL, Sample, ShapeVar, add_bool_arg
@@ -33,10 +30,9 @@ import bbtautau.postprocessing.utils as putils
 from bbtautau.bbtautau_utils import Channel
 from bbtautau.HLTs import HLTs
 from bbtautau.postprocessing import Regions, Samples, plotting
-from bbtautau.postprocessing.bdt_config import bdt_config
 from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES
 from bbtautau.postprocessing.utils import LoadedSample
-from bbtautau.userConfig import MODEL_DIR, SHAPE_VAR
+from bbtautau.userConfig import BDT_EVAL_DIR, MODEL_DIR, SHAPE_VAR
 
 # from bbtautau.postprocessing.bdt import eval_bdt_preds
 
@@ -290,15 +286,37 @@ def main(args: argparse.Namespace):
     leptons_assignment(events_dict, dR_cut=1.5)
 
     if args.use_bdt:
-        print("Predict BDT at inference")
-        time_start = time.time()
-        compute_bdt_preds(
+        print("Computing/Loading BDT predictions")
+        # Extract base signal keys (without channel suffix) for model lookup
+        base_signal_keys = []
+        for sig_full in args.sigs:
+            # Remove channel suffix to get base signal key
+            for base_sig in ["ggfbbtt", "vbfbbtt", "vbfbbtt-k2v0"]:
+                if sig_full.startswith(base_sig):
+                    base_signal_keys.append(base_sig)
+                    break
+
+        # Use the first signal key for model loading (assuming same model architecture for all)
+        # TODO: In future, may want different models per signal type
+        signal_key = base_signal_keys[0] if base_signal_keys else "ggfbbtt"
+        print(f"Using signal key '{signal_key}' for BDT model")
+
+        # Lazy import to avoid circular import at module import time
+        # This should be broken eventually. Could solve by writing the loading scripts into utils.py
+        from bbtautau.postprocessing.bdt_utils import compute_or_load_bdt_preds
+
+        compute_or_load_bdt_preds(
             events_dict={args.year: events_dict},
             modelname=args.model,
             model_dir=args.model_dir,
+            signal_key=signal_key,
+            tt_pres=False,
+            channel=BASE_CHANNEL,
+            bdt_preds_dir=BDT_EVAL_DIR,
+            test_mode=False,
+            at_inference=False,
+            all_outs=True,
         )
-        time_end = time.time()
-        print(f"Time taken to predict BDT: {time_end - time_start} seconds")
 
     # Now process each bmin value
     for bmin in args.bmin:
@@ -534,8 +552,10 @@ def get_columns(
     if ParT_taggers:
         for branch in (
             [f"ak8FatJetParT{key}" for key in Samples.qcdouts + Samples.topouts + Samples.sigouts]
-            + [f"ak8FatJetParT{key}vsQCD" for key in Samples.sigouts if key != "Xtauhtaum"]
-            + [f"ak8FatJetParT{key}vsQCDTop" for key in Samples.sigouts if key != "Xtauhtaum"]
+            + [
+                f"ak8FatJetParT{key}vsQCD" for key in Samples.sigouts
+            ]  # remove exception in muon channel, was only necessary in old ntuples
+            + [f"ak8FatJetParT{key}vsQCDTop" for key in Samples.sigouts]
         ):
             columns_data.append((branch, 3))
 
@@ -1377,236 +1397,7 @@ def derive_httak4away(
             sample.events.loc[ak4_mask[:, n], ("httak4away_dR", str(n))] = httak4away.deltaR()
 
 
-def _add_bdt_scores(
-    events: pd.DataFrame,
-    sample_bdt_preds: np.ndarray,
-    multiclass: bool,
-    all_outs: bool = True,
-    jshift: str = "",
-):
-    """
-    Assumes map to be
-    Class 0: bbtthe
-    Class 1: bbtthh
-    Class 2: bbtthm
-    Class 3: dyjets
-    Class 4: qcd
-    Class 5: ttbarhad
-    Class 6: ttbarll
-    Class 7: ttbarsl
-    """
-
-    if jshift != "":
-        jshift = "_" + jshift
-
-    if not multiclass:
-        events[f"BDTScore{jshift}"] = sample_bdt_preds
-    else:
-        # bg_tot = np.sum(sample_bdt_preds[:, 3:], axis=1)
-        he_score = sample_bdt_preds[:, 0]  # TODO could be de-hardcoded
-        hh_score = sample_bdt_preds[:, 1]
-        hm_score = sample_bdt_preds[:, 2]
-
-        events[f"BDTScoretauhtauh{jshift}"] = hh_score  # / (hh_score + bg_tot)
-        events[f"BDTScoretauhtaum{jshift}"] = hm_score  # / (hm_score + bg_tot)
-        events[f"BDTScoretauhtaue{jshift}"] = he_score  # / (he_score + bg_tot)
-
-        if all_outs:
-            events[f"BDTScoreDY{jshift}"] = sample_bdt_preds[:, 3]
-            events[f"BDTScoreQCD{jshift}"] = sample_bdt_preds[:, 4]
-            events[f"BDTScoreTThad{jshift}"] = sample_bdt_preds[:, 5]
-            events[f"BDTScoreTTll{jshift}"] = sample_bdt_preds[:, 6]
-            events[f"BDTScoreTTSL{jshift}"] = sample_bdt_preds[:, 7]
-
-        for ch in CHANNELS.values():
-            taukey = ch.tagger_label
-            events[f"BDTScore{taukey+jshift}vsQCD"] = np.nan_to_num(
-                events[f"BDTScore{taukey+jshift}"]
-                / (events[f"BDTScore{taukey+jshift}"] + events["BDTScoreQCD"]),
-                nan=PAD_VAL,
-            )
-
-            events[f"BDTScore{taukey+jshift}vsAll"] = np.nan_to_num(
-                events[f"BDTScore{taukey+jshift}"]
-                / (
-                    events[f"BDTScore{taukey+jshift}"]
-                    + events["BDTScoreQCD"]
-                    + events["BDTScoreTThad"]
-                    + events["BDTScoreTTll"]
-                    + events["BDTScoreTTSL"]
-                    + events["BDTScoreDY"]
-                ),
-                nan=PAD_VAL,
-            )
-
-
-def compute_bdt_preds(
-    events_dict: dict[str, dict[str, LoadedSample]],
-    modelname: str,
-    model_dir: Path,
-    channel: Channel = None,
-    test_mode: bool = False,
-    save_dir: Path = None,
-) -> dict[str, dict[str, np.ndarray]]:
-    """Compute BDT predictions for multiple years and samples.
-
-    This function loads a trained XGBoost model and uses it to make predictions on multiple
-    years and samples of data. The input data is expected to be organized by year and sample name.
-
-    Args:
-        data: Dictionary mapping years to dictionaries of samples. Each sample should be a LoadedSample
-            object containing the features needed for prediction.
-        modelname: Name of the model to load
-        model_dir: Path to the directory containing the model
-
-    Returns:
-        dict: Nested dictionary containing predictions for each year and sample:
-            {year: {sample: predictions_array}}
-
-    """
-
-    bst = xgb.Booster()
-    bst.load_model(model_dir / modelname / f"{modelname}.json")
-    feature_names = [
-        feat
-        for cat in bdt_config[modelname]["train_vars"]
-        for feat in bdt_config[modelname]["train_vars"][cat]
-    ]
-
-    # Use ThreadPoolExecutor for parallel processing (threads share memory, no pickling needed)
-    total_samples = sum(len(events_dict[year]) for year in events_dict)
-    max_workers = min(4, total_samples)  # Use reasonable number of workers
-
-    def predict_sample(year, sample, sample_data, feature_names, bst):
-        """Worker function for parallel prediction"""
-        dsample = xgb.DMatrix(
-            np.stack(
-                [sample_data.get_var(feat) for feat in feature_names],
-                axis=1,
-            ),
-            feature_names=feature_names,
-        )
-        return year, sample, bst.predict(dsample)
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = []
-
-        # Submit all prediction tasks
-        for year in events_dict:
-            for sample in events_dict[year]:
-                future = executor.submit(
-                    predict_sample, year, sample, events_dict[year][sample], feature_names, bst
-                )
-                futures.append(future)
-
-        # Collect results and apply BDT scores
-        for future in futures:
-            year, sample, y_pred = future.result()
-            _add_bdt_scores(
-                events_dict[year][sample].events, y_pred, multiclass=True, all_outs=True
-            )
-
-            if save_dir:
-                file_dir = (
-                    Path(save_dir) / ("test" if test_mode else modelname) / channel.key / year
-                )
-                file_dir.mkdir(exist_ok=True, parents=True)
-                with (file_dir / f"{sample}_preds.pkl").open("wb") as f:
-                    pickle.dump(y_pred, f)
-                with (file_dir / f"{sample}_shapes.pkl").open("wb") as f:
-                    pickle.dump(events_dict[year][sample].events.shape, f)
-
-
-def check_bdt_prediction_shapes(
-    events_dict: dict[str, dict[str, LoadedSample]],
-    modelname: str,
-    channel: Channel,
-    bdt_preds_dir: Path,
-    test_mode: bool,
-):
-    for year in events_dict:
-        for sample in events_dict[year]:
-            shape_file = (
-                Path(bdt_preds_dir)
-                / ("test" if test_mode else modelname)
-                / channel.key
-                / year
-                / f"{sample}_shapes.pkl"
-            )
-            if not shape_file.exists():
-                print(f"Prediction file does not exist: {shape_file}")
-                return False
-            shape = pickle.load(shape_file.open("rb"))
-            if shape[0] != events_dict[year][sample].events.shape[0]:
-                print(
-                    f"Shape mismatch for {sample} in {year}: {shape} != {events_dict[year][sample].events.shape}"
-                )
-                return False
-    return True
-
-
-def load_bdt_preds(
-    events_dict: dict[str, pd.DataFrame],
-    modelname: str,
-    channel: Channel,
-    bdt_preds_dir: Path,
-    test_mode: bool = False,
-    # jec_jmsr_shifts: bool = False,
-    all_outs: bool = True,
-):
-    """
-    Loads the BDT scores for each event and saves in the dataframe in the "BDTScore" column.
-    If ``jec_jmsr_shifts``, also loads BDT preds for every JEC / JMSR shift in MC.
-
-    Args:
-        events_dict: Dictionary with structure {year: {sample: LoadedSample}}
-        modelname: Name of the BDT model
-        channel: Channel object
-        bdt_preds_dir: Directory containing BDT predictions
-        test_mode: Whether in test mode
-        all_outs: Whether to load all outputs
-        perform_safety_check: Whether to perform shape consistency check before loading
-
-    """
-    # if jec_jmsr_shifts:
-    #     shift_preds = {
-    #         jshift: np.load(f"{bdt_preds_dir}/{year}/preds_{jshift}.npy")
-    #         for jshift in jec_shifts + jmsr_shifts
-    #     }
-
-    # i = 0
-    # for sample, num_events in sample_order_dict.items(): #TODO implement this system as safety check
-    # if sample in events_dict:
-    # events = events_dict[sample]
-    # assert num_events == len(
-    #     events
-    # ), f"# of BDT predictions does not match # of events for sample {sample}"
-
-    for year in events_dict:
-        for sample in events_dict[year]:
-            pred_file = (
-                Path(bdt_preds_dir)
-                / ("test" if test_mode else modelname)
-                / channel.key
-                / year
-                / f"{sample}_preds.pkl"
-            )
-
-            bdt_preds = pickle.load(pred_file.open("rb"))
-
-            multiclass = len(bdt_preds.shape) > 1
-            _add_bdt_scores(events_dict[year][sample].events, bdt_preds, multiclass, all_outs)
-
-        # if jec_jmsr_shifts and sample != data_key:
-        #     for jshift in jec_shifts + jmsr_shifts:
-        #         sample_bdt_preds = shift_preds[jshift][i : i + num_events]
-        #         _add_bdt_scores(
-        #             events, sample_bdt_preds, multiclass, multisig, all_outs, jshift=jshift
-        #         )
-
-    #     i += num_events
-
-    # assert i == len(bdt_preds), f"# events {i} != # of BDT preds {len(bdt_preds)}"
+# BDT functions have been moved to bdt_utils.py and are imported above
 
 
 def control_plots(
