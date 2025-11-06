@@ -39,6 +39,7 @@ MODEL_DIR = Path(
     "/home/users/lumori/bbtautau/src/bbtautau/postprocessing/classifier/trained_models"
 )
 CLASSIFIER_DIR = Path("/home/users/lumori/bbtautau/src/bbtautau/postprocessing/classifier/")
+BDT_EVAL_DIR = Path("/ceph/cms/store/user/lumori/bbtautau/BDT_predictions/")
 DATA_DIR = "/ceph/cms/store/user/lumori/bbtautau/skimmer/25Sep23AddVars_v12_private_signal"
 DATA_PATHS = path_dict(DATA_DIR)
 

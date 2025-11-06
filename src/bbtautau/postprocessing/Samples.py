@@ -128,7 +128,9 @@ SAMPLES = {
 SIGNALS = ["ggfbbtt", "vbfbbtt", "vbfbbtt-k2v0"]
 SIGNALS_CHANNELS = SIGNALS.copy()
 
-# TODO Check this
+SM_SIGNALS = ["ggfbbtt", "vbfbbtt"]
+SM_SIGNALS_CHANNELS = SM_SIGNALS.copy()
+
 sig_keys_ggf = ["ggfbbtt"]
 sig_keys_vbf = ["vbfbbtt", "vbfbbtt-k2v0"]
 
@@ -140,6 +142,8 @@ for signal in SIGNALS.copy():
             isSignal=True,
         )
         SIGNALS_CHANNELS.append(f"{signal}{channel}")
+        if signal in SM_SIGNALS:
+            SM_SIGNALS_CHANNELS.append(f"{signal}{channel}")
 
 DATASETS = ["jetmet", "tau", "egamma", "muon"]
 
