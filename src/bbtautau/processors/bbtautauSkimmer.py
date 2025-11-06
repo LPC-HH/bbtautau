@@ -320,7 +320,7 @@ class bbtautauSkimmer(SkimmerABC):
 
         # Leptons
         num_leptons = 2
-        electrons, etrigvars = objects.good_electrons(events, events.Electron, year)
+        electrons, etrigvars = objects.electrons(events, events.Electron, year)
         muons, mtrigvars = objects.good_muons(events, events.Muon, year)
         taus, ttrigvars = objects.good_taus(events, events.Tau, year)
         boostedtaus = objects.good_boostedtaus(events, events.boostedTau)
@@ -475,7 +475,7 @@ class bbtautauSkimmer(SkimmerABC):
 
         if len(ak4_jets_awayfromak8) == 2:
             ak4JetAwayVars = {
-                f"AK4JetAway{key}": pad_val(
+                f"ak4JetAway{key}": pad_val(
                     ak.concatenate(
                         [ak4_jets_awayfromak8[0][var], ak4_jets_awayfromak8[1][var]], axis=1
                     ),
@@ -486,7 +486,7 @@ class bbtautauSkimmer(SkimmerABC):
             }
         else:
             ak4JetAwayVars = {
-                f"AK4JetAway{key}": pad_val(ak4_jets_awayfromak8[var], 2, axis=1)
+                f"ak4JetAway{key}": pad_val(ak4_jets_awayfromak8[var], 2, axis=1)
                 for (var, key) in jet_skimvars.items()
             }
 
@@ -689,9 +689,7 @@ class bbtautauSkimmer(SkimmerABC):
             add_selection("ak8_bb_preselection", cut_bb, *selection_args)
 
         if self._prescale_factor:
-            cut_prescale = (
-                events.event % self._prescale_factor == 0
-            )
+            cut_prescale = events.event % self._prescale_factor == 0
             add_selection("prescale", cut_prescale, *selection_args)
 
         print("Selection", f"{time.time() - start:.2f}")
