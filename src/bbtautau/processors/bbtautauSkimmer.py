@@ -320,7 +320,7 @@ class bbtautauSkimmer(SkimmerABC):
 
         # Leptons
         num_leptons = 2
-        electrons, etrigvars = objects.electrons(events, events.Electron, year)
+        electrons, etrigvars = objects.good_electrons(events, events.Electron, year)
         muons, mtrigvars = objects.good_muons(events, events.Muon, year)
         taus, ttrigvars = objects.good_taus(events, events.Tau, year)
         boostedtaus = objects.good_boostedtaus(events, events.boostedTau)
