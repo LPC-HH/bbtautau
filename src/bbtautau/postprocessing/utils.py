@@ -1,7 +1,7 @@
 """
 General utilities for postprocessing.
 
-Author: Raghav Kansal
+Authors: Raghav Kansal, Ludovico Mori
 """
 
 from __future__ import annotations
@@ -23,6 +23,10 @@ from bbtautau.postprocessing import Samples
 
 
 def get_var(events: pd.DataFrame, bbtt_mask: pd.DataFrame, feat: str):
+    warnings.warn(
+        "Deprecation warning: Should switch to using the LoadedSample class in the future!",
+        stacklevel=1,
+    )
     if feat in events:
         return events[feat].to_numpy().squeeze()
     elif feat.startswith(("bb", "tt")):
@@ -167,6 +171,16 @@ class LoadedSample(utils.LoadedSampleABC):
                 .to_numpy()[self.tt_mask]
                 .squeeze()
             )
+
+        elif feat.startswith("bbJetAway"):
+            return self.events[feat.replace("bbJetAway", "AK4JetAway")].to_numpy()[
+                :, 0
+            ]  # first col is bb away, second is tt away
+
+        elif feat.startswith("ttJetAway"):
+            return self.events[feat.replace("ttJetAway", "AK4JetAway")].to_numpy()[
+                :, 1
+            ]  # first col is bb away, second is tt away
 
         # Not sure if should pad also this case.
         elif utils.is_int(feat[-1]):

@@ -23,7 +23,6 @@ import numpy as np
 import pandas as pd
 import vector
 import xgboost as xgb
-from bdt_config import bdt_config
 from boostedhh import hh_vars, utils
 from boostedhh.hh_vars import data_key
 from boostedhh.utils import PAD_VAL, Sample, ShapeVar, add_bool_arg
@@ -34,6 +33,7 @@ import bbtautau.postprocessing.utils as putils
 from bbtautau.bbtautau_utils import Channel
 from bbtautau.HLTs import HLTs
 from bbtautau.postprocessing import Regions, Samples, plotting
+from bbtautau.postprocessing.bdt_config import bdt_config
 from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES
 from bbtautau.postprocessing.utils import LoadedSample
 from bbtautau.userConfig import MODEL_DIR, SHAPE_VAR
@@ -415,7 +415,8 @@ def bb_filters(
 
 
 def tt_filters(
-    channel: Channel,
+    # if channel is None, it is agnostic selection
+    channel: Channel = None,
     in_filters: dict[str, list[tuple]] = None,
     num_fatjets: int = 3,
     tt_cut: float = 0.3,
@@ -424,12 +425,24 @@ def tt_filters(
         in_filters = base_filter()
 
     filters = {}
-    for dtype, ifilters_bydtype in in_filters.items():
-        filters[dtype] = [
-            ifilter + [(f"('ak8FatJetParTX{channel.tagger_label}vsQCDTop', '{n}')", ">=", tt_cut)]
-            for n in range(num_fatjets)
-            for ifilter in ifilters_bydtype
-        ]
+
+    # Agnostic selection: at least one jet with ParT score in any channel is required. Note that cannot sum scores together at this stage.
+    if channel is None:
+        for dtype, ifilters_bydtype in in_filters.items():
+            filters[dtype] = [
+                ifilter + [(f"('ak8FatJetParTX{ch.tagger_label}vsQCDTop', '{n}')", ">=", tt_cut)]
+                for n in range(num_fatjets)
+                for ifilter in ifilters_bydtype
+                for ch in CHANNELS.values()
+            ]
+    else:
+        for dtype, ifilters_bydtype in in_filters.items():
+            filters[dtype] = [
+                ifilter
+                + [(f"('ak8FatJetParTX{channel.tagger_label}vsQCDTop', '{n}')", ">=", tt_cut)]
+                for n in range(num_fatjets)
+                for ifilter in ifilters_bydtype
+            ]
 
     return filters
 
@@ -501,6 +514,10 @@ def get_columns(
         ("ak4JetEta", 3),
         ("ak4JetPhi", 3),
         ("ak4JetMass", 3),
+        ("AK4JetAwayPt", 2),
+        ("AK4JetAwayEta", 2),
+        ("AK4JetAwayPhi", 2),
+        ("AK4JetAwayMass", 2),
     ]
 
     # common columns
@@ -737,7 +754,7 @@ def load_samples(
                 else:
                     events_dict[key] = LoadedSample(sample=sample, events=events)
 
-    # keep only the specified bbtt channels
+    # keep only the specified signal channels
     for signal in signals:
         for channel in channels:
             if not loaded_samples:
@@ -1215,8 +1232,16 @@ def leptons_assignment(
         sample.m_mask = _get_lepton_mask(sample, "Muon", dR_cut)
 
 
-def derive_variables(events_dict: dict[str, LoadedSample], channel: Channel, num_fatjets: int = 3):
+def derive_variables(
+    events_dict: dict[str, LoadedSample], channel: Channel = None, num_fatjets: int = 3
+):
     """Derive variables for each event."""
+
+    if channel is not None:
+        print(
+            "Warning (postprocessing.derive_variables): indicating the channel is deprecated and needed only for data with tag < 25Sep23AddVars_v12_private_signal. Consider switching to new data in userConfig.py"
+        )
+
     for sample in events_dict.values():
         if "ak8FatJetPNetXbbvsQCDLegacy" not in sample.events:
             Xbb = sample.get_var("ak8FatJetPNetXbbLegacy")
@@ -1226,26 +1251,32 @@ def derive_variables(events_dict: dict[str, LoadedSample], channel: Channel, num
             for n in range(num_fatjets):
                 sample.events[("ak8FatJetPNetXbbvsQCDLegacy", str(n))] = Xbb_vs_QCD[:, n]
 
-        if channel.key == "hm" and "ak8FatJetParTXtauhtaumvsQCDTop" not in sample.events:
-            tauhtaum = sample.get_var("ak8FatJetParTXtauhtaum")
-            qcd = sample.get_var("ak8FatJetParTQCD")
-            top = sample.get_var("ak8FatJetParTTop")
-            tauhtaum_vs_QCDTop = np.divide(
-                tauhtaum,
-                tauhtaum + qcd + top,
-                out=np.zeros_like(tauhtaum),
-                where=(tauhtaum + qcd + top) != 0,
-            )
+        if channel is not None:
+            if channel.key == "hm" and "ak8FatJetParTXtauhtaumvsQCDTop" not in sample.events:
+                tauhtaum = sample.get_var("ak8FatJetParTXtauhtaum")
+                qcd = sample.get_var("ak8FatJetParTQCD")
+                top = sample.get_var("ak8FatJetParTTop")
+                tauhtaum_vs_QCDTop = np.divide(
+                    tauhtaum,
+                    tauhtaum + qcd + top,
+                    out=np.zeros_like(tauhtaum),
+                    where=(tauhtaum + qcd + top) != 0,
+                )
 
-            for n in range(num_fatjets):
-                sample.events[("ak8FatJetParTXtauhtaumvsQCDTop", str(n))] = tauhtaum_vs_QCDTop[:, n]
+                for n in range(num_fatjets):
+                    sample.events[("ak8FatJetParTXtauhtaumvsQCDTop", str(n))] = tauhtaum_vs_QCDTop[
+                        :, n
+                    ]
 
-        if channel.key == "hm" and "ak8FatJetParTXtauhtaumvsQCD" not in sample.events:
-            tauhtaum_vs_QCD = np.divide(
-                tauhtaum, tauhtaum + qcd, out=np.zeros_like(tauhtaum), where=(tauhtaum + qcd) != 0
-            )
-            for n in range(num_fatjets):
-                sample.events[("ak8FatJetParTXtauhtaumvsQCD", str(n))] = tauhtaum_vs_QCD[:, n]
+            if channel.key == "hm" and "ak8FatJetParTXtauhtaumvsQCD" not in sample.events:
+                tauhtaum_vs_QCD = np.divide(
+                    tauhtaum,
+                    tauhtaum + qcd,
+                    out=np.zeros_like(tauhtaum),
+                    where=(tauhtaum + qcd) != 0,
+                )
+                for n in range(num_fatjets):
+                    sample.events[("ak8FatJetParTXtauhtaumvsQCD", str(n))] = tauhtaum_vs_QCD[:, n]
 
 
 def derive_lepton_variables(events_dict: dict[str, LoadedSample]):
