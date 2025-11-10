@@ -272,6 +272,28 @@ def main(args: argparse.Namespace):
         time_end = time.time()
         print(f"Time taken to predict BDT: {time_end - time_start} seconds")
 
+    systematics: dict[str, dict] = {}
+    systematics_path: Path | None = None
+    if args.template_dir:
+        systematics_path = args.template_dir / f"{args.year}_systematics.pkl"
+
+        if systematics_path.exists() and not args.override_systs:
+            try:
+                with systematics_path.open("rb") as syst_file:
+                    loaded_systematics = pickle.load(syst_file)
+                if isinstance(loaded_systematics, dict):
+                    systematics = copy.deepcopy(loaded_systematics)
+                else:
+                    logger.warning(
+                        "Ignoring systematics file %s with unexpected type %s",
+                        systematics_path,
+                        type(loaded_systematics),
+                    )
+            except (pickle.UnpicklingError, EOFError, AttributeError, ValueError) as exc:
+                logger.warning("Failed to load systematics from %s: %s", systematics_path, exc)
+
+    systematics.setdefault(args.year, {})
+
     print("\nTemplates")
     templates = get_templates(
         events_dict,
@@ -280,7 +302,7 @@ def main(args: argparse.Namespace):
         args.bgs,
         CHANNEL,
         shape_vars,
-        {},  # TODO: systematics
+        systematics,
         # pass_ylim=150,
         # fail_ylim=1e5,
         use_bdt=args.use_bdt,
@@ -292,6 +314,7 @@ def main(args: argparse.Namespace):
         template_dir=args.template_dir,
         plot_dir=args.plot_dir,
         show=False,
+        bb_disc=args.bb_disc,
     )
 
     print("\nSaving templates")
@@ -301,6 +324,15 @@ def main(args: argparse.Namespace):
         args.blinded,
         shape_vars,
     )
+
+    if systematics_path is not None:
+        try:
+            systematics_path.parent.mkdir(parents=True, exist_ok=True)
+            with systematics_path.open("wb") as syst_file:
+                pickle.dump(systematics, syst_file)
+            print("Saved systematics to", systematics_path)
+        except OSError as exc:
+            logger.warning("Failed to save systematics to %s: %s", systematics_path, exc)
 
     del templates
     gc.collect()
@@ -329,6 +361,7 @@ def bb_filters(
     """
     0.3 corresponds to roughly, 85% signal efficiency, 2% QCD efficiency (pT: 250-400, mSD:0-250, mRegLegacy:40-250)
     """
+    print('bb_filter', 'bb_disc', bb_disc)
     if in_filters is None:
         in_filters = base_filter(bb_disc=bb_disc)
 
@@ -1397,6 +1430,7 @@ def get_templates(
     plot_data: bool = True,
     show: bool = False,
     use_bdt: bool = False,
+    bb_disc: str = "ak8FatJetParTXbbvsQCD",
 ) -> dict[str, Hist]:
     """
     (1) Makes histograms for each region in the ``selection_regions`` dictionary,
@@ -1428,7 +1462,7 @@ def get_templates(
     # do TXbb SFs + uncs. for signals and Hbb samples only
     # txbb_samples = sig_keys + [key for key in bg_keys if key in hbb_bg_keys]
 
-    selection_regions = Regions.get_selection_regions(channel, use_bdt=use_bdt)
+    selection_regions = Regions.get_selection_regions(channel, use_bdt=use_bdt, bb_disc=bb_disc)
 
     for rname, region in selection_regions.items():
         pass_region = rname.startswith("pass")
