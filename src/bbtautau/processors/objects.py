@@ -147,11 +147,13 @@ def good_electrons(events, leptons: ElectronArray, year: str):
 
     # baseline kinematic selection
     lsel = (
-        leptons.mvaNoIso_WP90
-        & (leptons.pt > 20)
-        & (abs(leptons.eta) < 2.5)
-        & (abs(leptons.dz) < 0.2)
-        & (abs(leptons.dxy) < 0.045)
+        # leptons.mvaNoIso_WP90
+        # & (leptons.pt > 20)
+        # & (abs(leptons.eta) < 2.5)
+        # & (abs(leptons.dz) < 0.2)
+        # & (abs(leptons.dxy) < 0.045)
+        abs(leptons.dxy)
+        > -1
     )
     leptons = leptons[lsel]
 
@@ -192,11 +194,13 @@ def good_muons(events, leptons: MuonArray, year: str):
     trigobj = events.TrigObj
 
     lsel = (
-        leptons.looseId
-        & (leptons.pt > 20)
-        & (abs(leptons.eta) < 2.4)
-        & (abs(leptons.dz) < 0.2)
-        & (abs(leptons.dxy) < 0.045)
+        # leptons.looseId
+        # & (leptons.pt > 20)
+        # & (abs(leptons.eta) < 2.4)
+        # & (abs(leptons.dz) < 0.2)
+        # & (abs(leptons.dxy) < 0.045)
+        abs(leptons.dxy)
+        > -1
     )
     leptons = leptons[lsel]
 
