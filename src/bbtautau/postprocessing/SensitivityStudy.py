@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import gc
 import logging
+import time
 import warnings
 from dataclasses import dataclass
 from datetime import date
@@ -16,13 +17,21 @@ import pandas as pd
 from boostedhh import hh_vars
 from boostedhh.utils import PAD_VAL
 from joblib import Parallel, delayed
-from postprocessing import (
+
+from bbtautau.postprocessing import utils
+from bbtautau.postprocessing.plotting import (
+    plot_optimization_sig_eff,
+    plot_optimization_thresholds,
+)
+from bbtautau.postprocessing.postprocessing import (
     apply_triggers,
     base_filter,
     bb_filters,
     bbtautau_assignment,
+    check_bdt_prediction_shapes,
     compute_bdt_preds,
     delete_columns,
+    derive_lepton_variables,
     derive_variables,
     get_columns,
     leptons_assignment,
@@ -30,12 +39,9 @@ from postprocessing import (
     load_samples,
     tt_filters,
 )
-from Samples import CHANNELS
-from skopt import gp_minimize
-
-from bbtautau.postprocessing import utils
 from bbtautau.postprocessing.rocUtils import ROCAnalyzer
-from bbtautau.userConfig import DATA_PATHS, MODEL_DIR, SHAPE_VAR, ABCD_SAMPLES
+from bbtautau.postprocessing.Samples import CHANNELS
+from bbtautau.userConfig import DATA_PATHS, MODEL_DIR, SHAPE_VAR
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("boostedhh.utils")
@@ -45,9 +51,8 @@ plt.style.use(hep.style.CMS)
 hep.style.use("CMS")
 
 # Global variables
-BDT_EVAL_DIR = Path("/ceph/cms/store/user/lumori/bbtautau/BDT_predictions/")
+BDT_EVAL_DIR = Path("/home/users/haoyang/bbtautau_sen/BDT_predictions")
 TODAY = date.today()  # to name output folder
-SIG_KEYS = {"hh": "bbtthh", "he": "bbtthe", "hm": "bbtthm"}  # TODO Generalize for other signals
 
 
 class FOM:
@@ -90,7 +95,14 @@ class Optimum:
     bg_map: np.ndarray | None = None
     sel_B_min: np.ndarray | None = None
     fom: FOM | None = None
-    sig_normalized: bool | None = None
+
+    # Signal efficiency specific fields (for grid_search_opt_sig_eff)
+    sig_eff_cuts: tuple[float, float] | None = None  # Signal efficiency values at optimum
+    BBcut_sig_eff: np.ndarray | None = None  # Signal efficiency grid for bb tagger
+    TTcut_sig_eff: np.ndarray | None = None  # Signal efficiency grid for tt tagger
+    fom_map: np.ndarray | None = None  # FOM values grid for plotting
+    bb_disc_name: str | None = None  # Name of bb discriminant used
+    tt_disc_name: str | None = None  # Name of tt discriminant used
 
     def __post_init__(self):
         """Automatically unpack evaluations_at_optimum dict into attributes."""
@@ -118,7 +130,7 @@ def fom_punzi(b, s, _tf, a=3, non_qcd_bg_in_A=0):
     """
     a is the number of sigmas of the test significance
     """
-    return np.where(s > 0, (np.sqrt(b * _tf) + a / 2) / s, -PAD_VAL)
+    return np.where(s > 0, (np.sqrt(b * _tf) + a / 2) / s, np.nan)
 
 
 FOMS = {
@@ -130,22 +142,29 @@ FOMS = {
 
 class Analyser:
     def __init__(
-        self, years, channel_key, test_mode, use_bdt, modelname, main_plot_dir, at_inference=False, llsl_weight=1, bb_disc='bbFatJetParTXbbvsQCD', dataMinusSimABCD=False, showNonDataDrivenPortion=True, sensitivity_dir=None
+        self,
+        years,
+        sig_key,
+        channel_key,
+        test_mode,
+        use_bdt,
+        modelname,
+        main_plot_dir,
+        at_inference=False,
+        llsl_weight=1,
+        bb_disc='bbFatJetParTXbbvsQCDTop',
+        dataMinusSimABCD=False,
+        showNonDataDrivenPortion=True,
+        sensitivity_dir=None
     ):
         self.channel = CHANNELS[channel_key]
         self.years = years
         self.test_mode = test_mode
         test_dir = "test" if test_mode else "full_presel"
         tt_tagger_name = modelname if use_bdt else "ParT"
-        self.plot_dir = (
-            Path(main_plot_dir)
-            / f"plots/SensitivityStudy/{TODAY}/{test_dir}/{tt_tagger_name}/{channel_key}"
-        )
-        self.plot_dir.mkdir(parents=True, exist_ok=True)
 
-        # TODO we should get rid of this line
-        self.sig_key = SIG_KEYS[channel_key]
-
+        self.sig_key = sig_key
+        self.sig_key_channel = sig_key + channel_key
         self.taukey = CHANNELS[channel_key].tagger_label
 
         self.events_dict = {year: {} for year in years}
@@ -164,28 +183,43 @@ class Analyser:
         # TODO: make it an init arg in the future
         self.bmin = 5 
 
+        self.plot_dir = (
+            Path(main_plot_dir)
+            / f"plots/SensitivityStudy/{TODAY}/{test_dir}/{sig_key}/{tt_tagger_name}/{channel_key}"
+        )
+        self.plot_dir.mkdir(parents=True, exist_ok=True)
+
+        # This is hardcoded here
+        self.bb_disc_name = bb_disc
+        self.tt_disc_name = (
+            f"BDTScore{self.taukey}vsAll" if use_bdt else f"ttFatJetParTX{self.taukey}vsQCDTop"
+        )
+
     def load_data(self, tt_pres=False):
 
         for year in self.years:
 
             filters_dict = base_filter(self.test_mode)
-            filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3)
+
+            # Prefilters already applied in skimmer
+            # filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3)
 
             if tt_pres:
-                filters_dict = tt_filters(self.channel, filters_dict, num_fatjets=3, tt_cut=0.3)
+                filters_dict = tt_filters(
+                    channel=self.channel, in_filters=filters_dict, num_fatjets=3, tt_cut=0.3
+                )
 
             columns = get_columns(year, triggers_in_channel=self.channel)
 
             self.events_dict[year] = load_samples(
                 year=year,
                 paths=DATA_PATHS[year],
-                samples=ABCD_SAMPLES,
+                signals=[self.sig_key],
                 channels=[self.channel],
                 filters_dict=filters_dict,
                 load_columns=columns,
-                load_just_ggf=True,
-                load_bgs=True,
-                restrict_data_to_channel=False,
+                load_bgs=self.showNonDataDrivenPortion,
+                restrict_data_to_channel=~self.showNonDataDrivenPortion,
                 loaded_samples=True,
                 multithread=True,
             )
@@ -193,30 +227,60 @@ class Analyser:
             apply_triggers(self.events_dict[year], year, self.channel)
             delete_columns(self.events_dict[year], year, channels=[self.channel])
 
-            derive_variables(
-                self.events_dict[year], CHANNELS["hm"]
-            )  # legacy issue, muon branches are misnamed
+            # Keep this for legacy issue, with old ntuples some branches are misnamed
+            # derive_variables(self.events_dict[year], CHANNELS["hm"])
+
+            derive_variables(self.events_dict[year], self.channel)
             bbtautau_assignment(self.events_dict[year], agnostic=True)
             leptons_assignment(self.events_dict[year], dR_cut=1.5)
+            derive_lepton_variables(self.events_dict[year])
 
-            if self.use_bdt:
-                if self.at_inference:
-                    # evaluate bdt at inference time
+        if self.use_bdt:
+            if self.at_inference:
+                # evaluate bdt at inference time
+                # Store the evals by default
+                start_time = time.time()
+                compute_bdt_preds(
+                    events_dict=self.events_dict,
+                    model_dir=self.model_dir,
+                    modelname=self.modelname,
+                    channel=self.channel,
+                    test_mode=self.test_mode,
+                    save_dir=BDT_EVAL_DIR,
+                )
+                print(
+                    f"BDT predictions computed at inference time in {time.time() - start_time} seconds"
+                )
+
+            else:
+                shapes_ok = check_bdt_prediction_shapes(
+                    self.events_dict,
+                    self.modelname,
+                    self.channel,
+                    BDT_EVAL_DIR,
+                    self.test_mode,
+                )
+                if shapes_ok:
+                    load_bdt_preds(
+                        self.events_dict,
+                        modelname=self.modelname,
+                        channel=self.channel,
+                        bdt_preds_dir=BDT_EVAL_DIR,
+                        test_mode=self.test_mode,
+                        all_outs=True,
+                    )
+                else:
+                    print(
+                        "BDT prediction don't exist or shapes do not match with data. You might have changed the preselection. I will recompute the predictions."
+                    )
                     compute_bdt_preds(
-                        data=self.events_dict,
+                        events_dict=self.events_dict,
                         model_dir=self.model_dir,
                         modelname=self.modelname,
-                        llsl_weight=self.llsl_weight
-                    )
-                    print("BDT predictions computed at inference time")
-
-                else:
-                    load_bdt_preds(
-                        self.events_dict[year],
-                        year,
-                        BDT_EVAL_DIR,
-                        modelname=self.modelname,
-                        all_outs=True,
+                        channel=self.channel,
+                        test_mode=self.test_mode,
+                        save_dir=BDT_EVAL_DIR,
+                        llsl_weight=self.llsl_weight,
                     )
         return
 
@@ -246,12 +310,6 @@ class Analyser:
 
         background_names = self.channel.data_samples
 
-        rocAnalyzer = ROCAnalyzer(
-            years=years,
-            signals={self.sig_key: self.events_dict_allyears[self.sig_key]},
-            backgrounds={bkg: self.events_dict_allyears[bkg] for bkg in background_names},
-        )
-
         discs_tt = [
             f"ttFatJetParTX{self.taukey}vsQCD",
             f"ttFatJetParTX{self.taukey}vsQCDTop",
@@ -264,30 +322,38 @@ class Analyser:
 
         discs_all = discs or (discs_bb + discs_tt)
 
-        rocAnalyzer.fill_discriminants(
-            discs_all, signal_name=self.sig_key, background_names=background_names
+        self.rocAnalyzer = ROCAnalyzer(
+            years=years,
+            signals={self.sig_key_channel: self.events_dict_allyears[self.sig_key_channel]},
+            backgrounds={bkg: self.events_dict_allyears[bkg] for bkg in background_names},
         )
 
-        rocAnalyzer.compute_rocs()
+        self.rocAnalyzer.fill_discriminants(
+            discs_all, signal_name=self.sig_key_channel, background_names=background_names
+        )
+
+        self.rocAnalyzer.compute_rocs()
 
         # Plot bb
-        rocAnalyzer.plot_rocs(title="bbFatJet", disc_names=discs_bb, plot_dir=self.plot_dir)
+        self.rocAnalyzer.plot_rocs(title="bbFatJet", disc_names=discs_bb, plot_dir=self.plot_dir)
 
         # Plot tt
-        rocAnalyzer.plot_rocs(title="ttFatJet", disc_names=discs_tt, plot_dir=self.plot_dir)
+        self.rocAnalyzer.plot_rocs(title="ttFatJet", disc_names=discs_tt, plot_dir=self.plot_dir)
 
         for disc in discs_all:
-            rocAnalyzer.plot_disc_scores(disc, background_names, self.plot_dir)
-            rocAnalyzer.plot_disc_scores(disc, [[bkg] for bkg in background_names], self.plot_dir)
-            rocAnalyzer.compute_confusion_matrix(disc, plot_dir=self.plot_dir)
+            self.rocAnalyzer.plot_disc_scores(disc, background_names, self.plot_dir)
+            self.rocAnalyzer.plot_disc_scores(
+                disc, [[bkg] for bkg in background_names], self.plot_dir
+            )
+            self.rocAnalyzer.compute_confusion_matrix(disc, plot_dir=self.plot_dir)
 
-        print(f"ROCs computed and plotted for years {years}.")
+        print(f"ROCs computed and plotted for years {years} and signals {self.sig_key_channel}.")
 
     def plot_mass(self, years):
-        for key, label in zip(["hhbbtt", "data"], ["HHbbtt", "Data"]):
-            print(f"Plotting mass for {label}")
-            if key == "hhbbtt":
-                events = pd.concat([self.events_dict[year][self.sig_key].events for year in years])
+        for key in [self.sig_key_channel, "data"]:
+            print(f"Plotting mass for {key}")
+            if key == self.sig_key_channel:
+                events = pd.concat([self.events_dict[year][key].events for year in years])
             else:
                 events = pd.concat(
                     [
@@ -305,9 +371,12 @@ class Analyser:
                 zip(["bb", "tt"], ["bb FatJet", rf"{self.channel.label} FatJet"])
             ):
                 ax = axs[i]
-                if key == "hhbbtt":
+                if key == self.sig_key_channel:
                     mask = np.concatenate(
-                        [self.events_dict[year][self.sig_key].get_mask(jet) for year in years],
+                        [
+                            self.events_dict[year][self.sig_key_channel].get_mask(jet)
+                            for year in years
+                        ],
                         axis=0,
                     )
                 else:
@@ -319,6 +388,9 @@ class Analyser:
                         ],
                         axis=0,
                     )
+
+                print("Shape of events", events.shape)
+                print("Shape of mask", mask.shape)
 
                 for j, (mkey, mlabel) in enumerate(
                     zip(
@@ -401,18 +473,10 @@ class Analyser:
 
         # precompute to speedup
         for year in years:
-            # for key in [self.sig_key] + self.channel.data_samples:
+            # use all keys to enable enhanced ABCD
             for key in self.events_dict[year].keys():
-                self.txbbs[year][key] = self.events_dict[year][key].get_var(self.bb_disc)
-                if self.use_bdt:
-                    # BDT is evaluated directly on the tagged jet
-                    self.txtts[year][key] = self.events_dict[year][key].get_var(
-                        f"BDTScore{self.taukey}vsAll"
-                    )
-                else:
-                    self.txtts[year][key] = self.events_dict[year][key].get_var(
-                        f"ttFatJetParTX{self.taukey}vsQCDTop"
-                    )
+                self.txbbs[year][key] = self.events_dict[year][key].get_var(self.bb_disc_name)
+                self.txtts[year][key] = self.events_dict[year][key].get_var(self.tt_disc_name)
                 self.masstt[year][key] = self.events_dict[year][key].get_var(mttk)
                 self.massbb[year][key] = self.events_dict[year][key].get_var(mbbk)
                 self.ptbb[year][key] = self.events_dict[year][key].get_var("bbFatJetPt")
@@ -435,23 +499,22 @@ class Analyser:
         non_qcd_bg_pass_res_dict = defaultdict(float) # a dict storing every class of passed and res non_qcd_bg 
 
         for year in years:
-            for key in [self.sig_key]:
-                # Region A
-                cut_sig_pass = (
-                    (self.txbbs[year][key] > txbbcut)
-                    & (self.txtts[year][key] > txttcut)
-                    & (self.massbb[year][key] > mbb1)
-                    & (self.massbb[year][key] < mbb2)
-                    & (self.ptbb[year][key] > 250)
-                    & (self.pttt[year][key] > 200)
+            cut_sig_pass = (
+                (self.txbbs[year][self.sig_key_channel] > txbbcut)
+                & (self.txtts[year][self.sig_key_channel] > txttcut)
+                & (self.massbb[year][self.sig_key_channel] > mbb1)
+                & (self.massbb[year][self.sig_key_channel] < mbb2)
+                & (self.ptbb[year][self.sig_key_channel] > 250)
+                & (self.pttt[year][self.sig_key_channel] > 200)
+            )
+            if not self.use_bdt:
+                cut_sig_pass &= (self.masstt[year][self.sig_key_channel] > mtt1) & (
+                    self.masstt[year][self.sig_key_channel] < mtt2
                 )
-                if not self.use_bdt:
-                    cut_sig_pass &= (self.masstt[year][key] > mtt1) & (
-                        self.masstt[year][key] < mtt2
-                    )
-                sig_pass += np.sum(
-                    self.events_dict[year][self.sig_key].events["finalWeight"][cut_sig_pass]
-                )
+
+            sig_pass += np.sum(
+                self.events_dict[year][self.sig_key_channel].get_var("finalWeight")[cut_sig_pass]
+            )
 
             for key in self.channel.data_samples:
                 # Region B
@@ -643,25 +706,87 @@ class Analyser:
         gridlims,
         B_min_vals,
         foms,
-        normalize_sig=False,
         # arguments for sensitivity evaluation
         txbbcut=None,
         txttcut=None,
+        use_thresholds=False,
     ) -> Optimum:
+        """
+        Grid search optimization for signal/background discrimination.
+
+        Args:
+            years: List of years to analyze
+            gridsize: Size of the grid (gridsize x gridsize points)
+            gridlims: Tuple of (min, max) for grid limits
+            B_min_vals: List of minimum background values to test
+            foms: List of figure-of-merit functions
+            normalize_sig: Whether to normalize signal yields
+            use_sig_eff: If True, use signal efficiency coordinates; if False, use raw thresholds
+
+        Returns:
+            Optimum: Results dictionary containing optimization results
+
+        Note:
+            When use_sig_eff=True, gridlims should be efficiency values (0.0 to 1.0).
+            When use_sig_eff=False, gridlims should be raw threshold values.
+        """
         
         mbb1, mbb2 = SHAPE_VAR["blind_window"]
         mtt1, mtt2 = self.channel.tt_mass_cut[1]
         
-        if txbbcut is not None and txttcut is not None:
-            # for evaluation, pass a meshgrid of size 1
-            bbcut = np.linspace(txbbcut, txbbcut, 1)    
-            ttcut = np.linspace(txttcut, txttcut, 1)    
-            BBcut, TTcut = np.meshgrid(bbcut, ttcut)
-        else:
+        for_evaluation = (txbbcut is not None) and (txttcut is not None)
+        
+        if not use_thresholds:
+            # Signal efficiency coordinate system
+            if not hasattr(self, "rocAnalyzer"):
+                print("ROC analyzer not found. Running compute_and_plot_rocs first.")
+                self.compute_and_plot_rocs(years)
+                print("ROC analyzer computed and plotted.")
+
+            # Check discriminants exist
+            if self.bb_disc_name not in self.rocAnalyzer.discriminants:
+                raise ValueError(
+                    f"BB discriminant '{self.bb_disc_name}' not found in ROC analyzer. Available: {list(self.rocAnalyzer.discriminants.keys())}"
+                )
+            if self.tt_disc_name not in self.rocAnalyzer.discriminants:
+                raise ValueError(
+                    f"TT discriminant '{self.tt_disc_name}' not found in ROC analyzer. Available: {list(self.rocAnalyzer.discriminants.keys())}"
+                )
+
+            # Create signal efficiency grid
+            bbcutSigEff = np.linspace(*gridlims, gridsize)
+            ttcutSigEff = np.linspace(*gridlims, gridsize)
+            BBcutSigEff, TTcutSigEff = np.meshgrid(bbcutSigEff, ttcutSigEff)
+
+            # Get discriminant objects for threshold lookup
+            bb_discriminant = self.rocAnalyzer.discriminants[self.bb_disc_name]
+            tt_discriminant = self.rocAnalyzer.discriminants[self.tt_disc_name]
+
+            # VECTORIZED threshold computation
+            bbcut_thresholds = bb_discriminant.get_cut_from_sig_eff(bbcutSigEff)
+            ttcut_thresholds = tt_discriminant.get_cut_from_sig_eff(ttcutSigEff)
+
+            # Create threshold meshgrids for actual cuts
+            BBcut, TTcut = np.meshgrid(bbcut_thresholds, ttcut_thresholds)
+        
+        elif not for_evaluation:
             # for optimization, pass a full grid
             bbcut = np.linspace(*gridlims, gridsize)
             ttcut = np.linspace(*gridlims, gridsize)
             BBcut, TTcut = np.meshgrid(bbcut, ttcut)
+
+            # For consistency, set efficiency grids to None when not using signal efficiency
+            BBcutSigEff = None
+            TTcutSigEff = None
+        else:
+            # for evaluation, pass a meshgrid of size 1
+            bbcut = np.linspace(txbbcut, txbbcut, 1)    
+            ttcut = np.linspace(txttcut, txttcut, 1)    
+            BBcut, TTcut = np.meshgrid(bbcut, ttcut) 
+
+            # For consistency, set efficiency grids to None when not using signal efficiency
+            BBcutSigEff = None
+            TTcutSigEff = None
 
         # Flatten the grid for parallel evaluation
         bbcut_flat = BBcut.ravel()
@@ -681,7 +806,8 @@ class Analyser:
             )
 
         # results is a list of (sig, bkg, tf) tuples
-        results = Parallel(n_jobs=16, verbose=1)(
+        print(f"Running grid search on {len(bbcut_flat)} points...")
+        results = Parallel(n_jobs=-10, verbose=1)(
             delayed(sig_bg)(_b, _t) for _b, _t in zip(bbcut_flat, ttcut_flat)
         )
 
@@ -697,14 +823,15 @@ class Analyser:
             for k, v in evals.items()
         }
 
-        # normalize sig
-        if normalize_sig:
-            tot_sig_weight = np.sum(
-                np.concatenate(
-                    [self.events_dict[year][self.sig_key].events["finalWeight"] for year in years]
-                )
+        tot_sig_weight = np.sum(
+            np.concatenate(
+                [
+                    self.events_dict[year][self.sig_key_channel].get_var("finalWeight")
+                    for year in years
+                ]
             )
-            evals["sig_pass"] = evals["sig_pass"] / tot_sig_weight
+        )
+        evals["sig_eff"] = evals["sig_pass"] / tot_sig_weight
 
         # compute the number of background events in A by ABCD method(s)
         evals["bgs_scaled_ABCD"] = evals["data_pass_sideband"] * evals["TF_data"]
@@ -735,45 +862,34 @@ class Analyser:
                     # limits = fom.fom_func(bgs_sb, sigs, data_tfs, non_qcd_bg_in_A=0, b_data=bgs_sb)
                 if not np.any(sel_B_min):
                     print(f"Warning: No points satisfy B_min>{B_min} for FOM={fom.name}. Skipping.")
-                    # results[fom.name][f"Bmin={B_min}"] = Optimum(
-                    #     dataMinusSimABCD=self.dataMinusSimABCD,
-                    #     showNonDataDrivenPortion=self.showNonDataDrivenPortion,
-                    #     limit=limit_opt,
-                    #     signal_yield=sigs[idx_opt],
-                    #     bkg_data_yield=bgs_sb[idx_opt],
-                    #     hmass_data_fail=bg_fails_res[idx_opt],
-                    #     sideband_data_fail=bg_fails_sb[idx_opt],
-                    #     data_transfer_factor=data_tfs[idx_opt],
-                    #     bkg_qcd_yield=qcd_sb[idx_opt],
-                    #     hmass_qcd_fail=qcd_fails_res[idx_opt],
-                    #     sideband_qcd_fail=qcd_fails_sb[idx_opt],
-                    #     qcd_transfer_factor=qcd_tfs[idx_opt],
-                    #     non_qcd_bg_in_A=non_qcd_bg_pass_res[idx_opt],
-                    #     cuts=(bbcut_opt, ttcut_opt),
-                    #     BBcut=BBcut,
-                    #     TTcut=TTcut,
-                    #     sig_map=sigs,
-                    #     bg_map=bgs_scaled,
-                    #     sel_B_min=sel_B_min,
-                    #     fom=fom,
-                    #     sig_normalized=normalize_sig,
-                    # )
-                    # continue
-                    pass
+                    continue
+
                 sel_indices = np.argwhere(sel_B_min)
                 selected_limits = limits[sel_B_min]
                 min_idx_in_selected = np.argmin(selected_limits)
                 idx_opt = tuple(sel_indices[min_idx_in_selected])
                 limit_opt = selected_limits[min_idx_in_selected]
 
-                bbcut_opt, ttcut_opt = (
-                    BBcut[idx_opt],
-                    TTcut[idx_opt],
-                )
-                
+                # Get optimal cuts (always in threshold space)
+                bbcut_opt, ttcut_opt = BBcut[idx_opt], TTcut[idx_opt]
+
                 # dictionary that stores all evaluated quantities at the optimum point
                 evals_opt = {k: v[idx_opt] for k, v in evals.items()}
                 evals_opt["limit"] = limit_opt
+
+                # Add signal efficiency specific fields if using signal efficiency coordinates
+                if not use_thresholds:
+                    bbcut_sig_eff_opt = BBcutSigEff[idx_opt]
+                    ttcut_sig_eff_opt = TTcutSigEff[idx_opt]
+
+                    evals_opt.update(
+                        {
+                            "sig_eff_cuts": (bbcut_sig_eff_opt, ttcut_sig_eff_opt),
+                            "BBcut_sig_eff": BBcutSigEff,
+                            "TTcut_sig_eff": TTcutSigEff,
+                            "fom_map": limits,
+                        }
+                    )
 
                 results[fom.name][f"Bmin={B_min}"] = Optimum(
                     dataMinusSimABCD=self.dataMinusSimABCD,
@@ -786,65 +902,11 @@ class Analyser:
                     bg_map=evals["bgs_scaled_ABCD"] if not self.dataMinusSimABCD else evals["bgs_scaled_EnhancedABCD"] ,
                     sel_B_min=sel_B_min,
                     fom=fom,
-                    sig_normalized=normalize_sig,
                 )
 
         return results
 
-    def bayesian_opt(self, years, B_min_vals, gridlims, foms) -> Optimum:
-
-        mbb1, mbb2 = SHAPE_VAR["blind_window"]
-        mtt1, mtt2 = self.channel.tt_mass_cut[1]
-
-        sig_bkg_f = self.compute_sig_bkg_abcd
-
-        def objective(cuts, B_min, fom):
-            txbbcut, txttcut = cuts
-            sig, bg, sig_fail, bg_fail, tf = sig_bkg_f(
-                years, txbbcut, txttcut, mbb1, mbb2, mtt1, mtt2
-            )
-
-            if bg * tf > 1e-8 and bg > B_min:  # enforce soft constraint
-                limit = fom.fom_func(bg, sig, tf)
-            else:
-                limit = np.abs(PAD_VAL)
-            return float(limit)
-
-        results = {}
-        for fom in foms:
-            results[fom.name] = {}
-            for B_min in B_min_vals:
-                results[fom.name][f"Bmin={B_min}"] = {}
-                res = gp_minimize(
-                    lambda cuts, B_min=B_min, fom=fom: objective(cuts, B_min, fom),
-                    dimensions=[gridlims, gridlims],  # [txbbcut, txttcut] ranges
-                    n_calls=40,
-                    random_state=42,
-                    verbose=True,
-                )
-
-                print("Bayesian optimization results:")
-                print("Best limit:", res.fun)
-                print("Optimal cuts:", res.x)
-
-                sig_opt, bg_opt, sig_fail_opt, bg_fail_opt, tf_opt = sig_bkg_f(
-                    years, res.x[0], res.x[1], mbb1, mbb2, mtt1, mtt2
-                )
-
-                results[fom.name][f"Bmin={B_min}"] = Optimum(
-                    limit=res.fun,
-                    signal_yield=sig_opt,
-                    bkg_yield=bg_opt,
-                    hmass_fail=sig_fail_opt,
-                    sideband_fail=bg_fail_opt,
-                    transfer_factor=tf_opt,
-                    cuts=(res.x[0], res.x[1]),
-                )
-
-        return results
-
-    def perform_optimization(self, years, plot=True, evaluation=False):
-        
+    def perform_optimization(self, years, use_thresholds=False, plot=True, evaluation=False, b_min_vals=None):
         foms = [FOMS["2sqrtB_S_var"]]
 
         if evaluation:
@@ -856,23 +918,45 @@ class Analyser:
             txttcut = self.channel.txtt_BDT_cut if self.use_bdt else self.channel.txtt_cut
             # Make one-point grid
             results = self.grid_search_opt(
-                years, gridsize, gridlims=gridlims, B_min_vals=b_min_vals, foms=foms, txbbcut=txbbcut, txttcut=txttcut
+                years,
+                gridsize,
+                gridlims=gridlims,
+                B_min_vals=b_min_vals,
+                foms=foms,
+                use_thresholds=True,
+                txbbcut=txbbcut,
+                txttcut=txttcut,
             )
         else:
             # default fom optimization parameters
-            b_min_vals = [1, 5, 8, 12]
-            gridlims = (0.7, 1)
+            if b_min_vals is None:
+                b_min_vals = [1, 3, 5] if self.test_mode else np.arange(1, 17, 2)
+
+            if self.test_mode:
+                gridlims = (0.3, 1) if use_thresholds else (0.2, 0.9)
+            else:
+                gridlims = (0.7, 1) if use_thresholds else (0.25, 0.75)
+
             gridsize = 20 if self.test_mode else 50
+
             results = self.grid_search_opt(
-                years, gridsize, gridlims=gridlims, B_min_vals=b_min_vals, foms=foms
+                years,
+                gridsize,
+                gridlims=gridlims,
+                B_min_vals=b_min_vals,
+                foms=foms,
+                use_thresholds=use_thresholds,
             )
-            
+
+        successful_b_min_vals = [] 
+
         saved_files = []
         for fom in foms:
             bmin_dfs = []
             for B_min in b_min_vals:
                 optimum_result = results.get(fom.name, {}).get(f"Bmin={B_min}")
                 if optimum_result:
+                    successful_b_min_vals.append(B_min)
                     bmin_df = self.as_df(optimum_result, years, label=f"Bmin={B_min}")
                     bmin_dfs.append(bmin_df)
 
@@ -886,7 +970,10 @@ class Analyser:
             print(self.channel.label, "\n", fom_df.to_markdown())
 
             # Save separate CSV file for each FOM
-            output_csv = self.plot_dir / f"{'_'.join(years)}_opt_results_{fom.name}.csv"
+            output_csv = (
+                self.plot_dir
+                / f"{'_'.join(years)}_opt_results_{fom.name}_{'thresh' if use_thresholds else 'sigeff'}.csv"
+            )
             fom_df.to_csv(output_csv)
             saved_files.append(output_csv)
             print(f"Saved {fom.name} results to: {output_csv}")
@@ -900,88 +987,46 @@ class Analyser:
             print(f"  - {file}")
 
         if plot:
-            plt.rcdefaults()
-            plt.style.use(hep.style.CMS)
-            hep.style.use("CMS")
-            fig, ax = plt.subplots(figsize=(10, 10))
-            hep.cms.label(
-                ax=ax,
-                label="Work in Progress",
-                data=True,
-                year="2022-23" if years == hh_vars.years else "+".join(years),
-                com="13.6",
-                fontsize=13,
-                lumi=f"{np.sum([hh_vars.LUMI[year] for year in years]) / 1000:.1f}",
-            )
+            while len(successful_b_min_vals) > 4:
+                successful_b_min_vals = successful_b_min_vals[::2]
 
-            colors = ["orange", "r", "purple", "b"]
-            markers = ["x", "o", "s", "D"]
-
-            i = 0
-            for B_min, c, m in zip(b_min_vals, colors, markers):
-                optimum = results[foms[0].name][f"Bmin={B_min}"]  # only plot the first FOM
-                if i == 0:
-                    # Assuming all optimums have same cut and signal maps
-                    sigmap = ax.contourf(
-                        optimum.BBcut, optimum.TTcut, optimum.sig_map, levels=20, cmap="viridis"
-                    )
-                    i += 1
-
-                if B_min == 1:
-                    ax.scatter(
-                        optimum.cuts[0], optimum.cuts[1], color=c, label="Global optimum", marker=m
-                    )
-                else:
-                    ax.contour(
-                        optimum.BBcut,
-                        optimum.TTcut,
-                        ~optimum.sel_B_min,
-                        colors=c,
-                        linestyles="dashdot",
-                    )
-                    # proxy = Line2D([0], [0], color=c, label=f"B<{B_min}", linestyle="dashdot")
-                    ax.scatter(
-                        optimum.cuts[0],
-                        optimum.cuts[1],
-                        color=c,
-                        label=f"Optimum $B\\geq {B_min}$",
-                        marker=m,
-                    )
-
-            ax.set_xlabel(f"{self.bb_disc} cut")
-            ax.set_ylabel(
-                f"BDTScore{self.taukey} vs All" if self.use_bdt else f"X{self.taukey} vs QCDTop cut"
-            )
-            cbar = plt.colorbar(sigmap, ax=ax)
-            cbar.set_label("Signal efficiency" if optimum.sig_normalized else "Signal yield")
-            handles, labels = ax.get_legend_handles_labels()
-            # handles.append(proxy)
-            ax.legend(handles=handles, loc="lower left")
-
-            text = self.channel.label + "\nFOM: " + foms[0].label
-
-            ax.text(
-                0.05,
-                0.72,
-                text,
-                transform=ax.transAxes,
-                fontsize=20,
-                fontproperties="Tex Gyre Heros",
-            )
-
-            plt.savefig(
-                self.plot_dir / f"{'_'.join(years)}.pdf",
-                bbox_inches="tight",
-            )
-            plt.savefig(
-                self.plot_dir / f"{'_'.join(years)}.png",
-                bbox_inches="tight",
-            )
+            if use_thresholds:
+                plot_optimization_thresholds(
+                    results=results,
+                    years=years,
+                    b_min_vals=successful_b_min_vals,
+                    foms=foms,
+                    channel=self.channel,
+                    save_path=self.plot_dir / f"{'_'.join(years)}_thresholds",
+                    show=False,
+                )
+            else:
+                plot_optimization_sig_eff(
+                    results=results,
+                    years=years,
+                    b_min_vals=successful_b_min_vals,
+                    foms=foms,
+                    channel=self.channel,
+                    save_path=self.plot_dir / f"{'_'.join(years)}_sigeff",
+                    show=False,
+                    use_log_scale=False,
+                    clip_value=100,
+                )
+                plot_optimization_sig_eff(
+                    results=results,
+                    years=years,
+                    b_min_vals=successful_b_min_vals,
+                    foms=foms,
+                    channel=self.channel,
+                    save_path=self.plot_dir / f"{'_'.join(years)}_sigeff_log",
+                    show=False,
+                    use_log_scale=True,
+                )
 
     def study_foms(self, years):
         b_min_vals = np.arange(1, 17, 2)
         gridlims = (0.7, 1)
-        gridsize = 10 if self.test_mode else 50
+        gridsize = 10 if self.test_mode else 30
 
         foms = [FOMS["2sqrtB_S_var"], FOMS["punzi"]]
 
@@ -1067,277 +1112,6 @@ class Analyser:
         summary_df.to_csv(plot_path / f"fom_summary_{'_'.join(years)}.csv", index=False)
 
         return
-
-    def study_minimization_method(self, years):
-        """
-        Compare grid search vs Bayesian optimization methods for limit minimization.
-
-        This method:
-        1. Runs both grid search and Bayesian optimization for different B_min values
-        2. Measures execution time for each method
-        3. Compares the resulting limits and optimal cuts
-        4. Creates plots and summary tables
-        """
-        import time
-
-        # Configuration parameters
-        b_min_vals = [1, 2]  # np.arange(1, 17, 2)  # [1, 3, 5, 7, 9, 11, 13, 15]
-        gridlims = (0.7, 1.0)
-        gridsize = 20 if self.test_mode else 50
-        bayesian_calls = 100
-        foms = [FOMS["2sqrtB_S_var"]]
-
-        # Results storage
-        results = {"grid_search": {}, "bayesian": {}}
-
-        # Timing storage
-        timing_results = {"grid_search": {}, "bayesian": {}}
-
-        print("Starting minimization method comparison...")
-        print(f"Testing B_min values: {b_min_vals}")
-        print(f"Grid search: {gridsize}x{gridsize} grid")
-        print(f"Bayesian optimization: {bayesian_calls} function calls")
-
-        # Bayesian Optimization
-        print("  Running Bayesian optimization...")
-        start_time = time.perf_counter()
-        bayesian_results = self.bayesian_opt(
-            years=years, B_min_vals=b_min_vals, gridlims=gridlims, foms=foms
-        )
-        bayesian_time = time.perf_counter() - start_time
-        timing_results["bayesian"] = bayesian_time
-        results["bayesian"] = bayesian_results
-
-        # Grid Search
-        print("  Running grid search...")
-        start_time = time.perf_counter()
-        grid_results = self.grid_search_opt(
-            years=years, gridsize=gridsize, gridlims=gridlims, B_min_vals=b_min_vals, foms=foms
-        )
-        grid_time = time.perf_counter() - start_time
-        timing_results["grid_search"] = grid_time
-        results["grid_search"] = grid_results
-
-        print(f"  Grid search time: {grid_time:.2f}s")
-        print(f"  Bayesian time: {bayesian_time:.2f}s")
-        print(f"  Speedup: {grid_time/bayesian_time:.2f}x")
-
-        # Create comparison plots
-        self._plot_minimization_comparison(results, timing_results, b_min_vals, foms, years)
-
-        # Create summary table
-        self._create_minimization_summary(results, timing_results, b_min_vals, foms, years)
-
-        print("\nMinimization method comparison completed!")
-        return results, timing_results
-
-    def _plot_minimization_comparison(self, results, timing_results, b_min_vals, foms, years):
-        """
-        Create comparison plots for grid search vs Bayesian optimization.
-        """
-        plt.rcdefaults()
-        plt.style.use(hep.style.CMS)
-        hep.style.use("CMS")
-
-        # Create subplots: timing comparison and limit comparison
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
-
-        colors = ["blue", "red", "green", "orange"]
-        markers = ["o", "s", "D", "^"]
-
-        # Plot 1: Timing comparison
-        for i, method in enumerate(["grid_search", "bayesian"]):
-            times = [timing_results[method][B_min] for B_min in b_min_vals]
-            ax1.plot(
-                b_min_vals,
-                times,
-                color=colors[i],
-                marker=markers[i],
-                linewidth=2,
-                markersize=8,
-                label=f"{method.replace('_', ' ').title()}",
-            )
-
-        ax1.set_xlabel("B_min (background constraint)")
-        ax1.set_ylabel("Execution time (seconds)")
-        ax1.set_title("Execution Time Comparison")
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-
-        # Plot 2: Limit comparison for each FOM function
-        for i, fom in enumerate(foms):
-            fom_name = fom.name
-
-            # Grid search limits
-            grid_limits = []
-            bayesian_limits = []
-
-            for B_min in b_min_vals:
-                grid_limit = results["grid_search"][fom.name][f"Bmin={B_min}"].limit
-                bayesian_limit = results["bayesian"][fom.name][f"Bmin={B_min}"].limit
-                grid_limits.append(grid_limit)
-                bayesian_limits.append(bayesian_limit)
-
-            # Plot grid search results
-            ax2.plot(
-                b_min_vals,
-                grid_limits,
-                color=colors[0],
-                marker=markers[0],
-                linewidth=2,
-                markersize=8,
-                label=f"Grid Search ({fom_name})" if i == 0 else "",
-            )
-
-            # Plot Bayesian results
-            ax2.plot(
-                b_min_vals,
-                bayesian_limits,
-                color=colors[1],
-                marker=markers[1],
-                linewidth=2,
-                markersize=8,
-                label=f"Bayesian ({fom_name})" if i == 0 else "",
-            )
-
-        ax2.set_xlabel("B_min (background constraint)")
-        ax2.set_ylabel("Limit")
-        ax2.set_title("Limit Comparison")
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-
-        # Add CMS label
-        hep.cms.label(
-            ax=ax1,
-            label="Work in Progress",
-            data=True,
-            year="2022-23" if years == hh_vars.years else "+".join(years),
-            com="13.6",
-            fontsize=13,
-            lumi=f"{np.sum([hh_vars.LUMI[year] for year in years]) / 1000:.1f}",
-        )
-
-        # Add channel label
-        ax1.text(
-            0.05,
-            0.95,
-            self.channel.label,
-            transform=ax1.transAxes,
-            fontsize=16,
-            fontproperties="Tex Gyre Heros",
-            verticalalignment="top",
-        )
-
-        # Save plots
-        plot_path = self.plot_dir / "minimization_comparison"
-        plot_path.mkdir(parents=True, exist_ok=True)
-
-        plt.savefig(
-            plot_path / f"minimization_comparison_{'_'.join(years)}.pdf", bbox_inches="tight"
-        )
-        plt.savefig(
-            plot_path / f"minimization_comparison_{'_'.join(years)}.png", bbox_inches="tight"
-        )
-        plt.close()
-
-        print(f"Comparison plots saved to {plot_path}")
-
-    def _create_minimization_summary(self, results, timing_results, b_min_vals, foms, years):
-        """
-        Create a comprehensive summary table of the comparison results.
-        """
-        summary_data = []
-
-        for B_min in b_min_vals:
-            for fom in foms:
-                fom_name = fom.name
-
-                row = {"B_min": B_min, "FOM_function": fom_name}
-
-                # Grid search results
-                grid_opt = results["grid_search"][fom_name][f"Bmin={B_min}"]
-                row.update(
-                    {
-                        "grid_time": timing_results["grid_search"][B_min],
-                        "grid_limit": grid_opt.limit,
-                        "grid_sig_yield": grid_opt.signal_yield,
-                        "grid_bkg_yield": grid_opt.bkg_yield,
-                        "grid_cuts": f"({grid_opt.cuts[0]:.3f}, {grid_opt.cuts[1]:.3f})",
-                        "grid_tf": grid_opt.transfer_factor,
-                    }
-                )
-
-                # Bayesian results
-                bayesian_opt = results["bayesian"][fom_name][f"Bmin={B_min}"]
-                row.update(
-                    {
-                        "bayesian_time": timing_results["bayesian"][B_min],
-                        "bayesian_limit": bayesian_opt.limit,
-                        "bayesian_sig_yield": bayesian_opt.signal_yield,
-                        "bayesian_bkg_yield": bayesian_opt.bkg_yield,
-                        "bayesian_cuts": f"({bayesian_opt.cuts[0]:.3f}, {bayesian_opt.cuts[1]:.3f})",
-                        "bayesian_tf": bayesian_opt.transfer_factor,
-                    }
-                )
-
-                # Calculate differences
-                if not np.isnan(row["grid_limit"]) and not np.isnan(row["bayesian_limit"]):
-                    row["limit_diff"] = row["bayesian_limit"] - row["grid_limit"]
-                    row["limit_ratio"] = row["bayesian_limit"] / row["grid_limit"]
-                    row["time_ratio"] = row["grid_time"] / row["bayesian_time"]
-                else:
-                    row["limit_diff"] = np.nan
-                    row["limit_ratio"] = np.nan
-                    row["time_ratio"] = np.nan
-
-                summary_data.append(row)
-
-        summary_df = pd.DataFrame(summary_data)
-
-        # Save summary table
-        plot_path = self.plot_dir / "minimization_comparison"
-        plot_path.mkdir(parents=True, exist_ok=True)
-        summary_df.to_csv(plot_path / f"minimization_summary_{'_'.join(years)}.csv", index=False)
-
-        # Print summary statistics
-        print("\n" + "=" * 80)
-        print("MINIMIZATION METHOD COMPARISON SUMMARY")
-        print("=" * 80)
-
-        for fom in foms:
-            fom_name = fom.name
-            print(f"\nResults for {fom_name}:")
-
-            # Filter data for this FOM function
-            fom_data = summary_df[summary_df["FOM_function"] == fom_name]
-
-            if not fom_data.empty:
-                # Time comparison
-                avg_grid_time = fom_data["grid_time"].mean()
-                avg_bayesian_time = fom_data["bayesian_time"].mean()
-                avg_speedup = fom_data["time_ratio"].mean()
-
-                print("  Average execution time:")
-                print(f"    Grid search: {avg_grid_time:.2f}s")
-                print(f"    Bayesian: {avg_bayesian_time:.2f}s")
-                print(f"    Average speedup: {avg_speedup:.2f}x")
-
-                # Limit comparison
-                avg_limit_ratio = fom_data["limit_ratio"].mean()
-                print(f"  Average limit ratio (Bayesian/Grid): {avg_limit_ratio:.3f}")
-
-                # Best results
-                best_grid_idx = fom_data["grid_limit"].idxmin()
-                best_bayesian_idx = fom_data["bayesian_limit"].idxmin()
-
-                print(
-                    f"  Best grid search limit: {fom_data.loc[best_grid_idx, 'grid_limit']:.3f} (B_min={fom_data.loc[best_grid_idx, 'B_min']})"
-                )
-                print(
-                    f"  Best Bayesian limit: {fom_data.loc[best_bayesian_idx, 'bayesian_limit']:.3f} (B_min={fom_data.loc[best_bayesian_idx, 'B_min']})"
-                )
-
-        print("\n" + "=" * 80)
 
     @staticmethod
     def as_df(optimum, years, label="optimum"):
@@ -1433,7 +1207,8 @@ class Analyser:
         
 def analyse_channel(
     years,
-    channel,
+    sig_key,
+    channel_key,
     test_mode,
     use_bdt,
     modelname,
@@ -1446,9 +1221,11 @@ def analyse_channel(
     sensitivity_dir=None,
 ):
 
-    print(f"Processing channel: {channel}. Test mode: {test_mode}.")
+    print(f"Processing signal: {sig_key} channel: {channel_key}. Test mode: {test_mode}.")
 
-    analyser = Analyser(years, channel, test_mode, use_bdt, modelname, main_plot_dir, at_inference, llsl_weight=llsl_weight, bb_disc=bb_disc, dataMinusSimABCD=dataMinusSimABCD)
+    analyser = Analyser(
+        years, sig_key, channel_key, test_mode, use_bdt, modelname, main_plot_dir, at_inference, llsl_weight=llsl_weight, bb_disc=bb_disc, dataMinusSimABCD=dataMinusSimABCD
+    )
 
     analyser.load_data()
 
@@ -1461,7 +1238,7 @@ def analyse_channel(
         analyser.plot_mass(years)
     if "sensitivity" in actions:
         analyser.prepare_sensitivity(years)
-        analyser.perform_optimization(years)
+        analyser.perform_optimization(years, use_thresholds=False)  # Temporary but to save time
     if "fom_study" in actions:
         analyser.prepare_sensitivity(years)
         analyser.study_foms(years)
@@ -1489,6 +1266,12 @@ if __name__ == "__main__":
         help="List of years to include in the analysis",
     )
     parser.add_argument(
+        "--signals",
+        nargs="+",
+        default=["ggfbbtt"],
+        help="List of signals to run (default: ggf)",
+    )
+    parser.add_argument(
         "--channels",
         nargs="+",
         default=["hh", "hm", "he"],
@@ -1501,7 +1284,7 @@ if __name__ == "__main__":
         help="Run in test mode (reduced data size)",
     )
     parser.add_argument(
-        "--use_bdt", action="store_true", default=False, help="Use BDT for sensitivity study"
+        "--use-bdt", action="store_true", default=False, help="Use BDT for sensitivity study"
     )
     parser.add_argument(
         "--modelname",
@@ -1511,7 +1294,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--at-inference",
         action="store_true",
-        default=True,
+        default=False,
         help="Compute BDT predictions at inference time",
     )
     parser.add_argument(
@@ -1520,6 +1303,12 @@ if __name__ == "__main__":
         choices=["compute_rocs", "plot_mass", "sensitivity", "fom_study", "minimization_study", "sensitivity_evaluation"],
         required=True,
         help="Actions to perform. Choose one or more.",
+    )
+    parser.add_argument(
+        "--use-thresholds",
+        action="store_true",
+        default=False,
+        help="Use thresholds for optimization",
     )
     parser.add_argument(
         "--plot-dir",
@@ -1572,24 +1361,21 @@ if __name__ == "__main__":
 
 
     args = parser.parse_args()
-        
-    # check: test-mode and use-bdt are mutually exclusive
-    if args.test_mode and args.use_bdt and not args.at_inference:
-        raise ValueError("Test mode and use-bdt are mutually exclusive unless at-inference is True")
-    for channel in args.channels:
-        analyse_channel(
-            years=args.years,
-            channel=channel,
-            test_mode=args.test_mode,
-            use_bdt=args.use_bdt,
-            modelname=args.modelname,
-            main_plot_dir=args.plot_dir,
-            actions=args.actions,
-            at_inference=args.at_inference,
-            llsl_weight=args.llsl_weight,
-            bb_disc=args.bb_disc,
-            dataMinusSimABCD=args.dataMinusSimABCD,
-            sensitivity_dir=args.sensitivity_dir,
-            # txbbcut=args.txbbcut,
-            # txttcut=args.txttcut,
-        )
+
+    for sig_key in args.signals:
+        for channel_key in args.channels:
+            analyse_channel(
+                years=args.years,
+                sig_key=sig_key,
+                channel_key=channel_key,
+                test_mode=args.test_mode,
+                use_bdt=args.use_bdt,
+                modelname=args.modelname,
+                main_plot_dir=args.plot_dir,
+                actions=args.actions,
+                at_inference=args.at_inference,
+                llsl_weight=args.llsl_weight,
+                bb_disc=args.bb_disc,
+                dataMinusSimABCD=args.dataMinusSimABCD,
+                sensitivity_dir=args.sensitivity_dir,
+            )

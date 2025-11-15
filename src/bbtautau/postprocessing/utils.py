@@ -1,7 +1,7 @@
 """
 General utilities for postprocessing.
 
-Author: Raghav Kansal
+Authors: Raghav Kansal, Ludovico Mori
 """
 
 from __future__ import annotations
@@ -23,6 +23,10 @@ from bbtautau.postprocessing import Samples
 
 
 def get_var(events: pd.DataFrame, bbtt_mask: pd.DataFrame, feat: str):
+    warnings.warn(
+        "Deprecation warning: Should switch to using the LoadedSample class in the future!",
+        stacklevel=1,
+    )
     if feat in events:
         return events[feat].to_numpy().squeeze()
     elif feat.startswith(("bb", "tt")):
@@ -110,7 +114,12 @@ class LoadedSample(utils.LoadedSampleABC):
     e_mask: np.ndarray = None
 
     def get_var(self, feat: str, pad_nan=False):
-        if feat.startswith("ttMuon"):
+        if feat in self.events:
+            if pad_nan:
+                return np.nan_to_num(self.events[feat].to_numpy().squeeze(), nan=PAD_VAL)
+            else:
+                return self.events[feat].to_numpy().squeeze()
+        elif feat.startswith("ttMuon"):
             if self.m_mask is None:
                 raise ValueError(f"m_mask is not set for {self.sample}")
             padded_array = np.full(len(self.events), PAD_VAL)
@@ -128,8 +137,6 @@ class LoadedSample(utils.LoadedSampleABC):
                 .squeeze()
             )
             return padded_array
-        elif feat in self.events:
-            return self.events[feat].to_numpy().squeeze()
 
         elif feat.startswith("bbFatJet"):
             if self.bb_mask is None:
@@ -164,6 +171,16 @@ class LoadedSample(utils.LoadedSampleABC):
                 .to_numpy()[self.tt_mask]
                 .squeeze()
             )
+
+        elif feat.startswith("bbJetAway"):
+            return self.events[feat.replace("bbJetAway", "AK4JetAway")].to_numpy()[
+                :, 0
+            ]  # first col is bb away, second is tt away
+
+        elif feat.startswith("ttJetAway"):
+            return self.events[feat.replace("ttJetAway", "AK4JetAway")].to_numpy()[
+                :, 1
+            ]  # first col is bb away, second is tt away
 
         # Not sure if should pad also this case.
         elif utils.is_int(feat[-1]):
@@ -324,3 +341,8 @@ def singleVarHist(
         utils.blindBins(h, shape_var.blind_window, data_key)
 
     return h
+
+
+def label_transform(classes: list[str], labels: list[str]) -> list[int]:
+    """Transform labels to integers."""
+    return [classes.index(label) for label in labels]

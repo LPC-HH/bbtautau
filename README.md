@@ -91,11 +91,10 @@ python3 -m pip install -e .
 For submitting to condor, all you need is python >= 3.7.
 
 For running locally, follow the same virtual environment setup instructions
-above and install `coffea`
+above and activate the environment.
 
 ```bash
 micromamba activate hh
-pip install coffea
 ```
 
 Clone the repository:
@@ -110,7 +109,7 @@ pip install -e .
 For testing, e.g.:
 
 ```bash
-python src/run.py --samples HHbbtt --subsamples GluGlutoHHto2B2Tau_kl-1p00_kt-1p00_c2-0p00_LHEweights_TuneCP5_13p6TeV_powheg-pythia8 --starti 0 --endi 1 --year 2022 --processor skimmer
+python src/run.py --samples HHbbtt --subsamples GluGlutoHHto2B2Tau_kl-1p00_kt-1p00_c2-0p00 --starti 0 --endi 1 --year 2022 --processor skimmer
 ```
 
 ### Condor jobs
@@ -118,7 +117,7 @@ python src/run.py --samples HHbbtt --subsamples GluGlutoHHto2B2Tau_kl-1p00_kt-1p
 A single sample / subsample:
 
 ```bash
-python src/condor/submit.py --analysis bbtautau --git-branch BRANCH-NAME --site ucsd --save-sites ucsd lpc --processor skimmer --samples HHbbtt --subsamples GluGlutoHHto2B2Tau_kl-1p00_kt-1p00_c2-0p00_LHEweights_TuneCP5_13p6TeV_powheg-pythia8 --files-per-job 5 --tag 24Nov7Signal [--submit]
+python src/condor/submit.py --analysis bbtautau --git-branch BRANCH-NAME --site ucsd --save-sites ucsd lpc --processor skimmer --samples HHbbtt --subsamples  GluGlutoHHto2B2Tau_kl-1p00_kt-1p00_c2-0p00 --files-per-job 5 --tag 24Nov7Signal [--submit]
 ```
 
 Or from a YAML:
@@ -167,7 +166,7 @@ Arguments
 `--years` (list, default: 2022 2022EE 2023 2023BPix): List of years to include in the analysis.
 `--channels` (list, default: hh hm he): List of channels to run (default: all).
 `--test-mode` (flag, default: False): Run in test mode (reduced data size).
-`--use_bdt` (flag, default: False): Use BDT model for sensitivity study.
+`--use-bdt` (flag, default: False): Use BDT model for sensitivity study.
 `--modelname` (str, default: 28May25_baseline): Name of the BDT model to use.
 `--at-inference` (flag, default: False): Compute BDT predictions at inference time.
 `--actions` (list, required): Actions to perform. Choose one or more: `compute_rocs`, `plot_mass`, `sensitivity`, `time-methods`.
@@ -228,6 +227,10 @@ Load a previously trained model (default if neither is specified).
 Script to study the impact of different weight and rescaling rules on BDT performance.
 `--eval-bdt-preds`
 Evaluate BDT predictions on the given data samples and years. Outputs are stored in the data directory as .npy files, and can later be handled through `postprocessing.load_bdt_preds`.
+`--compare-models`
+Compare multiple trained models by overlaying ROC curves and writing a CSV of metrics.
+`--models`
+List of model names to compare when `--compare-models` is set.
 
 **Example: train a new model ``mymodel''**
 ```
@@ -235,9 +238,91 @@ python bdt.py --train --years all --model mymodel
 ```
 Models are stored in global `CLASSIFIER_PATH` defined on top of file.
 
+**Evaluate predictions**
+```bash
+python bdt.py \
+  --eval-bdt-preds \
+  --years 2022 \
+  --samples dyjets qcd ttbarhad ttbarll ttbarsl \
+  --model 28May25_baseline \
+  --signal-key ggfbbtt \
+  --save-dir /writable/output
+```
+This writes `BDT_predictions/<year>/<sample>/<model>_preds.npy` under `--save-dir` (or the default `DATA_DIR`).
 
-** Run predictions **
-Note: define global variable `DATA_PATH` in `bdt.py` for default prediction output directory, or provide a full path in input as .
+**Compare multiple trained models**
+```bash
+python bdt.py \
+  --compare-models \
+  --models 28May25_baseline 29July25_loweta_lowreg \
+  --years 2022 \
+  --signal-key ggfbbtt \
+  --samples dyjets qcd ttbarhad ttbarll ttbarsl \
+  --save-dir comparison_out
+```
+This produces:
+- Overlay ROC plots per signal in `comparison_out/rocs/`
+- A consolidated CSV `comparison_out/comparison_metrics.csv`
+- An index JSON `comparison_out/comparison_index.json`
+
+Notes:
+- Headless/containers: plotting uses a non-interactive backend (Agg), so no display server is needed.
+- If Python cannot resolve internal modules like `Samples`, set `PYTHONPATH` to the repo root, e.g. `export PYTHONPATH=$(pwd):$PYTHONPATH` before running the commands.
+
+
+### Kubernetes: generate BDT jobs from templates
+
+Use `src/bbtautau/kubernetes/jobs/make_from_template.py` to generate Kubernetes job YAMLs for training or model comparison. It fills either `template.yaml` (training) or `template_compare.yaml` (comparison) and writes into `src/bbtautau/kubernetes/bdt_trainings/<tag>/<job_name>.yml`.
+
+Key flags:
+- `--compare-models`: switch to comparison mode (uses `template_compare.yaml`)
+- `--models`: list of model names to compare (required with `--compare-models`)
+- `--model-dirs`: list of per-model output directories mounted under the PVC (e.g. `/bbtautauvol/bdt/<dir>`), same order as `--models`
+- `--years`: years to use for training/comparison (space-separated)
+- `--signal-key`: signal key (e.g. `ggfbbtt`)
+- `--samples`: background sample names to include (space-separated)
+- `--datapath`: data subdirectory on the PVC (joined to `/bbtautauvol`)
+- `--train-args`: extra CLI args forwarded to `bdt.py` (quote this string)
+- `--tt-preselection`: append flag into `train-args`
+- `--job-name`: override auto-generated name (auto-generated names are lowercased)
+- `--tag`: folder under `kubernetes/bdt_trainings/` for output YAMLs
+- `--overwrite`: allow overwriting an existing YAML
+- `--submit`: immediately `kubectl create -f <yaml>` in namespace `cms-ml`
+- `--from-json`: load all args from a JSON file (keys match the CLI flags)
+
+Training mode example:
+```bash
+python src/bbtautau/kubernetes/jobs/make_from_template.py \
+  --name 29July25_loweta_lowreg \
+  --tag no_presel \
+  --signal-key ggfbbtt \
+  --samples dyjets qcd ttbarhad ttbarll ttbarsl \
+  --datapath 25Sep23AddVars_v12_private_signal \
+  --train-args "--years 2022 2023 --model 29July25_loweta_lowreg" \
+  --submit
+```
+This writes `kubernetes/bdt_trainings/no_presel/lm_no_presel_29july25_loweta_lowreg_ggfbbtt.yml` (unless `--job-name` is provided) and submits it. Logs and artifacts are stored under `/bbtautauvol/bdt/<save_dir>`.
+
+Comparison mode example:
+```bash
+python make_from_template.py \
+  --compare-models \
+  --models 20aug25_loweta_lowreg 29july25-loweta-lowreg \
+  --model-dirs 20aug25_loweta_lowreg_ggfbbtt 29july25-loweta-lowreg_ggfbbtt \
+  --signal-key ggfbbtt \
+  --job-name lm_cmp_ggf_july_aug_nopresel
+  --submit
+```
+The script auto-generates `job_name` when not provided:
+- Training: `lm_<tag>_<name>_<signal_key>` (lowercased, hyphens -> underscores for the YAML filename)
+- Comparison: `cmp_<tag>_<model1>-<model2>-..._<signal_key>` (lowercased)
+Hyphens are normalized to underscores in file names; for Kubernetes object names they are converted back to hyphens.
+
+You can also place all arguments in a JSON file and run:
+```bash
+python src/bbtautau/kubernetes/jobs/make_from_template.py --from-json my_job.json --submit
+```
+Where `my_job.json` can contain fields like `compare-models`, `models`, `model-dirs`, `years`, `tag`, `signal_key`, `samples`, `datapath`, `train_args`, etc.
 
 
 ### Templates
