@@ -414,7 +414,7 @@ def main(args: argparse.Namespace):
     print(f"\nCompleted processing all bmin values: {args.bmin}")
 
 
-def base_filter(test_mode: bool = False, bb_disc: str = "ak8FatJetParTXbbvsQCD"):
+def base_filter(test_mode: bool = False):
     """
     Returns the base filters for the data, signal, and background samples.
     """
