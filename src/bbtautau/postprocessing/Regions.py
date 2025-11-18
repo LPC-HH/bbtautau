@@ -12,10 +12,12 @@ from bbtautau.bbtautau_utils import Channel
 from bbtautau.postprocessing.utils import Region
 
 
-def get_selection_regions(channel: Channel, use_bdt: bool = False, bb_disc: str = "ak8FatJetParTXbbvsQCD"):
+def get_selection_regions(channel: Channel, use_bdt: bool = False, bb_disc: str = "ak8FatJetParTXbbvsQCDTop"):
     # parse bb discriminator
     if bb_disc.startswith("ak8"):
-        bb_disc = "bb" + bb_disc[len("ak8"):] 
+        bb_disc = "bb" + bb_disc[len("ak8"):]
+    else:
+        raise ValueError(f"bb_disc must start with 'ak8', but got: {bb_disc}")
     pass_cuts = {
         "bbFatJetPt": [250, CUT_MAX_VAL],
         "ttFatJetPt": [200, CUT_MAX_VAL],
