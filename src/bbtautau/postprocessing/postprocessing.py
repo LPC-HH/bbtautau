@@ -111,7 +111,7 @@ control_plot_vars = (
         )
         for i in range(3)
     ]
-    # ak8FatJetParTXbbvsQCD
+    # ak8FatJetParXbbvsQCD
     + [
         ShapeVar(
             var=f"ak8FatJetParTXbbvsQCD{i}",
@@ -249,7 +249,7 @@ def main(args: argparse.Namespace):
         args.bgs = {bkey: b for bkey, b in SAMPLES.items() if b.get_type() == "bg"}
 
     if args.templates:
-        filters = bb_filters(num_fatjets=3, bb_cut=0.3)
+        filters = bb_filters(num_fatjets=3, bb_cut=0.3, bb_disc=args.bb_disc)
         print("Using bb filters")
         # filters = tt_filters(BASE_CHANNEL, filters, num_fatjets=3, tt_cut=0.3)
     else:
@@ -286,7 +286,7 @@ def main(args: argparse.Namespace):
     derive_variables(events_dict, BASE_CHANNEL)
 
     print("\nbbtautau assignment")
-    bbtautau_assignment(events_dict, BASE_CHANNEL, agnostic=True)
+    bbtautau_assignment(events_dict, BASE_CHANNEL, agnostic=True, bb_disc=args.bb_disc)
     leptons_assignment(events_dict, dR_cut=1.5)
 
     if args.use_bdt:
@@ -300,6 +300,28 @@ def main(args: argparse.Namespace):
         time_end = time.time()
         print(f"Time taken to predict BDT: {time_end - time_start} seconds")
 
+    systematics: dict[str, dict] = {}
+    systematics_path: Path | None = None
+    if args.template_dir:
+        systematics_path = args.template_dir / f"{args.year}_systematics.pkl"
+
+        if systematics_path.exists() and not args.override_systs:
+            try:
+                with systematics_path.open("rb") as syst_file:
+                    loaded_systematics = pickle.load(syst_file)
+                if isinstance(loaded_systematics, dict):
+                    systematics = copy.deepcopy(loaded_systematics)
+                else:
+                    logger.warning(
+                        "Ignoring systematics file %s with unexpected type %s",
+                        systematics_path,
+                        type(loaded_systematics),
+                    )
+            except (pickle.UnpicklingError, EOFError, AttributeError, ValueError) as exc:
+                logger.warning("Failed to load systematics from %s: %s", systematics_path, exc)
+
+    systematics.setdefault(args.year, {})
+
     # Now process each bmin value
     for bmin in args.bmin:
         print(f"\n{'='*60}")
@@ -308,6 +330,19 @@ def main(args: argparse.Namespace):
 
         # Create a copy of the base channel for this bmin
         CHANNEL = deepcopy(BASE_CHANNEL)
+
+    # TODO: 
+    # if systematics_path is not None:
+    #     try:
+    #         systematics_path.parent.mkdir(parents=True, exist_ok=True)
+    #         with systematics_path.open("wb") as syst_file:
+    #             pickle.dump(systematics, syst_file)
+    #         print("Saved systematics to", systematics_path)
+    #     except OSError as exc:
+    #         logger.warning("Failed to save systematics to %s: %s", systematics_path, exc)
+
+    # del templates
+    # gc.collect()
 
         # Update cuts if sensitivity directory is provided. If not use cuts written in Samples.py (keep denomination in files as bmin1)
         if args.sensitivity_dir is not None:
@@ -358,6 +393,7 @@ def main(args: argparse.Namespace):
             template_dir=template_dir_bmin,
             plot_dir=plot_dir_bmin,
             show=False,
+            bb_disc=args.bb_disc,
         )
 
         if args.template_dir:
@@ -388,25 +424,27 @@ def base_filter(test_mode: bool = False):
         for i in range(len(base_filters)):
             base_filters[i] += [
                 ("('ak8FatJetPhi', '0')", ">=", 2.9),
-                # ("('ak8FatJetParTXbbvsQCD', '0')", ">=", 0.7),
+                # ("('{bb_disc}', '0')", ">=", 0.7),
             ]
 
     return {"data": base_filters, "signal": base_filters, "bg": base_filters}
 
 
 def bb_filters(
-    in_filters: dict[str, list[tuple]] = None, num_fatjets: int = 3, bb_cut: float = 0.3
+    in_filters: dict[str, list[tuple]] = None, num_fatjets: int = 3, bb_cut: float = 0.3,
+    bb_disc: str = "ak8FatJetParTXbbvsQCD",
 ):
     """
     0.3 corresponds to roughly, 85% signal efficiency, 2% QCD efficiency (pT: 250-400, mSD:0-250, mRegLegacy:40-250)
     """
+    print('bb_filter', 'bb_disc', bb_disc)
     if in_filters is None:
-        in_filters = base_filter()
+        in_filters = base_filter(bb_disc=bb_disc)
 
     filters = {}
     for dtype, ifilters_bydtype in in_filters.items():
         filters[dtype] = [
-            ifilter + [(f"('ak8FatJetParTXbbvsQCDTop', '{n}')", ">=", bb_cut)]
+            ifilter + [(f"('{bb_disc}', '{n}')", ">=", bb_cut)]
             for n in range(num_fatjets)
             for ifilter in ifilters_bydtype
         ]
@@ -420,9 +458,10 @@ def tt_filters(
     in_filters: dict[str, list[tuple]] = None,
     num_fatjets: int = 3,
     tt_cut: float = 0.3,
+    bb_disc: str = "ak8FatJetParTXbbvsQCD",
 ):
     if in_filters is None:
-        in_filters = base_filter()
+        in_filters = base_filter(bb_disc=bb_disc)
 
     filters = {}
 
@@ -1004,6 +1043,7 @@ def bbtautau_assignment(
     events_dict: dict[str, pd.DataFrame | LoadedSample],
     channel: Channel = None,
     agnostic: bool = False,
+    bb_disc: str = "ak8FatJetParTXbbvsQCD",
 ):
     """Assign bb and tautau jets per each event."""
 
@@ -1045,7 +1085,7 @@ def bbtautau_assignment(
             )
 
         # assign bb jet as the one with the highest ParTXbbvsQCD score, but prioritize tautau
-        bb_sorted = np.argsort(sample.get_var("ak8FatJetParTXbbvsQCD"), axis=1)
+        bb_sorted = np.argsort(sample.get_var(bb_disc), axis=1)
         bb_highest = bb_sorted[:, -1]
         bb_second_highest = bb_sorted[:, -2]
         bb_pick = np.where(bb_highest == tautau_pick, bb_second_highest, bb_highest)
@@ -1383,6 +1423,7 @@ def _add_bdt_scores(
     multiclass: bool,
     all_outs: bool = True,
     jshift: str = "",
+    llsl_weight: float = 1,
 ):
     """
     Assumes map to be
@@ -1432,8 +1473,8 @@ def _add_bdt_scores(
                     events[f"BDTScore{taukey+jshift}"]
                     + events["BDTScoreQCD"]
                     + events["BDTScoreTThad"]
-                    + events["BDTScoreTTll"]
-                    + events["BDTScoreTTSL"]
+                    + llsl_weight * events["BDTScoreTTll"]
+                    + llsl_weight * events["BDTScoreTTSL"]
                     + events["BDTScoreDY"]
                 ),
                 nan=PAD_VAL,
@@ -1447,6 +1488,7 @@ def compute_bdt_preds(
     channel: Channel = None,
     test_mode: bool = False,
     save_dir: Path = None,
+    llsl_weight: float = 1,
 ) -> dict[str, dict[str, np.ndarray]]:
     """Compute BDT predictions for multiple years and samples.
 
@@ -1740,6 +1782,7 @@ def get_templates(
     plot_data: bool = True,
     show: bool = False,
     use_bdt: bool = False,
+    bb_disc: str = "ak8FatJetParTXbbvsQCD",
 ) -> dict[str, Hist]:
     """
     (1) Makes histograms for each region in the ``selection_regions`` dictionary,
@@ -1771,7 +1814,7 @@ def get_templates(
     # do TXbb SFs + uncs. for signals and Hbb samples only
     # txbb_samples = sig_keys + [key for key in bg_keys if key in hbb_bg_keys]
 
-    selection_regions = Regions.get_selection_regions(channel, use_bdt=use_bdt)
+    selection_regions = Regions.get_selection_regions(channel, use_bdt=use_bdt, bb_disc=bb_disc)
 
     for rname, region in selection_regions.items():
         pass_region = rname.startswith("pass")
@@ -2177,6 +2220,14 @@ def parse_args(parser=None):
         default=[1],
         nargs="*",
         type=int,
+    )
+
+    parser.add_argument(
+        "--bb-disc",
+        help="bb discriminator to optimize",
+        default="ak8FatJetParTXbbvsQCD",
+        choices=["ak8FatJetParTXbbvsQCD", "ak8FatJetParTXbbvsQCDTop", "ak8FatJetPNetXbbvsQCDLegacy"],
+        type=str
     )
 
     args = parser.parse_args()
