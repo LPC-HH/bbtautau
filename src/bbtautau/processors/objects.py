@@ -16,6 +16,7 @@ from coffea.nanoevents.methods.nanoaod import (
     JetArray,
     MuonArray,
     TauArray,
+    MissingET,
 )
 
 from bbtautau.HLTs import HLTs
@@ -277,3 +278,315 @@ def good_boostedtaus(events, taus: TauArray):  # noqa: ARG001
 
     tau_sel = (taus.pt > 20) & (abs(taus.eta) < 2.5)
     return taus[tau_sel]
+
+
+def vbf_jets(
+    # from HH4b https://github.com/LPC-HH/HH4b/blob/9d8038bcc31bf1872352e332eff84a4602934b3e/src/HH4b/processors/objects.py#L335
+    jets: JetArray,
+    fatjets: FatJetArray,
+    events,
+    pt: float,
+    id: str,  # noqa: ARG001
+    eta_max: float,
+    dr_fatjets: float,
+    dr_leptons: float,
+    electron_pt: float,
+    muon_pt: float,
+):
+    """Top 2 jets in pT passing the VBF selections"""
+    electrons = events.Electron
+    electrons = electrons[electrons.pt > electron_pt]
+
+    muons = events.Muon
+    muons = muons[muons.pt > muon_pt]
+
+    ak4_sel = (
+        (jets.pt >= pt)
+        & (np.abs(jets.eta) <= eta_max)
+        & (ak.all(jets.metric_table(fatjets) > dr_fatjets, axis=2))
+        & ak.all(jets.metric_table(electrons) > dr_leptons, axis=2)
+        & ak.all(jets.metric_table(muons) > dr_leptons, axis=2)
+    )
+
+    return jets[ak4_sel][:, :2]
+
+
+def ak4_jets_awayfromak8(
+    jets: JetArray,
+    fatjets: FatJetArray,
+    events,
+    pt: float,
+    id: str,  # noqa: ARG001
+    eta_max: float,
+    dr_fatjets: float,
+    dr_leptons: float,
+    electron_pt: float,
+    muon_pt: float,
+    sort_by: str = "btag",
+):
+    """AK4 jets nonoverlapping with AK8 fatjets"""
+    electrons = events.Electron
+    electrons = electrons[electrons.pt > electron_pt]
+
+    muons = events.Muon
+    muons = muons[muons.pt > muon_pt]
+
+    ak4_sel = (
+        (jets.pt >= pt)
+        & (np.abs(jets.eta) <= eta_max)
+        & (ak.all(jets.metric_table(fatjets) > dr_fatjets, axis=2))
+        & ak.all(jets.metric_table(electrons) > dr_leptons, axis=2)
+        & ak.all(jets.metric_table(muons) > dr_leptons, axis=2)
+    )
+
+    # return top 2 jets sorted by btagPNetB
+    if sort_by == "btag":
+        jets_pnetb = jets[ak.argsort(jets.btagPNetB, ascending=False)]
+        return jets_pnetb[ak4_sel][:, :2]
+    # return 2 jets closet to bbFatjet and ttFatjet, respectively
+    elif sort_by == "nearest":
+        jets_away = jets[ak4_sel]
+        bbFatjet = ak.firsts(
+            fatjets[
+                ak.argsort(
+                    fatjets["globalParT_XbbvsQCDTop"],
+                    ascending=False,
+                )
+            ][:, 0:1]
+        )
+
+        ttFatjet = ak.firsts(
+            fatjets[
+                ak.argsort(
+                    sum(
+                        fatjets[f"globalParT_X{tautau}vsQCDTop"]
+                        for tautau in ["tauhtauh", "tauhtaue", "tauhtaum"]
+                    ),
+                    ascending=False,
+                )
+            ][:, 0:1]
+        )
+
+        jet_near_bbFatjet = jets_away[ak.argsort(jets_away.delta_r(bbFatjet), ascending=True)][
+            :, 0:1
+        ]
+        jet_near_ttFatjet = jets_away[ak.argsort(jets_away.delta_r(ttFatjet), ascending=True)][
+            :, 0:1
+        ]
+        return [jet_near_bbFatjet, jet_near_ttFatjet]
+    # return all nonoverlapping jets, no sorting
+    else:
+        return jets[ak4_sel]
+
+#adopted from https://github.com/scikit-hep/coffea/blob/a315da1fa307f1ec0d21c29e908e5b733603d7c0/src/coffea/nanoevents/methods/vector.py#L106
+def delta_r(eta1, phi1, eta2, phi2):
+    deta = eta1 - eta2
+    dphi = (phi1 - phi2 + np.pi) % (2 * np.pi) - np.pi
+    return np.hypot(deta,dphi)
+
+
+def CA_got(met_pt, met_phi, fatjets_mass, fatjets_masscorr, tau0_eta, tau1_eta, tau0_phi, tau1_phi, tau0_pt, tau1_pt):
+    invalid = (
+        (met_pt == -999)
+        | (met_phi == -999)
+        | (fatjets_mass == -999)
+        | (fatjets_masscorr == -999)
+        | (tau0_eta == -999)
+        | (tau1_eta == -999)
+        | (tau0_phi == -999)
+        | (tau1_phi == -999)
+        | (tau0_pt == -999)
+        | (tau1_pt == -999)
+    )
+    # indeed, they are arrays, and if
+    # tau1_phi is [[-999, -999], [1.82, 1.82]]
+    # tau1_phi == -999 is [[True, True], [False, False]]
+
+    dphi1 = met_phi - tau0_phi
+    dphi0 = tau1_phi - met_phi
+    dphi = tau0_phi - tau1_phi
+    
+    sin_dphi0 = np.sin(dphi0)
+    sin_dphi1 = np.sin(dphi1)
+    sin_dphi = np.sin(dphi)
+    
+    pmet_tau0 = np.abs(met_pt * sin_dphi0 / sin_dphi)
+    pmet_tau1 = np.abs(met_pt * sin_dphi1 / sin_dphi)
+
+    denom = np.sqrt(np.abs(tau0_pt/(tau0_pt + pmet_tau0)) * np.abs(tau1_pt/(tau1_pt + pmet_tau1)))
+    denom = ak.where(denom == 0, 1, denom)
+
+    mass = fatjets_mass * fatjets_masscorr / denom
+    mass = ak.where(invalid, -999, mass)
+    return mass
+
+
+def get_CA_MASS(fatjets: FatJetArray, taus: TauArray, met: MissingET, subjets: JetArray):
+
+    init_fields = {
+        "CA_mass_boostedtaus": (-999.0, float),
+        "CA_ntaus_perfatjets": (-1, int),
+        "CA_mass_subjets": (-999.0, float),
+        "CA_nsubjets_perfatjets": (-1, int),
+
+        "CA_mass": (-999.0, float),
+        "CA_msoftdrop": (-999.0, float),
+        "CA_globalParT_massVisApplied": (-999.0, float),
+        "CA_globalParT_massResApplied": (-999.0, float),
+        "CA_particleNet_mass_legacy": (-999.0, float),
+
+
+        "CA_isDauTau": (0, int),
+
+        "CA_dau0_pt": (-999.0, float), "CA_dau1_pt": (-999.0, float),
+        "CA_dau0_eta": (-999.0, float), "CA_dau1_eta": (-999.0, float),
+        "CA_dau0_phi": (-999.0, float), "CA_dau1_phi": (-999.0, float),
+        "CA_dau0_mass": (-999.0, float), "CA_dau1_mass": (-999.0, float),
+    }
+
+        
+    n_events = len(fatjets)
+    n_fatjets = ak.num(fatjets, axis=1)
+    n_taus = ak.num(taus, axis=1)
+
+    n_subjets = len(subjets)
+    
+    
+    has_fatjets = n_fatjets > 0
+    has_taus = n_taus > 0
+    can_match = has_fatjets & has_taus
+    
+
+    for name, (default, dtype) in init_fields.items():
+        fatjets[name] = ak.full_like(fatjets.pt, default, dtype=dtype)
+
+    no2tau = ak.full_like(fatjets.pt, False, dtype=bool) 
+    no2subjet = ak.full_like(fatjets.pt, False, dtype=bool) 
+
+    met_pt = met.pt
+    met_phi = met.phi
+    
+    
+    if ak.any(can_match):
+
+        fatjets_mass = fatjets.mass
+        fatjets_msoftdrop = fatjets.msoftdrop
+
+        fatjets_masscorr = fatjets.particleNet_massCorr
+
+        fatjets_globalParT_massVis = fatjets.globalParT_massVis
+        fatjets_globalParT_massRes = fatjets.globalParT_massRes
+        fatjets_globalParT_massResApplied = fatjets.globalParT_massResApplied
+        fatjets_globalParT_massVisApplied = fatjets.globalParT_massVisApplied
+        fatjets_particleNet_mass_legacy = fatjets.particleNetLegacy_mass
+
+        fake_corr = ak.full_like(fatjets_masscorr, 1.0, dtype=float)
+
+        ###to change to subjet
+        fatjet_subjet_pairs = ak.cartesian([fatjets, subjets], nested=True)
+        fatjets_in_pairs = fatjet_subjet_pairs["0"]
+        subjets_in_pairs = fatjet_subjet_pairs["1"]
+
+        dR_subjets = delta_r(fatjets_in_pairs.eta, fatjets_in_pairs.phi, subjets_in_pairs.eta, subjets_in_pairs.phi)
+
+        close_matches_subjets = dR_subjets < 0.8
+
+        matched_subjets_per_fatjet = subjets_in_pairs[close_matches_subjets]
+
+        n_matched_subjets = ak.num(matched_subjets_per_fatjet, axis=-1)
+        no2subjet = n_matched_subjets < 2
+
+        sorted_indices = ak.argsort(matched_subjets_per_fatjet.pt, axis=-1, ascending=False)
+        sorted_subjets = matched_subjets_per_fatjet[sorted_indices]
+        top2_subjets = ak.pad_none(sorted_subjets, 2, axis=-1)[..., :2]
+
+
+        subjet0_eta = ak.fill_none(top2_subjets.eta[..., 0], -999)
+        subjet1_eta = ak.fill_none(top2_subjets.eta[..., 1], -999)
+        subjet0_phi = ak.fill_none(top2_subjets.phi[..., 0], -999)
+        subjet1_phi = ak.fill_none(top2_subjets.phi[..., 1], -999)
+
+        subjet0_mass = ak.fill_none(top2_subjets.mass[..., 0], -999)
+        subjet1_mass = ak.fill_none(top2_subjets.mass[..., 1], -999)
+
+        subjet0_pt = ak.fill_none(top2_subjets.pt[..., 0], -999)
+        subjet1_pt = ak.fill_none(top2_subjets.pt[..., 1], -999)
+
+
+        mass_subjet = CA_got(met_pt, met_phi, fatjets_mass, fatjets_masscorr, subjet0_eta, subjet1_eta, subjet0_phi, subjet1_phi, subjet0_pt, subjet1_pt)
+        msoftdrop_subjet = CA_got(met_pt, met_phi, fatjets_msoftdrop, fatjets_masscorr, subjet0_eta, subjet1_eta, subjet0_phi, subjet1_phi, subjet0_pt, subjet1_pt)
+
+        # ###
+        globalParT_massVisApplied_subjet = CA_got(met_pt, met_phi, fatjets_globalParT_massVisApplied, fake_corr, subjet0_eta, subjet1_eta, subjet0_phi, subjet1_phi, subjet0_pt, subjet1_pt)
+        globalParT_massResApplied_subjet = CA_got(met_pt, met_phi, fatjets_globalParT_massResApplied, fake_corr, subjet0_eta, subjet1_eta, subjet0_phi, subjet1_phi, subjet0_pt, subjet1_pt)
+        particleNet_mass_legacy_subjet = CA_got(met_pt, met_phi, fatjets_particleNet_mass_legacy, fake_corr, subjet0_eta, subjet1_eta, subjet0_phi, subjet1_phi, subjet0_pt, subjet1_pt)
+
+
+        fatjet_boostedtau_pairs = ak.cartesian([fatjets, taus], nested=True)
+        fatjets_in_pairs = fatjet_boostedtau_pairs["0"]
+        boostedtaus_in_pairs = fatjet_boostedtau_pairs["1"]
+
+        dR = delta_r(fatjets_in_pairs.eta, fatjets_in_pairs.phi, boostedtaus_in_pairs.eta, boostedtaus_in_pairs.phi)
+
+        close_matches = dR < 0.8
+
+        matched_taus_per_fatjet = boostedtaus_in_pairs[close_matches]
+
+        n_matched = ak.num(matched_taus_per_fatjet, axis=-1)
+        no2tau = n_matched < 2
+
+        sorted_indices = ak.argsort(matched_taus_per_fatjet.pt, axis=-1, ascending=False)
+        sorted_taus = matched_taus_per_fatjet[sorted_indices]
+        top2_taus = ak.pad_none(sorted_taus, 2, axis=-1)[..., :2]
+
+
+        tau0_eta = ak.fill_none(top2_taus.eta[..., 0], -999)
+        tau1_eta = ak.fill_none(top2_taus.eta[..., 1], -999)
+        tau0_phi = ak.fill_none(top2_taus.phi[..., 0], -999)
+        tau1_phi = ak.fill_none(top2_taus.phi[..., 1], -999)
+
+        tau0_mass = ak.fill_none(top2_taus.mass[..., 0], -999)
+        tau1_mass = ak.fill_none(top2_taus.mass[..., 1], -999)
+
+        tau0_pt = ak.fill_none(top2_taus.pt[..., 0], -999)
+        tau1_pt = ak.fill_none(top2_taus.pt[..., 1], -999)
+
+
+        mass_boostedtau = CA_got(met_pt, met_phi, fatjets_mass, fatjets_masscorr, tau0_eta, tau1_eta, tau0_phi, tau1_phi, tau0_pt, tau1_pt)
+        msoftdrop_boostedtau = CA_got(met_pt, met_phi, fatjets_msoftdrop, fatjets_masscorr, tau0_eta, tau1_eta, tau0_phi, tau1_phi, tau0_pt, tau1_pt)
+
+        globalParT_massVisApplied_boostedtau = CA_got(met_pt, met_phi, fatjets_globalParT_massVisApplied, fake_corr, tau0_eta, tau1_eta, tau0_phi, tau1_phi, tau0_pt, tau1_pt)
+        globalParT_massResApplied_boostedtau = CA_got(met_pt, met_phi, fatjets_globalParT_massResApplied, fake_corr, tau0_eta, tau1_eta, tau0_phi, tau1_phi, tau0_pt, tau1_pt)
+        particleNet_mass_legacy_boostedtau = CA_got(met_pt, met_phi, fatjets_particleNet_mass_legacy, fake_corr, tau0_eta, tau1_eta, tau0_phi, tau1_phi, tau0_pt, tau1_pt)
+
+        output_map = {
+            "CA_mass": [(~no2subjet, mass_subjet), (~no2tau, mass_boostedtau)],
+            "CA_msoftdrop": [(~no2subjet, msoftdrop_subjet), (~no2tau, msoftdrop_boostedtau)],
+
+            "CA_globalParT_massVisApplied": [(~no2subjet, globalParT_massVisApplied_subjet), (~no2tau, globalParT_massVisApplied_boostedtau)],
+            "CA_globalParT_massResApplied": [(~no2subjet, globalParT_massResApplied_subjet), (~no2tau, globalParT_massResApplied_boostedtau)],
+            "CA_particleNet_mass_legacy": [(~no2subjet, particleNet_mass_legacy_subjet), (~no2tau, particleNet_mass_legacy_boostedtau)],
+
+            #matched 2 HPS boostedtaus: 1; matched 2 subjets: 2; none matching: 0
+            "CA_isDauTau": [(~no2subjet, 2), (~no2tau, 1)],
+
+            "CA_dau0_pt": [(~no2subjet, subjet0_pt), (~no2tau, tau0_pt)],
+            "CA_dau1_pt": [(~no2subjet, subjet1_pt), (~no2tau, tau1_pt)],
+            "CA_dau0_eta": [(~no2subjet, subjet0_eta), (~no2tau, tau0_eta)],
+            "CA_dau1_eta": [(~no2subjet, subjet1_eta), (~no2tau, tau1_eta)],
+            "CA_dau0_phi": [(~no2subjet, subjet0_phi), (~no2tau, tau0_phi)],
+            "CA_dau1_phi": [(~no2subjet, subjet1_phi), (~no2tau, tau1_phi)],
+            "CA_dau0_mass": [(~no2subjet, subjet0_mass), (~no2tau, tau0_mass)],
+            "CA_dau1_mass": [(~no2subjet, subjet1_mass), (~no2tau, tau1_mass)],
+
+            "CA_mass_subjets": [(~no2subjet, mass_subjet)],
+            "CA_mass_boostedtaus": [(~no2tau, mass_boostedtau)],
+            "CA_ntaus_perfatjets": [(~no2tau, n_matched)],
+            "CA_nsubjets_perfatjets": [(~no2subjet, n_matched_subjets)],
+        }
+
+        for field, val_pairs in output_map.items():
+            for condition, value in val_pairs:
+                fatjets[field] = ak.where(condition, value, fatjets[field])
+
+    return fatjets

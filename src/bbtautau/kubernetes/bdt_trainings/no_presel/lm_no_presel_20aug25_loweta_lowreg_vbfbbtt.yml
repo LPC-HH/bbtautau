@@ -1,0 +1,50 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bbtautau-bdt-lm-no-presel-20aug25-loweta-lowreg-vbfbbtt
+  labels:
+    type: bbtautau
+spec:
+  template:
+    spec:
+      containers:
+      - name: bbtautau
+        image: gitlab-registry.nrp-nautilus.io/ludomori99/bbtautau-docker:latest
+        command:
+          - "/bin/bash"
+          - "-c"
+          - >
+            git clone --single-branch --recurse-submodules --branch kube https://github.com/LPC-HH/bbtautau.git /opt/repo/bbtautau &&
+            mkdir -p /bbtautauvol/bdt/no_presel/20aug25_loweta_lowreg_vbfbbtt/ &&
+            pip install -e /opt/repo/bbtautau &&
+            pip install -e /opt/repo/bbtautau/boostedhh &&
+            python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --train --model 20aug25_loweta_lowreg --signal-key vbfbbtt
+            --save-dir /bbtautauvol/bdt/no_presel/20aug25_loweta_lowreg_vbfbbtt --data-path /bbtautauvol/25Sep23AddVars_v12_private_signal/ --force-reload
+            | tee /bbtautauvol/bdt/no_presel/20aug25_loweta_lowreg_vbfbbtt/log.txt
+        volumeMounts:
+        - mountPath: /bbtautauvol
+          name: bbtautauvol
+        resources:
+          limits:
+            memory: 32Gi
+            cpu: "8"
+            nvidia.com/gpu: "1"
+          requests:
+            memory: 32Gi
+            cpu: "6"
+            nvidia.com/gpu: "1"
+      volumes:
+      - name: bbtautauvol
+        persistentVolumeClaim:
+          claimName: bbtautauvol
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values:
+                      - service-02.nrp.mghpcc.org
+      restartPolicy: Never
+  backoffLimit: 0

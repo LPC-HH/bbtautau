@@ -177,10 +177,10 @@ mc_samples = OrderedDict(
 
 mc_samples_sig = OrderedDict(
     [
-        ("bbtt", "ggHH_kl_1_kt_1_13p6TeV_hbbhtauau"),
-        ("bbtt-kl0", "ggHH_kl_0_kt_1_13p6TeV_hbbhtauau"),
-        ("bbtt-kl2p45", "ggHH_kl_2p45_kt_1_13p6TeV_hbbhtauau"),
-        ("bbtt-kl5", "ggHH_kl_5_kt_1_13p6TeV_hbbhtauau"),
+        ("ggfbbtt", "ggHH_kl_1_kt_1_13p6TeV_hbbhtauau"),
+        ("ggfbbtt-kl0", "ggHH_kl_0_kt_1_13p6TeV_hbbhtauau"),
+        ("ggfbbtt-kl2p45", "ggHH_kl_2p45_kt_1_13p6TeV_hbbhtauau"),
+        ("ggfbbtt-kl5", "ggHH_kl_5_kt_1_13p6TeV_hbbhtauau"),
         ("vbfbbtt", "qqHH_CV_1_C2V_1_kl_1_13p6TeV_hbbhtauau"),
         ("vbfbbtt-k2v0", "qqHH_CV_1_C2V_0_kl_1_13p6TeV_hbbhtauau"),
         ("vbfbbtt-kv1p74-k2v1p37-kl14p4", "qqHH_CV_1p74_C2V_1p37_kl_14p4_13p6TeV_hbbhtauau"),
@@ -200,7 +200,7 @@ mc_samples_sig = OrderedDict(
 bg_keys = list(mc_samples.keys())
 
 if args.only_sm:
-    sig_keys_ggf = [f"bbtt{channel.key}" for channel in channels]
+    sig_keys_ggf = [f"ggfbbtt{channel.key}" for channel in channels]
     sig_keys_vbf = [f"vbfbbtt{channel.key}" for channel in channels]
 
 all_sig_keys = SIGNALS_CHANNELS
@@ -259,8 +259,13 @@ nuisance_params = {
     "THU_HH": Syst(
         prior="lnN",
         samples=sig_keys_ggf,
-        value={"bbtt": 1.06, "bbtt-kl0": 1.08, "bbtt-kl2p45": 1.06, "bbtt-kl5": 1.18},
-        value_down={"bbtt": 0.77, "bbtt-kl0": 0.82, "bbtt-kl2p45": 0.75, "bbtt-kl5": 0.87},
+        value={"ggfbbtt": 1.06, "ggfbbtt-kl0": 1.08, "ggfbbtt-kl2p45": 1.06, "ggfbbtt-kl5": 1.18},
+        value_down={
+            "ggfbbtt": 0.77,
+            "ggfbbtt-kl0": 0.82,
+            "ggfbbtt-kl2p45": 0.75,
+            "ggfbbtt-kl5": 0.87,
+        },
         diff_samples=True,
     ),
     # apply 2022 uncertainty to all MC (until 2023 rec.)
@@ -748,20 +753,25 @@ def alphabet_fit(
     # Now do signal regions
     ##########################
 
+    # Can count the bkg just once for all signal regions
+    data_qcd_fail = templates_summed["fail"][data_key, :].sum().value - np.sum(
+        [templates_summed["fail"][bg_key, :].sum().value for bg_key in bg_keys]
+    )
+
     for sr in signal_regions:
         # QCD overall pass / fail efficiency
-        qcd_eff = (
-            templates_summed[sr][data_key, :].sum().value
-            - np.sum([templates_summed[sr][bg_key, :].sum().value for bg_key in bg_keys])
-        ) / (
-            templates_summed["fail"][data_key, :].sum().value
-            - np.sum([templates_summed["fail"][bg_key, :].sum().value for bg_key in bg_keys])
+
+        data_qcd_pass = templates_summed[sr][data_key, :].sum().value - np.sum(
+            [templates_summed[sr][bg_key, :].sum().value for bg_key in bg_keys]
         )
+
+        print(data_qcd_pass, data_qcd_fail)
+        qcd_eff = data_qcd_pass / data_qcd_fail
         # qcd_eff = (
         #     templates_summed[sr][qcd_key, :].sum().value
         #     / templates_summed["fail"][qcd_key, :].sum().value
         # )
-        logging.info(f"qcd eff {qcd_eff:.5f}")
+        logging.info(f"qcd eff {qcd_eff:.8f}")
 
         # transfer factor
         tf_dataResidual = rl.BasisPoly(
@@ -835,42 +845,62 @@ def createDatacardAlphabet(
 
 
 def main(args):
-    model = rl.Model("HHModel")
+    # Get all analysis subfolders in the templates directory
+    base_templates_dir = Path(args.templates_dir)
+    analysis_dirs = [d for d in base_templates_dir.iterdir() if d.is_dir()]
 
-    for channel in channels:
-        # templates per region per year, templates per region summed across years
-        templates_dict, templates_summed = get_templates(
-            f"{args.templates_dir}/{channel.key}", years, args.sig_separate, args.scale_templates
-        )
+    logging.info(f"Found analysis directories: {[d.name for d in analysis_dirs]}")
 
-        # random template from which to extract shape vars
-        sample_templates: Hist = templates_summed[next(iter(templates_summed.keys()))]
+    # Process each analysis subfolder
+    for analysis_dir in analysis_dirs:
+        analysis_name = analysis_dir.name
+        logging.info(f"Processing analysis: {analysis_name}")
 
-        # [mH(bb)]
-        shape_vars = [
-            ShapeVar(
-                name=axis.name,
-                bins=axis.edges,
-                orders={sr: args.nTF[i] for i, sr in enumerate(signal_regions)},
+        # Create a separate model for each analysis
+        model = rl.Model(f"HHModel_{analysis_name}")
+
+        for channel in channels:
+            # Check if channel directory exists in this analysis
+            channel_path = analysis_dir / channel.key
+            if not channel_path.exists():
+                logging.warning(f"Channel {channel.key} not found in {analysis_name}, skipping")
+                continue
+
+            # templates per region per year, templates per region summed across years
+            templates_dict, templates_summed = get_templates(
+                str(channel_path), years, args.sig_separate, args.scale_templates
             )
-            for _, axis in enumerate(sample_templates.axes[1:])
-        ]
 
-        createDatacardAlphabet(args, model, channel, templates_dict, templates_summed, shape_vars)
+            # random template from which to extract shape vars
+            sample_templates: Hist = templates_summed[next(iter(templates_summed.keys()))]
 
-    ##############################################
-    # Save model
-    ##############################################
+            # [mH(bb)]
+            shape_vars = [
+                ShapeVar(
+                    name=axis.name,
+                    bins=axis.edges,
+                    orders={sr: args.nTF[i] for i, sr in enumerate(signal_regions)},
+                )
+                for _, axis in enumerate(sample_templates.axes[1:])
+            ]
 
-    logging.info("rendering combine model")
-    Path(args.cards_dir).mkdir(parents=True, exist_ok=True)
-    out_dir = (
-        Path(args.cards_dir) / args.model_name if args.model_name is not None else args.cards_dir
-    )
-    model.renderCombine(out_dir)
+            createDatacardAlphabet(
+                args, model, channel, templates_dict, templates_summed, shape_vars
+            )
 
-    with Path(f"{out_dir}/model.pkl").open("wb") as fout:
-        pickle.dump(model, fout, 2)  # use python 2 compatible protocol
+        ##############################################
+        # Save model for this analysis
+        ##############################################
+
+        logging.info(f"rendering combine model for {analysis_name}")
+        base_cards_dir = Path(args.cards_dir)
+        out_dir = base_cards_dir / args.model_name / analysis_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        model.renderCombine(out_dir)
+
+        with Path(f"{out_dir}/model.pkl").open("wb") as fout:
+            pickle.dump(model, fout, 2)  # use python 2 compatible protocol
 
 
 main(args)
