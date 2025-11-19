@@ -41,7 +41,7 @@ from bbtautau.postprocessing.postprocessing import (
 )
 from bbtautau.postprocessing.rocUtils import ROCAnalyzer
 from bbtautau.postprocessing.Samples import CHANNELS
-from bbtautau.userConfig import DATA_PATHS, MODEL_DIR, SHAPE_VAR
+from bbtautau.userConfig import DATA_PATHS, MODEL_DIR, SHAPE_VAR, Enhanced_ABCD_SAMPLES
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("boostedhh.utils")
@@ -115,7 +115,20 @@ class Optimum:
 def fom_2sqrtB_S(b_qcd, s, _tf, non_qcd_bg_in_A=0, b_data=None):
     return np.where(s > 0, 2 * np.sqrt(b_qcd * _tf + non_qcd_bg_in_A) / s, -PAD_VAL)
 
-
+# FoM function used in both standard and enhanced ABCD
+# Region definitions:
+#    High  |--------------------------------------|
+#     |    |  A: pass & res  | B: pass & sideband |
+#   score  |--------------------------------------|
+#     |    |  C: fail & res  | D: fail & sideband |
+#    Low   |---resonant-mass-|----mass-sideband---|
+# Arguments:
+# non_qcd_bg_in_A = 0 means standard ABCD
+#    b_qcd = data in region B
+#    tf = derived TF assuming all data in B, C, D are QCD/DY
+# non_qcd_bg_in_A != 0 is used for enhanced ABCD
+#    b_qcd = data-ttbar in region B
+#    tf = TF derived from (data-ttbar) in B, C, D
 def fom_2sqrtB_S_var(b_qcd, s, _tf, non_qcd_bg_in_A=0):
     # even tho the var name is qcd, it is actually data-ttbar
     # TODO: better var names
@@ -189,7 +202,6 @@ class Analyser:
         )
         self.plot_dir.mkdir(parents=True, exist_ok=True)
 
-        # This is hardcoded here
         self.bb_disc_name = bb_disc
         self.tt_disc_name = (
             f"BDTScore{self.taukey}vsAll" if use_bdt else f"ttFatJetParTX{self.taukey}vsQCDTop"
@@ -216,10 +228,10 @@ class Analyser:
                 paths=DATA_PATHS[year],
                 signals=[self.sig_key],
                 channels=[self.channel],
+                samples = Enhanced_ABCD_SAMPLES if self.showNonDataDrivenPortion else None,
                 filters_dict=filters_dict,
                 load_columns=columns,
-                load_bgs=self.showNonDataDrivenPortion,
-                restrict_data_to_channel=~self.showNonDataDrivenPortion,
+                restrict_data_to_channel=not self.showNonDataDrivenPortion,
                 loaded_samples=True,
                 multithread=True,
             )
@@ -483,7 +495,6 @@ class Analyser:
                 self.pttt[year][key] = self.events_dict[year][key].get_var("ttFatJetPt")
 
     def compute_sig_bkg_abcd(self, years, txbbcut, txttcut, mbb1, mbb2, mtt1, mtt2):
-        print("Am I using the new ABCD?", self.dataMinusSimABCD)
         # pass/fail from taggers
         sig_pass = 0  # resonant region pass, signal
         bg_pass_sb = 0  # sideband region pass
@@ -1345,20 +1356,6 @@ if __name__ == "__main__":
         help="Senstivity study directory that contains CSV files having the bb and tt cuts to evaluate (only for sensitivity_evaluation",
         default=None,
     )
-    # deprecated because different channels should have different cuts
-    parser.add_argument(
-        "--txbbcut",
-        help="The cut for the bb discriminator (only for sensitivity_evaluation action)",
-        default=None,
-        type=float,
-    )
-    parser.add_argument(
-        "--txttcut",
-        help="The cut for the tt discriminator (only for sensitivity_evaluation action)",
-        default=None,
-        type=float,
-    )
-
 
     args = parser.parse_args()
 
