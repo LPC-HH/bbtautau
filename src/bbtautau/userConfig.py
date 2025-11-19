@@ -49,7 +49,7 @@ DATA_PATHS = path_dict(DATA_DIR)
 # data_dir_otheryears = "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr24Fix_v12_private_signal"
 # DATA_PATHS = path_dict(data_dir_2022, data_dir_otheryears)
 
-ABCD_SAMPLES = {
+Enhanced_ABCD_SAMPLES = {
     "jetmet": Sample(
         selector="^(JetHT|JetMET)",
         label="JetMET",
@@ -83,11 +83,6 @@ ABCD_SAMPLES = {
     "ttbarll": Sample(
         selector="^TTto2L2Nu",
         label="TT LL",
-        isSignal=False,
-    ),
-    "dyjets": Sample(
-        selector="^DYto2L",
-        label="DY+Jets",
         isSignal=False,
     ),
     "bbtt": Sample(
