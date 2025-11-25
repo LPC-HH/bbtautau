@@ -10,44 +10,57 @@
 # Options
 # --tag: Tag for the templates and plots
 # --year: Year to run on - by default runs on all years
-# --use_bdt: Flag to enable use of BDT in template creation
+# --use-part: Use ParT tagger instead of BDT (maps to --use_ParT in python)
+# --do-vbf: Include VBF signal regions
 # --bmin: Minimum background yield value(s) - supports multiple values (e.g., --bmin 1 5 10)
 # --no-sensitivity-dir: Disable the --sensitivity-dir argument (default: enabled)
+# --test-mode: Run in test mode (reduced data size)
+# --tt-pres: Apply tt preselection
 ####################################################################################################
 
 years=("2022" "2022EE" "2023" "2023BPix")
 channels=("hh" "he" "hm")
-bmin_values=(1)  # Default to single value, can be overridden with --bmin
+bmin_values=(10)  # Default to single value, can be overridden with --bmin
 
 MAIN_DIR="/home/users/lumori/bbtautau"
 SCRIPT_DIR="${MAIN_DIR}/src/bbtautau/postprocessing"
-data_dir_2022="/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr17bbpresel_v12_private_signal"
-data_dir_otheryears="/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr24Fix_v12_private_signal"
-SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2025-07-31/"
+DATA_DIR="/ceph/cms/store/user/lumori/bbtautau/skimmer/25Sep23AddVars_v12_private_signal"
+SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2025-11-24/"
 TAG=""
-USE_BDT=0
+USE_PART=0
+DO_VBF=0
 USE_SENSITIVITY_DIR=1  # Flag to control --sensitivity-dir argument (default: on)
+TEST_MODE=0
+TT_PRES=0
+GGF_MODEL="19oct25_ak4away_ggfbbtt"
+VBF_MODEL="19oct25_ak4away_vbfbbtt"
 
 # Function to display help
 show_help() {
     echo "Usage: $0 --tag TAG [OPTIONS]"
     echo ""
     echo "Required arguments:"
-    echo "  --tag TAG          Tag for the templates and plots"
+    echo "  --tag TAG              Tag for the templates and plots"
     echo ""
     echo "Optional arguments:"
-    echo "  --year YEAR        Year to run on (default: all years)"
-    echo "  --channel CHANNEL  Channel to run on (default: all channels)"
-    echo "  --use_bdt          Enable BDT usage in template creation"
-    echo "  --no-sensitivity-dir  Disable the --sensitivity-dir argument (default: enabled)"
-    echo "  --bmin VALUES      Space-separated list of minimum background yield values"
-    echo "                     Examples: --bmin 1"
-    echo "                              --bmin 1 5 10"
-    echo "                              --bmin 1 2 5 8 10 15 20"
+    echo "  --year YEAR            Year to run on (default: all years)"
+    echo "  --channel CHANNEL      Channel to run on (default: all channels)"
+    echo "  --use-part             Use ParT tagger instead of BDT"
+    echo "  --do-vbf               Include VBF signal regions"
+    echo "  --no-sensitivity-dir   Disable the --sensitivity-dir argument (default: enabled)"
+    echo "  --test-mode            Run in test mode (reduced data size)"
+    echo "  --tt-pres              Apply tt preselection"
+    echo "  --ggf-model MODEL      GGF model name (default: 19oct25_ak4away_ggfbbtt)"
+    echo "  --vbf-model MODEL      VBF model name (default: 19oct25_ak4away_vbfbbtt)"
+    echo "  --bmin VALUES          Space-separated list of minimum background yield values"
+    echo "                         Examples: --bmin 1"
+    echo "                                  --bmin 1 5 10"
+    echo "                                  --bmin 1 2 5 8 10 15 20"
     echo ""
     echo "Examples:"
     echo "  $0 --tag my_analysis --bmin 1 5 10"
-    echo "  $0 --tag my_analysis --year 2022 --channel hh --use_bdt --bmin 1 5 8"
+    echo "  $0 --tag my_analysis --year 2022 --channel hh --use-part --bmin 1 5 8"
+    echo "  $0 --tag my_analysis --do-vbf --bmin 10"
 }
 
 # Parse arguments manually to handle multiple bmin values
@@ -77,12 +90,34 @@ while [[ $# -gt 0 ]]; do
             channels=($1)
             shift
             ;;
-        --use_bdt)
-            USE_BDT=1
+        --use-part)
+            USE_PART=1
+            shift
+            ;;
+        --do-vbf)
+            DO_VBF=1
             shift
             ;;
         --no-sensitivity-dir)
             USE_SENSITIVITY_DIR=0
+            shift
+            ;;
+        --test-mode)
+            TEST_MODE=1
+            shift
+            ;;
+        --tt-pres)
+            TT_PRES=1
+            shift
+            ;;
+        --ggf-model)
+            shift
+            GGF_MODEL=$1
+            shift
+            ;;
+        --vbf-model)
+            shift
+            VBF_MODEL=$1
             shift
             ;;
         --help|-h)
@@ -112,45 +147,69 @@ echo "TAG: $TAG"
 echo "BMIN VALUES: ${bmin_values[*]}"
 echo "YEARS: ${years[*]}"
 echo "CHANNELS: ${channels[*]}"
-echo "USE_BDT: $USE_BDT"
+echo "USE_PART: $USE_PART"
+echo "DO_VBF: $DO_VBF"
 echo "USE_SENSITIVITY_DIR: $USE_SENSITIVITY_DIR"
+echo "TEST_MODE: $TEST_MODE"
+echo "TT_PRES: $TT_PRES"
+echo "GGF_MODEL: $GGF_MODEL"
+echo "VBF_MODEL: $VBF_MODEL"
 
 for year in "${years[@]}"
 do
-    # this needs a more permanent solution
-    if [[ $year == "2022" ]]; then
-        data_dir=$data_dir_2022
-    else
-        data_dir=$data_dir_otheryears
-    fi
-
-    echo $data_dir
+    echo "Data dir: $DATA_DIR"
 
     echo "Templates for $year"
     for channel in "${channels[@]}"
     do
         echo "    Templates for $channel with bmin values: ${bmin_values[*]}"
-        # Build base command
-        base_cmd="python -u ${SCRIPT_DIR}/postprocessing.py --year $year --channel $channel --data-dir $data_dir --plot-dir \"${MAIN_DIR}/plots/Templates/$TAG\" --template-dir \"${MAIN_DIR}/src/bbtautau/postprocessing/templates/$TAG\" --templates"
 
-        # Add --use_bdt if enabled
-        if [[ $USE_BDT -eq 1 ]]; then
-            base_cmd="$base_cmd --use_bdt --model 29July25_loweta_lowreg"
+        # Build command as array to handle spaces and special characters properly
+        cmd=(
+            python -u "${SCRIPT_DIR}/postprocessing.py"
+            --year "$year"
+            --channel "$channel"
+            --data-dir "$DATA_DIR"
+            --plot-dir "${MAIN_DIR}/plots/Templates/$TAG"
+            --template-dir "${MAIN_DIR}/src/bbtautau/postprocessing/templates/$TAG"
+            --templates
+            --ggf-modelname "$GGF_MODEL"
+            --vbf-modelname "$VBF_MODEL"
+        )
+
+        # Add --use_ParT if enabled (use ParT instead of BDT)
+        if [[ $USE_PART -eq 1 ]]; then
+            cmd+=(--use_ParT)
+        fi
+
+        # Add --do-vbf if enabled
+        if [[ $DO_VBF -eq 1 ]]; then
+            cmd+=(--do-vbf)
         fi
 
         # Add --sensitivity-dir if enabled
         if [[ $USE_SENSITIVITY_DIR -eq 1 ]]; then
-            base_cmd="$base_cmd --sensitivity-dir \"$SENSITIVITY_DIR\""
+            cmd+=(--sensitivity-dir "$SENSITIVITY_DIR")
         fi
 
-        # Add bmin values
+        # Add --test-mode if enabled
+        if [[ $TEST_MODE -eq 1 ]]; then
+            cmd+=(--test-mode)
+        fi
 
-        #TODO: This block  needs to be tested, could not be correct
+        # Add --tt-pres if enabled
+        if [[ $TT_PRES -eq 1 ]]; then
+            cmd+=(--tt-pres)
+        fi
 
-        base_cmd=("$base_cmd" --bmin "${bmin_values[@]}")
+        # Add bmin values (passed as multiple arguments)
+        cmd+=(--bmin "${bmin_values[@]}")
+
+        # Print command for debugging
+        echo "    Running: ${cmd[*]}"
+
         # Execute the command
-        # eval $base_cmd
-        "${base_cmd[@]}"
+        "${cmd[@]}"
 
     done
 done

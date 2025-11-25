@@ -3,7 +3,7 @@ from __future__ import annotations
 from boostedhh import hh_vars
 from boostedhh.utils import Sample
 
-from bbtautau.bbtautau_utils import Channel
+from bbtautau.postprocessing.bbtautau_types import Channel
 
 CHANNELS = {  # in alphabetical order
     "he": Channel(
@@ -22,7 +22,16 @@ CHANNELS = {  # in alphabetical order
     "hh": Channel(
         key="hh",
         label=r"$\tau_h\tau_h$",
-        hlt_types=["PNet", "PFJet", "QuadJet", "Parking", "DiTau", "DitauJet", "SingleTau", "MET"],
+        hlt_types=[
+            "PNet",
+            "PFJet",
+            "QuadJet",
+            "Parking",
+            "DiTau",
+            "DitauJet",
+            "SingleTau",
+            "MET",
+        ],  # Probably remove parking
         data_samples=["jetmet", "tau"],
         isLepton=False,
         tagger_label="tauhtauh",
@@ -125,17 +134,18 @@ SAMPLES = {
     ),
 }
 
+# Do not include the unified SM signal below
 SIGNALS = ["ggfbbtt", "vbfbbtt", "vbfbbtt-k2v0"]
-SIGNALS_CHANNELS = SIGNALS.copy()
+SIGNALS_CHANNELS = []
 
 SM_SIGNALS = ["ggfbbtt", "vbfbbtt"]
-SM_SIGNALS_CHANNELS = SM_SIGNALS.copy()
+SM_SIGNALS_CHANNELS = []
 
 sig_keys_ggf = ["ggfbbtt"]
 sig_keys_vbf = ["vbfbbtt", "vbfbbtt-k2v0"]
 
 # add individual bbtt channels
-for signal in SIGNALS.copy():
+for signal in SIGNALS:
     for channel, CHANNEL in CHANNELS.items():
         SAMPLES[f"{signal}{channel}"] = Sample(
             label=SAMPLES[signal].label.replace(r"$\tau\tau$", CHANNEL.label),

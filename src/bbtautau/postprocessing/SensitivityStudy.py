@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import gc
 import logging
-import warnings
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -13,30 +11,24 @@ import mplhep as hep
 import numpy as np
 import pandas as pd
 from boostedhh import hh_vars
-from boostedhh.utils import PAD_VAL
+from boostedhh.utils import PAD_VAL, Sample
 from joblib import Parallel, delayed
 
 from bbtautau.postprocessing import utils
-from bbtautau.postprocessing.bdt_utils import compute_or_load_bdt_preds
 from bbtautau.postprocessing.plotting import (
     plot_optimization_sig_eff,
     plot_optimization_thresholds,
 )
-from bbtautau.postprocessing.postprocessing import (
-    apply_triggers,
-    base_filter,
-    bbtautau_assignment,
-    delete_columns,
-    derive_lepton_variables,
-    derive_variables,
-    get_columns,
-    leptons_assignment,
-    load_samples,
-    tt_filters,
-)
 from bbtautau.postprocessing.rocUtils import ROCAnalyzer
-from bbtautau.postprocessing.Samples import CHANNELS, SM_SIGNALS_CHANNELS
-from bbtautau.userConfig import BDT_EVAL_DIR, DATA_PATHS, MODEL_DIR, SHAPE_VAR
+from bbtautau.postprocessing.Samples import CHANNELS, SM_SIGNALS
+from bbtautau.postprocessing.utils import load_data_channel
+from bbtautau.userConfig import (
+    CHANNEL_ORDERING,
+    PLOT_DIR,
+    PT_CUTS,
+    SHAPE_VAR,
+    SIGNAL_ORDERING,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("boostedhh.utils")
@@ -67,6 +59,23 @@ adaptive_kwargs = {
     "adaptive_bmin": ADAPTIVE_BMIN,
 }
 
+# Define discriminant names
+BB_DISC_NAME = "bbFatJetParTXbbvsQCDTop"
+TT_DISC_NAMES_PART = {  # ParT does not distinguish between signals
+    sig_key: {
+        channel_key: f"ttFatJetParTX{CHANNELS[channel_key].tagger_label}vsQCDTop"
+        for channel_key in CHANNELS
+    }
+    for sig_key in SM_SIGNALS
+}
+TT_DISC_NAMES_BDT = {
+    sig_key: {
+        channel_key: f"BDT{sig_key.removesuffix('tt')}{CHANNELS[channel_key].tagger_label}vsAll"
+        for channel_key in CHANNELS
+    }
+    for sig_key in SM_SIGNALS
+}
+
 
 class FOM:
     def __init__(self, fom_func, label, name):
@@ -75,8 +84,32 @@ class FOM:
         self.name = name
 
 
+def fom_2sqrtB_S(b, s, _tf):
+    return np.where(s > 0, 2 * np.sqrt(b * _tf) / s, np.nan)
+
+
+def fom_2sqrtB_S_var(b, s, _tf):
+    return np.where((b > 0) & (s > 0), 2 * np.sqrt(b * _tf * (1 + _tf)) / s, np.nan)
+
+
+def fom_punzi(b, s, _tf, a=3):
+    """
+    a is the number of sigmas of the test significance
+    """
+    return np.where(s > 0, (np.sqrt(b * _tf) + a / 2) / s, np.nan)
+
+
+FOMS = {
+    "2sqrtB_S": FOM(fom_2sqrtB_S, "$2\\sqrt{B}/S$", "2sqrtB_S"),
+    "2sqrtB_S_var": FOM(fom_2sqrtB_S_var, "$2\\sqrt{B+B^2/\\tilde{B}}/S$", "2sqrtB_S_var"),
+    "punzi": FOM(fom_punzi, "$(\\sqrt{B}+a/2)/S$", "punzi"),
+}
+
+FOMS_TO_OPTIMIZE = [FOMS["2sqrtB_S_var"]]
+
+
 @dataclass
-class Optimum:
+class CutOptimum:
     limit: float
     signal_yield: float
     signal_eff: float
@@ -104,292 +137,195 @@ class Optimum:
 
 
 @dataclass
-class SignalConfig:
-    """Configuration for a signal in multi-signal analysis.
+class SRConfig:
+    """Configuration for a signal region optimization.
 
     This supports defining orthogonal signal regions (e.g., VBF-enriched and GGF-enriched).
     When optimizing one signal, you can exclude events selected by other signals to avoid overlap.
+    Result stored in optima dictionary. Vetos reference other SRConfig objects, vetoing the cuts for the given b_min_for_exclusion.
 
-    Attributes:
-        key: Signal key (e.g., 'ggfbbtt', 'vbfbbtt')
-        modelname: BDT model name for this signal
-        optimize: Whether to optimize cuts for this signal (default: True)
-        bmin_for_exclusion: B_min value to use when extracting cuts for excluding this signal's
-                           region from other signals (default: 10.0)
-
-    Example:
-        # Define VBF and GGF regions where GGF excludes VBF region
-        signals = [
-            SignalConfig(key="vbfbbtt", modelname="vbf_model", optimize=True),
-            SignalConfig(key="ggfbbtt", modelname="ggf_model", optimize=True),
-        ]
-        # After VBF optimization, its cuts at bmin=10 will be used to exclude VBF region from GGF
     """
 
-    key: str
-    modelname: str
-    optimize: bool = True
+    name: str
+    signals: list[str]
+    channel: str
+    bb_disc_name: str
+    tt_disc_name: str
+    optima: dict[str, CutOptimum] = None
+    veto_cuts: dict[str, tuple[float, float, str, str]] = (
+        None  # veto_name -> (bb_cut, tt_cut, bb_disc, tt_disc)
+    )
     bmin_for_exclusion: float = 10.0
 
+    def add_veto_from_optimum(self, veto_sr_config: SRConfig, bmin: float = None):
+        """Extract veto cuts from another SRConfig's optima and add to this region's vetoes.
 
-def fom_2sqrtB_S(b, s, _tf):
-    return np.where(s > 0, 2 * np.sqrt(b * _tf) / s, np.nan)
+        Args:
+            veto_sr_config: The SRConfig of the veto region (must have optima populated)
+            bmin: B_min value to extract cuts from (uses veto's bmin_for_exclusion if None)
+        """
+        if veto_sr_config.optima is None:
+            raise ValueError(
+                f"Veto region '{veto_sr_config.name}' has no optima to extract cuts from"
+            )
 
+        bmin = bmin or veto_sr_config.bmin_for_exclusion
+        bmin_key = f"Bmin={bmin}"
 
-def fom_2sqrtB_S_var(b, s, _tf):
-    return np.where((b > 0) & (s > 0), 2 * np.sqrt(b * _tf * (1 + _tf)) / s, np.nan)
+        # Extract cuts from the default FOM
+        if (
+            "2sqrtB_S_var" not in veto_sr_config.optima
+            or bmin_key not in veto_sr_config.optima["2sqrtB_S_var"]
+        ):
+            raise ValueError(f"Veto region '{veto_sr_config.name}' missing optima for {bmin_key}")
 
+        optimum = veto_sr_config.optima["2sqrtB_S_var"][bmin_key]
+        bb_cut, tt_cut = optimum.cuts
 
-def fom_punzi(b, s, _tf, a=3):
-    """
-    a is the number of sigmas of the test significance
-    """
-    return np.where(s > 0, (np.sqrt(b * _tf) + a / 2) / s, np.nan)
+        # Initialize veto structures if needed
+        if self.veto_cuts is None:
+            self.veto_cuts = {}
 
-
-FOMS = {
-    "2sqrtB_S": FOM(fom_2sqrtB_S, "$2\\sqrt{B}/S$", "2sqrtB_S"),
-    "2sqrtB_S_var": FOM(fom_2sqrtB_S_var, "$2\\sqrt{B+B^2/\\tilde{B}}/S$", "2sqrtB_S_var"),
-    "punzi": FOM(fom_punzi, "$(\\sqrt{B}+a/2)/S$", "punzi"),
-}
+        self.veto_cuts[veto_sr_config.name] = (
+            bb_cut,
+            tt_cut,
+            veto_sr_config.bb_disc_name,
+            veto_sr_config.tt_disc_name[self.channel],
+        )
 
 
 class Analyser:
     def __init__(
         self,
-        years,
-        signals: (
-            list[SignalConfig] | SignalConfig | str
-        ),  # Can be list, single SignalConfig, or legacy str
-        channel_key,
-        test_mode,
-        use_bdt,
-        main_plot_dir,
+        events_dict,
+        sr_config: SRConfig,
+        test_mode: bool | None = None,
+        use_ParT: bool | None = None,
         at_inference=False,
         tt_pres=False,
-        use_sm_signals=True,
-        # Legacy params for backward compatibility
-        modelname: str | None = None,
-        bdt_dir: str | None = None,  # Override MODEL_DIR from userConfig if provided
+        adaptive=False,
+        bdt_dir=None,
+        plot_dir: Path | None = None,
     ):
-        """Initialize Analyser with support for multiple signals.
-
-        Args:
-            years: List of years to analyze
-            signals: Either:
-                - List of SignalConfig objects for multi-signal analysis
-                - Single SignalConfig object
-                - str (legacy): signal key like 'ggfbbtt' (uses modelname param)
-            channel_key: Channel identifier
-            test_mode: Whether in test mode
-            use_bdt: Whether to use BDT (vs ParticleNet)
-            main_plot_dir: Base directory for plots
-            at_inference: Whether at inference time
-            modelname: (Legacy) Model name when signals is a string
-            tt_pres: Whether to use tt preselection
-            use_sm_signals: Whether to use SM signal for sensitivity study (i.e. sum)
-        """
-        self.tt_pres = tt_pres
-        self.channel = CHANNELS[channel_key]
-        self.years = years
+        """Initialize Analyser with support for multiple signals."""
+        self.sr_config = sr_config
+        self.events_dict = events_dict
+        self.years = list(events_dict.keys())
         self.test_mode = test_mode
-        self.use_bdt = use_bdt
+        self.tt_pres = tt_pres
         self.at_inference = at_inference
-        self.model_dir = Path(bdt_dir) if bdt_dir is not None else MODEL_DIR
-        self.taukey = CHANNELS[channel_key].tagger_label
+        self.use_ParT = use_ParT
+        self.adaptive = adaptive
+        self.bdt_dir = bdt_dir
 
-        # Convert legacy API to new multi-signal format
-        if isinstance(signals, str):
-            # Legacy: single signal key passed as string
-            if modelname is None:
-                raise ValueError("modelname must be provided when using legacy string signal key")
-            signals = [SignalConfig(key=signals, modelname=modelname, optimize=True)]
-        elif isinstance(signals, SignalConfig):
-            # Single SignalConfig passed
-            signals = [signals]
+        # Unpack some handy variables
+        self.signals = sr_config.signals
+        self.channel = CHANNELS[sr_config.channel]
+        self.region_name = sr_config.name
 
-        # Store all signals
-        self.signals: dict[str, SignalConfig] = {sig.key: sig for sig in signals}
+        self.sig_keys_channel = [sig + sr_config.channel for sig in sr_config.signals]
+        self.all_keys = self.sig_keys_channel + self.channel.data_samples
 
-        # The "target signal" is the one we're currently optimizing for
-        # In single-signal mode, it's the only signal
-        # In multi-signal mode, it's set dynamically during optimization
-        self.target_signal_key: str | None = None
-        if len(self.signals) == 1:
-            self.target_signal_key = next(iter(self.signals.keys()))
+        print("All keys: ", self.all_keys)
 
-        # Legacy compatibility attributes (use first signal or target signal)
-        first_signal = next(iter(self.signals.values()))
-        self.sig_key = first_signal.key
-        self.sig_key_channel = first_signal.key + channel_key
+        self.bb_disc_name = sr_config.bb_disc_name
+        self.tt_disc_name = sr_config.tt_disc_name
+        self.tt_disc_name_channel = self.tt_disc_name[self.channel.key]
 
-        if use_sm_signals:
-            self.sig_keys_sum = SM_SIGNALS_CHANNELS
-        else:
-            self.sig_keys_sum = [self.sig_key_channel]
+        self.plot_dir = plot_dir
 
-        self.modelname = first_signal.modelname
+    # Can remove in next PR, leave just for record. was only used in plot_mass, but that was updated
 
-        # Create discriminant names for all signals
-        self.bb_disc_name = "bbFatJetParTXbbvsQCDTop"  # Same for all signals
-        self.tt_disc_names: dict[str, str] = {}  # Maps signal_key -> discriminant_name
+    # @staticmethod
+    # def get_jet_vals(vals, mask, nan_to_pad=True):
 
-        for sig_key in self.signals:
-            if use_bdt:
-                # Remove trailing 'tt' from signal key to avoid redundancy in BDT names
-                # e.g., ggfbbtt -> ggfbb, giving BDTggfbbtauhtauh instead of BDTggfbbtttauhtauh
-                signal_base = sig_key.removesuffix("tt") if sig_key.endswith("tt") else sig_key
-                self.tt_disc_names[sig_key] = f"BDT{signal_base}{self.taukey}vsAll"
-            else:
-                self.tt_disc_names[sig_key] = f"ttFatJetParTX{self.taukey}vsQCDTop"
+    #     # TODO: Deprecate this (just need to use get_var properly)
 
-        # Legacy compatibility: tt_disc_name points to first signal's discriminant
-        self.tt_disc_name = self.tt_disc_names[first_signal.key]
+    #     # check if vals is a numpy array
+    #     if not isinstance(vals, np.ndarray):
+    #         vals = vals.to_numpy()
+    #     if len(vals.shape) == 1:
+    #         warnings.warn(
+    #             f"vals is a numpy array of shape {vals.shape}. Ignoring mask.", stacklevel=2
+    #         )
+    #         return vals if not nan_to_pad else np.nan_to_num(vals, nan=PAD_VAL)
+    #     if nan_to_pad:
+    #         return np.nan_to_num(vals[mask], nan=PAD_VAL)
+    #     else:
+    #         return vals[mask]
 
-        # Exclusion cuts: stores optimized cuts for each signal that should be excluded from others
-        # Maps signal_key -> (txbb, txtt) cuts
-        self.exclusion_cuts: dict[str, tuple[float, float]] = {}
-
-        # Event data (shared across all signals)
-        self.events_dict = {year: {} for year in years}
-
-        # Setup plot directory
-        if test_mode:
-            test_dir = "test"
-        elif tt_pres:
-            test_dir = "tt_pres"
-        else:
-            test_dir = "full_presel"
-
-        tt_tagger_name = first_signal.modelname if use_bdt else "ParT"
-        self.plot_dir = (
-            Path(main_plot_dir)
-            / f"plots/SensitivityStudy/{TODAY}/{test_dir}/{first_signal.key}/{tt_tagger_name}/{channel_key}"
-        )
-        self.plot_dir.mkdir(parents=True, exist_ok=True)
-
-    def load_data(self):
-
-        for year in self.years:
-
-            filters_dict = base_filter(self.test_mode)
-
-            # Prefilters already applied in skimmer
-            # filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3)
-
-            if self.tt_pres:
-                filters_dict = tt_filters(
-                    channel=self.channel, in_filters=filters_dict, num_fatjets=3, tt_cut=0.3
-                )
-
-            columns = get_columns(year, triggers_in_channel=self.channel)
-
-            # Load data for ALL signals (creates keys like {signal_key}{channel_key})
-            # This ensures all signal samples are available in events_dict
-            signal_keys = list(self.signals.keys())
-            self.events_dict[year] = load_samples(
-                year=year,
-                paths=DATA_PATHS[year],
-                signals=signal_keys,
-                channels=[self.channel],
-                filters_dict=filters_dict,
-                load_columns=columns,
-                restrict_data_to_channel=True,
-                loaded_samples=True,
-                multithread=True,
-            )
-
-            apply_triggers(self.events_dict[year], year, self.channel)
-            delete_columns(self.events_dict[year], year, channels=[self.channel])
-
-            derive_variables(self.events_dict[year])
-            bbtautau_assignment(self.events_dict[year], agnostic=True)
-            leptons_assignment(self.events_dict[year], dR_cut=1.5)
-            derive_lepton_variables(self.events_dict[year])
-
-        # Load BDT predictions for ALL signals in a single pass (if using BDT)
-        if self.use_bdt:
-            for sig_key, sig_config in self.signals.items():
-                print(
-                    f"Loading BDT predictions for signal: {sig_key} (model: {sig_config.modelname})"
-                )
-                compute_or_load_bdt_preds(
-                    events_dict=self.events_dict,
-                    modelname=sig_config.modelname,
-                    model_dir=self.model_dir,
-                    signal_key=sig_key,
-                    channel=self.channel,
-                    bdt_preds_dir=BDT_EVAL_DIR,
-                    tt_pres=self.tt_pres,
-                    test_mode=self.test_mode,
-                    at_inference=self.at_inference,
-                    all_outs=True,
-                )
-        return
-
-    @staticmethod
-    def get_jet_vals(vals, mask, nan_to_pad=True):
-
-        # TODO: Deprecate this (just need to use get_var properly)
-
-        # check if vals is a numpy array
-        if not isinstance(vals, np.ndarray):
-            vals = vals.to_numpy()
-        if len(vals.shape) == 1:
-            warnings.warn(
-                f"vals is a numpy array of shape {vals.shape}. Ignoring mask.", stacklevel=2
-            )
-            return vals if not nan_to_pad else np.nan_to_num(vals, nan=PAD_VAL)
-        if nan_to_pad:
-            return np.nan_to_num(vals[mask], nan=PAD_VAL)
-        else:
-            return vals[mask]
-
-    def compute_and_plot_rocs(self, years, discs=None):
-        if set(years) != set(self.years):
-            raise ValueError(f"Years {years} not in {self.years}")
-
-        self.events_dict_allyears = utils.concatenate_years(self.events_dict, years)
+    def compute_and_plot_rocs(self, discs=None):
+        years = list(self.events_dict.keys())
+        events_dict_allyears = utils.concatenate_years(self.events_dict)
 
         background_names = self.channel.data_samples
 
+        # Get channel-specific discriminant names
+        channel_label = self.channel.tagger_label
         discs_tt = [
-            f"ttFatJetParTX{self.taukey}vsQCD",
-            f"ttFatJetParTX{self.taukey}vsQCDTop",
+            f"ttFatJetParTX{channel_label}vsQCD",
+            f"ttFatJetParTX{channel_label}vsQCDTop",
         ]
 
         discs_bb = ["bbFatJetParTXbbvsQCD", "bbFatJetParTXbbvsQCDTop", "bbFatJetPNetXbbvsQCDLegacy"]
 
-        if self.use_bdt:
-            # Use signal-specific BDT score names (includes signal key prefix, with trailing 'tt' removed)
-            signal_base = (
-                self.sig_key.removesuffix("tt") if self.sig_key.endswith("tt") else self.sig_key
-            )
-            discs_tt += [
-                f"BDT{signal_base}{self.taukey}vsQCD",
-                f"BDT{signal_base}{self.taukey}vsAll",
-            ]
+        # Add BDT discriminants if using BDT
+        if not self.use_ParT:
+            # For multiple signals, add BDT discriminants for each
+            for sig in self.signals:
+                signal_base = sig.removesuffix("tt") if sig.endswith("tt") else sig
+                discs_tt += [
+                    # f"BDT{signal_base}{channel_label}vsQCD", #can add if needed
+                    f"BDT{signal_base}{channel_label}vsAll",
+                ]
 
         discs_all = discs or (discs_bb + discs_tt)
 
+        print(f"Computing ROCs for signals: {self.sig_keys_channel}")
+
+        # Create a combined signal if multiple signals are present. ROCAnalyzer requires a single signal.
+        # This allows ROC computation for "SM signal" = union of ggF and VBF.
+        if len(self.sig_keys_channel) > 1:
+            combined_signal_name = f"SM_{self.sr_config.channel}"
+            print(
+                f"Combining {len(self.sig_keys_channel)} signals into '{combined_signal_name}' for ROC analysis"
+            )
+
+            # Collect SM signals and concatenate them
+            SM_sample = Sample(label=f"SM bbtt{self.sr_config.channel}", isSignal=True)
+            combined_sample = utils.concatenate_loaded_samples(
+                [events_dict_allyears[key] for key in self.sig_keys_channel], out_sample=SM_sample
+            )
+
+            signals_for_roc = {combined_signal_name: combined_sample}
+            signal_name_for_fill = combined_signal_name
+        else:
+            # Single signal: use as-is
+            signals_for_roc = {
+                sig_key: events_dict_allyears[sig_key] for sig_key in self.sig_keys_channel
+            }
+            signal_name_for_fill = self.sig_keys_channel[0]
+
         self.rocAnalyzer = ROCAnalyzer(
             years=years,
-            signals={self.sig_key_channel: self.events_dict_allyears[self.sig_key_channel]},
-            backgrounds={bkg: self.events_dict_allyears[bkg] for bkg in background_names},
+            signals=signals_for_roc,
+            backgrounds={bkg: events_dict_allyears[bkg] for bkg in background_names},
         )
 
+        # Fill discriminants for the signal (combined or single)
         self.rocAnalyzer.fill_discriminants(
-            discs_all, signal_name=self.sig_key_channel, background_names=background_names
+            discs_all, signal_name=signal_name_for_fill, background_names=background_names
         )
 
         self.rocAnalyzer.compute_rocs()
 
-        # Plot bb
+        # Plot bb discriminants
         self.rocAnalyzer.plot_rocs(title="bbFatJet", disc_names=discs_bb, plot_dir=self.plot_dir)
 
-        # Plot tt
+        # Plot tt discriminants
         self.rocAnalyzer.plot_rocs(title="ttFatJet", disc_names=discs_tt, plot_dir=self.plot_dir)
 
+        # Plot discriminant scores and confusion matrices
         for disc in discs_all:
             self.rocAnalyzer.plot_disc_scores(disc, background_names, self.plot_dir)
             self.rocAnalyzer.plot_disc_scores(
@@ -397,86 +333,77 @@ class Analyser:
             )
             self.rocAnalyzer.compute_confusion_matrix(disc, plot_dir=self.plot_dir)
 
-        print(f"ROCs computed and plotted for years {years} and signals {self.sig_key_channel}.")
+        print(f"ROCs computed and plotted for {signal_name_for_fill} vs backgrounds.")
 
-    def plot_mass(self, years):
-        for key in [self.sig_key_channel, "data"]:
-            print(f"Plotting mass for {key}")
-            if key == self.sig_key_channel:
-                events = pd.concat([self.events_dict[year][key].events for year in years])
-            else:
-                events = pd.concat(
-                    [
-                        self.events_dict[year][dkey].events
-                        for dkey in self.channel.data_samples
-                        for year in years
-                    ]
-                )
+    def plot_mass(self):
+        """Plot mass distributions for signal and data samples."""
+        # Determine which samples to plot
+        plot_configs = [
+            ("signal", self.sig_keys_channel, f"Signal: {'+'.join(self.signals)}"),
+            ("data", self.channel.data_samples, "Data"),
+        ]
+        events_dict_allyears = utils.concatenate_years(self.events_dict)
+
+        for plot_key, sample_keys, label in plot_configs:
+            print(f"Plotting mass for {label}")
+
+            sample_info = Sample(label=label, isSignal=plot_key == "signal")
+            combined_sample = utils.concatenate_loaded_samples(
+                [events_dict_allyears[key] for key in sample_keys], out_sample=sample_info
+            )
+
+            weights = combined_sample.get_var("finalWeight")
 
             bins = np.linspace(0, 250, 50)
-
             fig, axs = plt.subplots(1, 2, figsize=(24, 10))
 
             for i, (jet, jlabel) in enumerate(
                 zip(["bb", "tt"], ["bb FatJet", rf"{self.channel.label} FatJet"])
             ):
                 ax = axs[i]
-                if key == self.sig_key_channel:
-                    mask = np.concatenate(
-                        [
-                            self.events_dict[year][self.sig_key_channel].get_mask(jet)
-                            for year in years
-                        ],
-                        axis=0,
-                    )
-                else:
-                    mask = np.concatenate(
-                        [
-                            self.events_dict[year][dkey].get_mask(jet)
-                            for dkey in self.channel.data_samples
-                            for year in years
-                        ],
-                        axis=0,
-                    )
+                jet_prefix = f"{jet}FatJet"
 
-                print("Shape of events", events.shape)
-                print("Shape of mask", mask.shape)
+                print(f"Plotting mass for {jet} jet")
+                print(f"Number of events: {len(combined_sample.events)}")
 
-                for j, (mkey, mlabel) in enumerate(
+                for j, (var_suffix, mlabel) in enumerate(
                     zip(
-                        [
-                            "ak8FatJetMsd",
-                            "ak8FatJetPNetmassLegacy",
-                            "ak8FatJetParTmassResApplied",
-                            "ak8FatJetParTmassVisApplied",
-                        ],
+                        ["Msd", "PNetmassLegacy", "ParTmassResApplied", "ParTmassVisApplied"],
                         ["SoftDrop", "PNetLegacy", "ParT Res", "ParT Vis"],
                     )
                 ):
+                    # Use LoadedSample.get_var with jet prefix - it automatically applies masks
+                    var_name = f"{jet_prefix}{var_suffix}"
+                    jet_masses = combined_sample.get_var(var_name, pad_nan=True)
+
+                    # Filter out PAD_VAL
+                    valid = jet_masses != PAD_VAL
+
                     ax.hist(
-                        self.get_jet_vals(events[mkey], mask),
+                        jet_masses[valid],
                         bins=bins,
                         histtype="step",
-                        weights=events["finalWeight"],
+                        weights=weights[valid],
                         label=mlabel,
                         linewidth=2,
                         color=plt.cm.tab10.colors[j],
                     )
 
                 ax.vlines(125, 0, ax.get_ylim()[1], linestyle="--", color="k", alpha=0.1)
-                # ax.set_title(jlabel, fontsize=24)
                 ax.set_xlabel("Mass [GeV]")
                 ax.set_ylabel("Events")
                 ax.legend()
                 ax.set_ylim(0)
+
+                # CMS label
                 hep.cms.label(
                     ax=ax,
                     label="Preliminary",
-                    data=key == "data",
-                    year="2022-23" if years == hh_vars.years else "+".join(years),
+                    data=(plot_key == "data"),
+                    year="2022-23" if self.years == hh_vars.years else "+".join(self.years),
                     com="13.6",
                     fontsize=20,
-                    lumi=f"{np.sum([hh_vars.LUMI[year] for year in years]) / 1000:.1f}",
+                    lumi=f"{np.sum([hh_vars.LUMI[year] for year in self.years]) / 1000:.1f}",
                 )
 
                 ax.text(
@@ -485,75 +412,123 @@ class Analyser:
                     jlabel,
                     transform=ax.transAxes,
                     fontsize=24,
-                    # fontproperties="Tex Gyre Heros:bold",
                 )
 
-            # create mass directory if it doesn't exist
+            # Create mass directory if it doesn't exist
             (self.plot_dir / "mass").mkdir(parents=True, exist_ok=True)
 
-            # save plots
+            # Save plots
+            years_str = "_".join(self.years)
             plt.savefig(
-                self.plot_dir / f"mass/{key+'_'+jet+'_'.join(years)}.png",
+                self.plot_dir / f"mass/{plot_key}_{years_str}.png",
                 bbox_inches="tight",
             )
             plt.savefig(
-                self.plot_dir / f"mass/{key+'_'+jet+'_'.join(years)}.pdf",
+                self.plot_dir / f"mass/{plot_key}_{years_str}.pdf",
                 bbox_inches="tight",
             )
+            plt.close(fig)
 
-    def prepare_sensitivity(self, years):
-        if set(years) != set(self.years):
-            raise ValueError(f"Years {years} not in {self.years}")
+    def _concat_years(self, var_name: str, key: str) -> np.ndarray:
+        """Concatenate a variable across all years for a given sample key."""
+        return np.concatenate(
+            [self.events_dict[year][key].get_var(var_name) for year in self.years], axis=0
+        )
 
-        mbbk = SHAPE_VAR["name"]
-        mttk = self.channel.tt_mass_cut[0]
-
+    def _extract_var_with_cuts(
+        self, var_name: str, pt_cuts: dict, concatenate_samples: dict[str, list[str]] = None
+    ) -> dict[str, np.ndarray]:
+        """Extract a variable for all samples with pt cuts applied.
+        If concatenate_samples is provided, concatenate the samples in the given groups.
+        e.g. if concatenate_samples = {"signal": ["ggfbbtthh", "vbfbbtthh"], "background": ["qcd", "ttbar"]}, then the output will be a dictionary with keys "signal" and "background", and values will be the concatenation of the samples in the given groups.
         """
-        for tautau mass regression:
-            -for hh use pnetlegacy
-            -leptons : part Res
-        """
 
-        # TODO: apply pt cuts here!
+        if concatenate_samples is None:
+            return {key: self._concat_years(var_name, key)[pt_cuts[key]] for key in self.all_keys}
+        else:
+            samples = {
+                key: self._concat_years(var_name, key)[pt_cuts[key]] for key in self.all_keys
+            }
+            return {
+                group_name: np.concatenate(
+                    [samples[key] for key in concatenate_samples[group_name]], axis=0
+                )
+                for group_name in concatenate_samples
+            }
 
-        self.txbbs = {year: {} for year in years}
-        self.txtts = {year: {} for year in years}  # Primary signal discriminants
+    def prepare_sensitivity(self):
+        """Prepare discriminants and kinematic variables for optimization."""
 
-        # Multi-signal discriminants: {signal_key: {year: {sample: scores}}}
-        self.txtts_multi: dict[str, dict[str, dict[str, np.ndarray]]] = {
-            sig_key: {year: {} for year in years} for sig_key in self.signals
+        mtt1, mtt2 = self.channel.tt_mass_cut[1]
+
+        # just a safety check
+        if not set(self.all_keys) <= set(self.events_dict[self.years[0]].keys()):
+            raise ValueError(
+                f"All keys {self.all_keys} do not match the keys in the events dictionary {list(self.events_dict[self.years[0]].keys())}"
+            )
+
+        # Compute pt cuts and safety bbmass cuts once for all samples
+        pt_veto_cuts = {
+            key: (self._concat_years("bbFatJetPt", key) > PT_CUTS["bb"])
+            & (self._concat_years("ttFatJetPt", key) > PT_CUTS["tt"])
+            & (self._concat_years(SHAPE_VAR["name"], key) > SHAPE_VAR["range"][0])
+            & (self._concat_years(SHAPE_VAR["name"], key) < SHAPE_VAR["range"][1])
+            for key in self.all_keys
         }
 
-        self.masstt = {year: {} for year in years}
-        self.massbb = {year: {} for year in years}
-        self.ptbb = {year: {} for year in years}
-        self.pttt = {year: {} for year in years}
+        if self.use_ParT:
+            # apply the tt mass cuts in the preprocessing stage if we do not use the BDT
+            for sig_key in self.sig_keys_channel:
+                pt_veto_cuts[sig_key] &= (
+                    self._concat_years(self.channel.tt_mass_cut[0], sig_key) > mtt1
+                ) & (self._concat_years(self.channel.tt_mass_cut[0], sig_key) < mtt2)
+            for key in self.channel.data_samples:
+                pt_veto_cuts[key] &= (
+                    self._concat_years(self.channel.tt_mass_cut[0], key) < mtt1
+                ) | (self._concat_years(self.channel.tt_mass_cut[0], key) > mtt2)
 
-        # Precompute to speedup - load discriminants for all signals
-        for year in years:
-            for key in [self.sig_key_channel] + self.channel.data_samples:
-                # BB discriminant (same for all signals)
-                self.txbbs[year][key] = self.events_dict[year][key].get_var(self.bb_disc_name)
-
-                # Load TT discriminants for all signals
-                for sig_key in self.signals:
-                    disc_name = self.tt_disc_names[sig_key]
-                    self.txtts_multi[sig_key][year][key] = self.events_dict[year][key].get_var(
-                        disc_name
+        # Apply veto cuts: exclude events passing veto region selections
+        if self.sr_config.veto_cuts:
+            for veto_key in self.sr_config.veto_cuts:
+                veto_bb_cut, veto_tt_cut, veto_bb_disc, veto_tt_disc = self.sr_config.veto_cuts[
+                    veto_key
+                ]
+                # Create veto mask
+                print(veto_key, veto_bb_cut, veto_tt_cut, veto_bb_disc, veto_tt_disc)
+                veto_mask = {
+                    key: ~(
+                        (self._concat_years(veto_bb_disc, key) > veto_bb_cut)
+                        & (self._concat_years(veto_tt_disc, key) > veto_tt_cut)
                     )
+                    for key in self.all_keys
+                }
+                # Combine veto mask with pt_cuts
+                pt_veto_cuts = {key: pt_veto_cuts[key] & veto_mask[key] for key in self.all_keys}
 
-                # Primary signal discriminant (for legacy compatibility - use sig_key which is set to first signal)
-                self.txtts[year][key] = self.txtts_multi[self.sig_key][year][key]
+        # Extract main discriminants and kinematics
+        sig_vs_bkg_groups = {
+            "signal": self.sig_keys_channel,
+            "background": self.channel.data_samples,
+        }
+        self.sensitivity_vars = {
+            "txbbs": self._extract_var_with_cuts(
+                self.bb_disc_name, pt_veto_cuts, concatenate_samples=sig_vs_bkg_groups
+            ),
+            "txtts": self._extract_var_with_cuts(
+                self.tt_disc_name_channel, pt_veto_cuts, concatenate_samples=sig_vs_bkg_groups
+            ),
+            "massbb": self._extract_var_with_cuts(
+                SHAPE_VAR["name"], pt_veto_cuts, concatenate_samples=sig_vs_bkg_groups
+            ),
+            "masstt": self._extract_var_with_cuts(
+                self.channel.tt_mass_cut[0], pt_veto_cuts, concatenate_samples=sig_vs_bkg_groups
+            ),
+            "finalWeight": self._extract_var_with_cuts(
+                "finalWeight", pt_veto_cuts, concatenate_samples=sig_vs_bkg_groups
+            ),
+        }
 
-                # Mass and pT variables
-                self.masstt[year][key] = self.events_dict[year][key].get_var(mttk)
-                self.massbb[year][key] = self.events_dict[year][key].get_var(mbbk)
-                self.ptbb[year][key] = self.events_dict[year][key].get_var("bbFatJetPt")
-                self.pttt[year][key] = self.events_dict[year][key].get_var("ttFatJetPt")
-
-    def compute_sig_bkg_abcd(
-        self, years, txbbcut, txttcut, mbb1, mbb2, mtt1, mtt2, apply_exclusions=True
-    ):
+    def compute_sig_bkg_abcd(self, txbbcut, txttcut, mbb1, mbb2):
         """Compute signal and background in ABCD regions.
 
         Args:
@@ -561,165 +536,52 @@ class Analyser:
             txbbcut: TxBB discriminant cut
             txttcut: TxTT discriminant cut
             mbb1, mbb2: bb mass window boundaries
-            mtt1, mtt2: tt mass window boundaries
-            apply_exclusions: Whether to apply exclusion cuts from other signals (default: True).
-                             Set to False when optimizing a signal to define its exclusion region.
+
+            TODO: This function can be optimized by passing the sideband cuts as args
         """
-        # pass/fail from taggers
-        sig_pass = 0  # resonant region pass, signal
-        bg_pass_sb = 0  # sideband region pass, data
-        bg_fail_res = 0  # resonant region fail, data
-        bg_fail_sb = 0  # sideband region fail, data
-        for year in years:
 
-            cut_sig_pass = (
-                (self.txbbs[year][self.sig_key_channel] > txbbcut)
-                & (self.txtts[year][self.sig_key_channel] > txttcut)
-                & (self.massbb[year][self.sig_key_channel] > mbb1)
-                & (self.massbb[year][self.sig_key_channel] < mbb2)
-                & (self.ptbb[year][self.sig_key_channel] > 250)
-                & (self.pttt[year][self.sig_key_channel] > 200)
-            )
-            if not self.use_bdt:
-                cut_sig_pass &= (self.masstt[year][self.sig_key_channel] > mtt1) & (
-                    self.masstt[year][self.sig_key_channel] < mtt2
-                )
+        # build the selections for the signals in the current channel
+        cut_sigs_pass = (
+            (self.sensitivity_vars["txbbs"]["signal"] > txbbcut)
+            & (self.sensitivity_vars["txtts"]["signal"] > txttcut)
+            & (self.sensitivity_vars["massbb"]["signal"] > mbb1)
+            & (self.sensitivity_vars["massbb"]["signal"] < mbb2)
+        )
 
-            # Apply exclusions: exclude regions defined by other signals
-            # (e.g., when optimizing GGF, exclude the VBF-enriched region)
-            if apply_exclusions:
-                for excl_sig_key, excl_cuts in self.exclusion_cuts.items():
-                    if excl_sig_key != self.sig_key:  # Don't exclude the signal we're optimizing
-                        vbb, vtt = excl_cuts
-                        exclusion_region_sig = (
-                            (self.txbbs[year][self.sig_key_channel] > vbb)
-                            & (self.txtts_multi[excl_sig_key][year][self.sig_key_channel] > vtt)
-                            # & (self.ptbb[year][self.sig_key_channel] > 250) Should these be here?
-                            # & (self.pttt[year][self.sig_key_channel] > 200)
-                        )
-                        cut_sig_pass = cut_sig_pass & (~exclusion_region_sig)
+        # Background in mass sidebands
+        cut_sb = (self.sensitivity_vars["massbb"]["background"] < mbb1) | (
+            self.sensitivity_vars["massbb"]["background"] > mbb2
+        )
+        # Background passing discriminant cuts
+        cut_pass = (self.sensitivity_vars["txbbs"]["background"] > txbbcut) & (
+            self.sensitivity_vars["txtts"]["background"] > txttcut
+        )
 
-            sig_pass += np.sum(
-                [
-                    self.events_dict[year][sig_key].get_var("finalWeight")[cut_sig_pass]
-                    for sig_key in self.sig_keys_sum
-                ]
-            )
+        # Compute signal yield in the resonant region
+        sig_pass = np.sum(self.sensitivity_vars["finalWeight"]["signal"][cut_sigs_pass])
 
-            for key in self.channel.data_samples:
-                cut_bg_pass_sb = (
-                    (self.txbbs[year][key] > txbbcut)
-                    & (self.txtts[year][key] > txttcut)
-                    & (self.ptbb[year][key] > 250)
-                    & (self.pttt[year][key] > 200)
-                )
-                if not self.use_bdt:
-                    cut_bg_pass_sb &= (self.masstt[year][key] > mtt1) & (
-                        self.masstt[year][key] < mtt2
-                    )
-
-                msb1 = (self.massbb[year][key] > SHAPE_VAR["range"][0]) & (
-                    self.massbb[year][key] < mbb1
-                )
-                msb2 = (self.massbb[year][key] > mbb2) & (
-                    self.massbb[year][key] < SHAPE_VAR["range"][1]
-                )
-                # Apply exclusions to background selections
-                if apply_exclusions:
-                    for excl_sig_key, excl_cuts in self.exclusion_cuts.items():
-                        if excl_sig_key != self.sig_key:
-                            vbb, vtt = excl_cuts
-                            exclusion_region = (
-                                (self.txbbs[year][key] > vbb)
-                                & (self.txtts_multi[excl_sig_key][year][key] > vtt)
-                                & (self.ptbb[year][key] > 250)
-                                & (self.pttt[year][key] > 200)
-                            )
-                            cut_bg_pass_sb = cut_bg_pass_sb & (~exclusion_region)
-
-                bg_pass_sb += np.sum(
-                    self.events_dict[year][key].get_var("finalWeight")[cut_bg_pass_sb & msb1]
-                )
-                bg_pass_sb += np.sum(
-                    self.events_dict[year][key].get_var("finalWeight")[cut_bg_pass_sb & msb2]
-                )
-                cut_bg_fail_sb = (
-                    ((self.txbbs[year][key] < txbbcut) | (self.txtts[year][key] < txttcut))
-                    & (self.ptbb[year][key] > 250)
-                    & (self.pttt[year][key] > 200)
-                )
-                if not self.use_bdt:
-                    cut_bg_fail_sb &= (self.masstt[year][key] > mtt1) & (
-                        self.masstt[year][key] < mtt2
-                    )
-
-                if apply_exclusions:
-                    for excl_sig_key, excl_cuts in self.exclusion_cuts.items():
-                        if excl_sig_key != self.sig_key:
-                            vbb, vtt = excl_cuts
-                            exclusion_region = (
-                                (self.txbbs[year][key] > vbb)
-                                & (self.txtts_multi[excl_sig_key][year][key] > vtt)
-                                & (self.ptbb[year][key] > 250)
-                                & (self.pttt[year][key] > 200)
-                            )
-                            cut_bg_fail_sb = cut_bg_fail_sb & (~exclusion_region)
-
-                bg_fail_sb += np.sum(
-                    self.events_dict[year][key].get_var("finalWeight")[cut_bg_fail_sb & msb1]
-                )
-                bg_fail_sb += np.sum(
-                    self.events_dict[year][key].get_var("finalWeight")[cut_bg_fail_sb & msb2]
-                )
-                cut_bg_fail_res = (
-                    ((self.txbbs[year][key] < txbbcut) | (self.txtts[year][key] < txttcut))
-                    & (self.massbb[year][key] > mbb1)
-                    & (self.massbb[year][key] < mbb2)
-                    & (self.ptbb[year][key] > 250)
-                    & (self.pttt[year][key] > 200)
-                )
-                if not self.use_bdt:
-                    cut_bg_fail_res &= (self.masstt[year][key] > mtt1) & (
-                        self.masstt[year][key] < mtt2
-                    )
-
-                if apply_exclusions:
-                    for excl_sig_key, excl_cuts in self.exclusion_cuts.items():
-                        if excl_sig_key != self.sig_key:
-                            vbb, vtt = excl_cuts
-                            exclusion_region = (
-                                (self.txbbs[year][key] > vbb)
-                                & (self.txtts_multi[excl_sig_key][year][key] > vtt)
-                                & (self.ptbb[year][key] > 250)
-                                & (self.pttt[year][key] > 200)
-                            )
-                            cut_bg_fail_res = cut_bg_fail_res & (~exclusion_region)
-
-                bg_fail_res += np.sum(
-                    self.events_dict[year][key].get_var("finalWeight")[cut_bg_fail_res]
-                )
-
-        del cut_sig_pass, cut_bg_pass_sb, cut_bg_fail_sb, cut_bg_fail_res, msb1, msb2
-
+        # Background passing discriminant cuts in mass sidebands
+        bg_pass_sb = np.sum(self.sensitivity_vars["finalWeight"]["background"][cut_pass & cut_sb])
+        # Background failing discriminant cuts in mass sidebands
+        bg_fail_sb = np.sum(
+            self.sensitivity_vars["finalWeight"]["background"][(~cut_pass) & cut_sb]
+        )
+        # Background failing discriminant cuts in resonant region
+        bg_fail_res = np.sum(
+            self.sensitivity_vars["finalWeight"]["background"][(~cut_pass) & (~cut_sb)]
+        )
         # signal, B, C, D, TF = C/D
         tf = bg_fail_res / bg_fail_sb if bg_fail_sb > 0 else 0
+
         return sig_pass, bg_pass_sb, bg_fail_res, bg_fail_sb, tf
 
     def grid_search_opt(
-        self,
-        years,
-        gridsize,
-        gridlims,
-        B_min_vals,
-        foms,
-        use_thresholds=False,
-        apply_exclusions=True,
-    ) -> Optimum:
+        self, gridsize, gridlims, B_min_vals, foms, use_thresholds=False
+    ) -> CutOptimum:
         """
         Grid search optimization for signal/background discrimination.
 
         Args:
-            years: List of years to analyze
             gridsize: Size of the grid (gridsize x gridsize points)
             gridlims: Either a single tuple (min, max) used for both axes,
                      or a dict with keys 'x' and 'y': {'x': (min, max), 'y': (min, max)}
@@ -737,7 +599,6 @@ class Analyser:
         """
 
         mbb1, mbb2 = SHAPE_VAR["blind_window"]
-        mtt1, mtt2 = self.channel.tt_mass_cut[1]
 
         # Parse gridlims: support both single tuple and dict format
         if isinstance(gridlims, dict):
@@ -752,7 +613,7 @@ class Analyser:
             # Signal efficiency coordinate system
             if not hasattr(self, "rocAnalyzer"):
                 print("ROC analyzer not found. Running compute_and_plot_rocs first.")
-                self.compute_and_plot_rocs(years)
+                self.compute_and_plot_rocs()
                 print("ROC analyzer computed and plotted.")
 
             # Check discriminants exist
@@ -760,9 +621,9 @@ class Analyser:
                 raise ValueError(
                     f"BB discriminant '{self.bb_disc_name}' not found in ROC analyzer. Available: {list(self.rocAnalyzer.discriminants.keys())}"
                 )
-            if self.tt_disc_name not in self.rocAnalyzer.discriminants:
+            if self.tt_disc_name_channel not in self.rocAnalyzer.discriminants:
                 raise ValueError(
-                    f"TT discriminant '{self.tt_disc_name}' not found in ROC analyzer. Available: {list(self.rocAnalyzer.discriminants.keys())}"
+                    f"TT discriminant '{self.tt_disc_name_channel}' not found in ROC analyzer. Available: {list(self.rocAnalyzer.discriminants.keys())}"
                 )
 
             # Create signal efficiency grid with separate limits for each axis
@@ -772,7 +633,7 @@ class Analyser:
 
             # Get discriminant objects for threshold lookup
             bb_discriminant = self.rocAnalyzer.discriminants[self.bb_disc_name]
-            tt_discriminant = self.rocAnalyzer.discriminants[self.tt_disc_name]
+            tt_discriminant = self.rocAnalyzer.discriminants[self.tt_disc_name_channel]
 
             # VECTORIZED threshold computation
             bbcut_thresholds = bb_discriminant.get_cut_from_sig_eff(bbcutSigEff)
@@ -799,14 +660,10 @@ class Analyser:
 
         def sig_bg(bbcut, ttcut):
             return sig_bkg_f(
-                years=years,
                 txbbcut=bbcut,
                 txttcut=ttcut,
                 mbb1=mbb1,
                 mbb2=mbb2,
-                mtt1=mtt1,
-                mtt2=mtt2,
-                apply_exclusions=apply_exclusions,
             )
 
         print(f"Running grid search on {len(bbcut_flat)} points...")
@@ -817,20 +674,14 @@ class Analyser:
         # Reshape results to match grid shape
         sigs, bgs_sb, bg_fails_res, bg_fails_sb, tfs = zip(*results)
         grid_shape = BBcut.shape
+
         sigs = np.array(sigs).reshape(grid_shape)
         bgs_sb = np.array(bgs_sb).reshape(grid_shape)
         bg_fails_res = np.array(bg_fails_res).reshape(grid_shape)
         bg_fails_sb = np.array(bg_fails_sb).reshape(grid_shape)
         tfs = np.array(tfs).reshape(grid_shape)
 
-        tot_sig_weight = np.sum(
-            np.concatenate(
-                [
-                    self.events_dict[year][self.sig_key_channel].get_var("finalWeight")
-                    for year in years
-                ]
-            )
-        )
+        tot_sig_weight = np.sum(self.sensitivity_vars["finalWeight"]["signal"])
 
         sigs_eff = sigs / tot_sig_weight
 
@@ -871,7 +722,7 @@ class Analyser:
                     "BBcut": BBcut,
                     "TTcut": TTcut,
                     "bb_disc_name": self.bb_disc_name,
-                    "tt_disc_name": self.tt_disc_name,
+                    "tt_disc_name": self.tt_disc_name_channel,
                     "sig_map": sigs,
                     "bg_map": bgs_scaled,
                     "sel_B_min": sel_B_min,
@@ -892,12 +743,12 @@ class Analyser:
                         }
                     )
 
-                results[fom.name][f"Bmin={B_min}"] = Optimum(**optimum_args)
+                results[fom.name][f"Bmin={B_min}"] = CutOptimum(**optimum_args)
 
         return results
 
     def _adaptive_refine_limits(
-        self, optimum: Optimum, use_thresholds: bool, top_fraction: float, padding: float
+        self, optimum: CutOptimum, use_thresholds: bool, top_fraction: float, padding: float
     ) -> dict:
         """Compute refined grid limits for the next stage from the union of padded regions around best points.
 
@@ -908,7 +759,7 @@ class Analyser:
         4. Returns separate (min, max) limits for X and Y axes
 
         Args:
-            optimum: Optimum object containing FOM map and grid coordinates
+            optimum: CutOptimum object containing FOM map and grid coordinates
             use_thresholds: Whether using threshold or signal efficiency coordinates
             top_fraction: Fraction of best points to consider (e.g., 0.1 for top 10%)
             padding: Padding factor as fraction of grid spacing to add around each point
@@ -995,7 +846,6 @@ class Analyser:
 
     def adaptive_grid_search_opt(
         self,
-        years,
         initial_gridsize,
         initial_gridlims,
         B_min_vals,
@@ -1006,8 +856,7 @@ class Analyser:
         top_fraction: float = 0.1,
         padding: float = 1.0,
         adaptive_bmin: int = None,
-        apply_exclusions: bool = True,
-    ) -> Optimum:
+    ) -> CutOptimum:
         """Multi-stage adaptive refinement around best regions using existing grid_search_opt.
 
         Strategy:
@@ -1015,7 +864,6 @@ class Analyser:
         - Final stage (N): Run optimization with ALL B_min values for complete results
 
         Args:
-            years: List of years to analyze
             initial_gridsize: Initial grid size (NxN points)
             initial_gridlims: Initial grid limits, either tuple (min, max) or dict {'x': (min, max), 'y': (min, max)}
             B_min_vals: List of minimum background values (used in final stage only)
@@ -1052,13 +900,11 @@ class Analyser:
             print(f"  B_min values: {current_bmin_vals}")
 
             results = self.grid_search_opt(
-                years=years,
                 gridsize=gridsize,
                 gridlims=gridlims,
                 B_min_vals=current_bmin_vals,
                 foms=foms,
                 use_thresholds=use_thresholds,
-                apply_exclusions=apply_exclusions,
             )
             final_results = results
 
@@ -1073,7 +919,7 @@ class Analyser:
                     opt_key = f"Bmin={adaptive_bmin}"
                     if opt_key in fom_res:
                         opt = fom_res[opt_key]
-                        if isinstance(opt, Optimum) and opt.fom_map is not None:
+                        if isinstance(opt, CutOptimum) and opt.fom_map is not None:
                             gridlims = self._adaptive_refine_limits(
                                 opt,
                                 use_thresholds=use_thresholds,
@@ -1093,7 +939,6 @@ class Analyser:
 
     def perform_optimization(
         self,
-        years,
         use_thresholds=False,
         plot=True,
         b_min_vals=None,
@@ -1103,11 +948,10 @@ class Analyser:
         adaptive_padding: float = 1.0,
         adaptive_refine_gridsize: int | None = None,
         adaptive_bmin: int = None,
-        apply_exclusions: bool = True,
     ):
 
         if b_min_vals is None:
-            b_min_vals = [1, 3, 5] if self.test_mode else DEFAULT_BMIN_VALUES
+            b_min_vals = [1, 10] if self.test_mode else DEFAULT_BMIN_VALUES
 
         if self.test_mode:
             gridlims = (0.3, 1) if use_thresholds else (0.2, 0.9)
@@ -1116,11 +960,10 @@ class Analyser:
             gridlims = (0.7, 1) if use_thresholds else (0.25, 0.75)
             gridsize = 50 if not adaptive else 20
 
-        foms = [FOMS["2sqrtB_S_var"]]
+        foms = FOMS_TO_OPTIMIZE
 
         if adaptive:
             results = self.adaptive_grid_search_opt(
-                years=years,
                 initial_gridsize=gridsize,
                 initial_gridlims=gridlims,
                 B_min_vals=b_min_vals,
@@ -1131,17 +974,14 @@ class Analyser:
                 top_fraction=adaptive_top_frac,
                 padding=adaptive_padding,
                 adaptive_bmin=adaptive_bmin,
-                apply_exclusions=apply_exclusions,
             )
         else:
             results = self.grid_search_opt(
-                years,
-                gridsize,
+                gridsize=gridsize,
                 gridlims=gridlims,
                 B_min_vals=b_min_vals,
                 foms=foms,
                 use_thresholds=use_thresholds,
-                apply_exclusions=apply_exclusions,
             )
 
         successful_b_min_vals = []
@@ -1152,7 +992,7 @@ class Analyser:
                 optimum_result = results.get(fom.name, {}).get(f"Bmin={B_min}")
                 if optimum_result:
                     successful_b_min_vals.append(B_min)
-                    bmin_df = self.as_df(optimum_result, years, label=f"Bmin={B_min}")
+                    bmin_df = self.as_df(optimum_result, self.years, label=f"Bmin={B_min}")
                     bmin_dfs.append(bmin_df)
 
             if not bmin_dfs:
@@ -1167,7 +1007,7 @@ class Analyser:
             # Save separate CSV file for each FOM
             output_csv = (
                 self.plot_dir
-                / f"{'_'.join(years)}_opt_results_{fom.name}_{'thresh' if use_thresholds else 'sigeff'}.csv"
+                / f"{'_'.join(self.years)}_opt_results_{fom.name}_{'thresh' if use_thresholds else 'sigeff'}.csv"
             )
             fom_df.to_csv(output_csv)
             saved_files.append(output_csv)
@@ -1188,33 +1028,34 @@ class Analyser:
             if use_thresholds:
                 plot_optimization_thresholds(
                     results=results,
-                    years=years,
+                    years=self.years,
                     b_min_vals=successful_b_min_vals,
                     foms=foms,
                     channel=self.channel,
-                    save_path=self.plot_dir / f"{'_'.join(years)}_thresholds",
+                    save_path=self.plot_dir / f"{'_'.join(self.years)}_thresholds",
                     show=False,
                 )
             else:
-                clip_value = 100 if "ggf" in self.sig_key.lower() else None
+                # clip_value = 100 if "ggf" in self.sig_key.lower() else None
+                clip_value = None  # should just do a 90% percentile or similar
                 plot_optimization_sig_eff(
                     results=results,
-                    years=years,
+                    years=self.years,
                     b_min_vals=successful_b_min_vals,
                     foms=foms,
                     channel=self.channel,
-                    save_path=self.plot_dir / f"{'_'.join(years)}_sigeff",
+                    save_path=self.plot_dir / f"{'_'.join(self.years)}_sigeff",
                     show=False,
                     use_log_scale=False,
                     clip_value=clip_value,
                 )
                 plot_optimization_sig_eff(
                     results=results,
-                    years=years,
+                    years=self.years,
                     b_min_vals=successful_b_min_vals,
                     foms=foms,
                     channel=self.channel,
-                    save_path=self.plot_dir / f"{'_'.join(years)}_sigeff_log",
+                    save_path=self.plot_dir / f"{'_'.join(self.years)}_sigeff_log",
                     show=False,
                     use_log_scale=True,
                     clip_value=clip_value,
@@ -1229,7 +1070,7 @@ class Analyser:
         foms = [FOMS["2sqrtB_S_var"], FOMS["punzi"]]
 
         results = self.grid_search_opt(
-            years, gridsize, gridlims=gridlims, B_min_vals=b_min_vals, foms=foms
+            gridsize=gridsize, gridlims=gridlims, B_min_vals=b_min_vals, foms=foms
         )
 
         fig, ax = plt.subplots(figsize=(12, 8))
@@ -1314,10 +1155,10 @@ class Analyser:
     @staticmethod
     def as_df(optimum, years, label="optimum"):
         """
-        Converts an Optimum result to a pandas DataFrame row with derived quantities.
+        Converts an CutOptimum result to a pandas DataFrame row with derived quantities.
 
         Args:
-            optimum: An Optimum dataclass instance.
+            optimum: An CutOptimum dataclass instance.
             years: List of years used in the optimization.
             label: Optional label for the result row.
         Returns:
@@ -1349,151 +1190,179 @@ class Analyser:
 
 
 def analyse_channel(
-    years,
-    sig_key,
-    channel_key,
-    test_mode,
-    use_bdt,
-    modelname,
-    main_plot_dir,
-    tt_pres=False,
+    events_dict,
+    sr_config: SRConfig | None = None,
     actions=None,
+    test_mode: bool | None = None,
+    tt_pres=False,
+    use_ParT=False,
     at_inference=False,
     adaptive=False,
-    do_vbf=False,
-    vbf_modelname="",
-    vbf_signal_key="vbfbbtt",
-    vbf_bmin_for_veto=10,
     bdt_dir=None,
-    use_sm_signals=True,
+    plot_dir=None,
 ):
+    """
+    Analyse a given signal region configuration for a given channel.
+    """
 
-    print(f"Processing signal: {sig_key} channel: {channel_key}. Test mode: {test_mode}.")
-
-    # Configure signals for multi-signal analyser
-    signals = [SignalConfig(key=sig_key, modelname=modelname, optimize=True)]
-
-    if do_vbf and use_bdt:
-        # Add VBF signal - we'll optimize it first to define the VBF-enriched region
-        signals.append(
-            SignalConfig(
-                key=vbf_signal_key,
-                modelname=vbf_modelname or modelname,
-                optimize=True,
-                bmin_for_exclusion=vbf_bmin_for_veto,
-            )
-        )
-        print(
-            f"Multi-signal mode: Will optimize {vbf_signal_key} first, then {sig_key} excluding {vbf_signal_key} region"
-        )
+    print(
+        f"Processing configuration: {sr_config.name} for channel: {sr_config.channel}. Test mode: {test_mode}."
+    )
 
     # Create analyser with all signals (data and BDT predictions loaded once)
     analyser = Analyser(
-        years,
-        signals,
-        channel_key,
-        test_mode,
-        use_bdt,
-        main_plot_dir,
-        at_inference,
-        bdt_dir=bdt_dir,
+        events_dict=events_dict,
+        sr_config=sr_config,
+        test_mode=test_mode,
         tt_pres=tt_pres,
-        use_sm_signals=use_sm_signals,
+        use_ParT=use_ParT,
+        at_inference=at_inference,
+        adaptive=adaptive,
+        bdt_dir=bdt_dir,
+        plot_dir=plot_dir,
     )
-
-    analyser.load_data()  # Loads data once and BDT predictions for all signals
 
     if actions is None:
         actions = []
 
     if "compute_rocs" in actions:
-        analyser.compute_and_plot_rocs(years)
+        analyser.compute_and_plot_rocs()
     if "plot_mass" in actions:
-        analyser.plot_mass(years)
+        analyser.plot_mass()
     if "sensitivity" in actions:
-        # If VBF is configured, optimize VBF first to define its region
-        if do_vbf and use_bdt:
-            print("\n" + "=" * 80)
-            print(f"STEP 1: Optimizing {vbf_signal_key} to define VBF-enriched region")
-            print("=" * 80)
-
-            # Create temporary VBF-only analyser for optimization
-            vbf_only_analyser = Analyser(
-                years,
-                SignalConfig(
-                    key=vbf_signal_key, modelname=vbf_modelname or modelname, optimize=True
-                ),
-                channel_key,
-                test_mode,
-                use_bdt,
-                main_plot_dir,
-                at_inference,
-                bdt_dir=bdt_dir,
-                use_sm_signals=use_sm_signals,
-            )
-            # Share the same event data (no reloading!)
-            vbf_only_analyser.events_dict = analyser.events_dict
-            vbf_only_analyser.prepare_sensitivity(years)
-
-            vbf_results = vbf_only_analyser.perform_optimization(
-                years,
-                use_thresholds=False,
-                adaptive=adaptive,
-                adaptive_stages=ADAPTIVE_STAGES,
-                adaptive_top_frac=ADAPTIVE_TOP_FRAC,
-                adaptive_padding=ADAPTIVE_PADDING,
-                adaptive_refine_gridsize=ADAPTIVE_REFINE_GRIDSIZE,
-                adaptive_bmin=ADAPTIVE_BMIN,
-                plot=True,
-                apply_exclusions=False,  # Don't apply exclusions when defining the VBF region itself
-            )
-
-            # Extract VBF cuts at the specified B_min for exclusion
-            try:
-                vbf_sig_config = analyser.signals[vbf_signal_key]
-                bmin_key = f"Bmin={vbf_sig_config.bmin_for_exclusion}"
-                vbf_opt = vbf_results["2sqrtB_S_var"][bmin_key]
-                vbf_exclusion_cuts = vbf_opt.cuts
-                print(
-                    f"\nVBF region cuts ({bmin_key}): TxBB > {vbf_exclusion_cuts[0]:.3f}, TxTT > {vbf_exclusion_cuts[1]:.3f}"
-                )
-                print(f"This region will be EXCLUDED from {sig_key} optimization")
-
-                # Store exclusion cuts in main analyser
-                analyser.exclusion_cuts[vbf_signal_key] = vbf_exclusion_cuts
-            except Exception as e:
-                print(f"Warning: Could not extract VBF exclusion cuts for {bmin_key}: {e}")
-
-            del vbf_only_analyser
-            gc.collect()
-
-            print("\n" + "=" * 80)
-            print(f"STEP 2: Optimizing {sig_key} excluding VBF region")
-            print("=" * 80)
-
         # Run main signal optimization (with exclusions if configured)
-        analyser.prepare_sensitivity(years)
-        analyser.perform_optimization(
-            years,
+        analyser.prepare_sensitivity()
+        return analyser.perform_optimization(
             use_thresholds=False,
             adaptive=adaptive,
             **adaptive_kwargs,
         )
-    if "fom_study" in actions:
-        analyser.prepare_sensitivity(years)
-        analyser.study_foms(years)
-    if "minimization_study" in actions:
-        analyser.prepare_sensitivity(years)
-        analyser.study_minimization_method(years)
 
-    del analyser
-    gc.collect()
+    if "fom_study" in actions:
+        analyser.prepare_sensitivity()
+        analyser.study_foms()
+
+    # is this bad?
+    # del analyser
+    # gc.collect()
+
+
+def get_plot_dir(
+    test_mode: bool,
+    tt_pres: bool,
+    adaptive: bool,
+    use_ParT: bool,
+    do_vbf: bool,
+    use_sm_signals: bool,
+    overlapping_channels: bool,
+    sr_config: SRConfig,
+):
+
+    if test_mode:
+        test_dir = "test"
+    elif tt_pres:
+        test_dir = "tt_pres"
+    else:
+        test_dir = "full_presel"
+
+    tag = "adaptive/" if adaptive else "grid/"
+    tag += "ParT/" if use_ParT else "BDT/"
+    tag += "do_vbf/" if do_vbf else "ggf_only/"
+    tag += "sm_signals/" if use_sm_signals else "ggf_only/"
+    tag += "overlapping_channels/" if overlapping_channels else "orthogonal_channels/"
+    tag += f"{sr_config.name}/{sr_config.channel}"
+
+    return Path(PLOT_DIR) / f"SensitivityStudy/{TODAY}/{test_dir}/{tag}"
+
+
+def main(args):
+    """
+    Sensitivity study across channels and signal regions.
+
+    Processes each channel sequentially, optimizing signal regions in order:
+    GGF first, then VBF (if enabled). Later regions veto events selected by earlier ones.
+    """
+    # Signal regions to optimize: for now, GGF first, then VBF
+    signal_regions = SIGNAL_ORDERING if args.do_vbf else ["ggfbbtt"]
+
+    # BDT models to load (None if using ParT)
+    models = None
+    if not args.use_ParT:
+        models = [args.ggf_modelname] + ([args.vbf_modelname] if args.do_vbf else [])
+
+    # Track optimized regions for vetoes
+    optimized_regions: dict[str, SRConfig] = {}  # across all channels (orthogonal mode)
+
+    tt_disc_map = TT_DISC_NAMES_PART if args.use_ParT else TT_DISC_NAMES_BDT
+
+    for channel_key in args.channels:
+        print(f"\n{'='*60}\nProcessing channel: {channel_key}\n{'='*60}")
+
+        events_dict = load_data_channel(
+            years=args.years,
+            signals=SM_SIGNALS,
+            channel=CHANNELS[channel_key],
+            test_mode=args.test_mode,
+            tt_pres=args.tt_pres,
+            models=models,
+        )
+
+        channel_regions: list[SRConfig] = []  # within current channel (overlapping mode)
+
+        for region_name in signal_regions:
+            print(f"\n  Optimizing: {region_name}")
+
+            sr_config = SRConfig(
+                name=region_name,
+                signals=SM_SIGNALS if args.use_sm_signals else [region_name],
+                channel=channel_key,
+                bb_disc_name=BB_DISC_NAME,
+                tt_disc_name=tt_disc_map[region_name],
+            )
+
+            # Apply vetoes from previously optimized regions
+            regions_to_veto = (
+                optimized_regions.values() if not args.overlapping_channels else channel_regions
+            )
+            for veto_region in regions_to_veto:
+                sr_config.add_veto_from_optimum(veto_region, bmin=args.bmin_for_veto)
+
+            plot_dir = get_plot_dir(
+                args.test_mode,
+                args.tt_pres,
+                args.adaptive,
+                args.use_ParT,
+                args.do_vbf,
+                args.use_sm_signals,
+                args.overlapping_channels,
+                sr_config,
+            )
+            plot_dir.mkdir(parents=True, exist_ok=True)
+
+            sr_config.optima = analyse_channel(
+                events_dict=events_dict,
+                sr_config=sr_config,
+                test_mode=args.test_mode,
+                tt_pres=args.tt_pres,
+                use_ParT=args.use_ParT,
+                actions=args.actions,
+                at_inference=args.at_inference,
+                adaptive=args.adaptive,
+                bdt_dir=args.bdt_dir,
+                plot_dir=plot_dir,
+            )
+
+            # Register for future vetoes
+            channel_regions.append(sr_config)
+            if not args.overlapping_channels:
+                optimized_regions[sr_config.name] = sr_config
 
 
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Sensitivity Study Script")
 
+    # Data loading arguments: years, channels, test_mode, tt_pres
     parser.add_argument(
         "--years",
         nargs="+",
@@ -1501,15 +1370,9 @@ if __name__ == "__main__":
         help="List of years to include in the analysis",
     )
     parser.add_argument(
-        "--signals",
-        nargs="+",
-        default=["ggfbbtt"],
-        help="List of signals to run (default: ggf)",
-    )
-    parser.add_argument(
         "--channels",
         nargs="+",
-        default=["hh", "hm", "he"],
+        default=CHANNEL_ORDERING,
         help="List of channels to run (default: all)",
     )
     parser.add_argument(
@@ -1522,22 +1385,16 @@ if __name__ == "__main__":
         "--tt-pres",
         action="store_true",
         default=False,
-        help="Use tt preselection",
-    )
-    parser.add_argument(
-        "--use-bdt", action="store_true", default=False, help="Use BDT for sensitivity study"
-    )
-    parser.add_argument(
-        "--modelname",
-        default="19oct25_ak4away_ggfbbtt",
-        help="Name of the BDT model to use for sensitivity study",
+        help="Apply tt preselection",
     )
     parser.add_argument(
         "--at-inference",
         action="store_true",
         default=False,
-        help="Compute BDT predictions at inference time",
+        help="Compute BDT predictions at inference time, instead of possibly loading cached predictions if array lengths match",
     )
+
+    # Analysis arguments: actions, signals, models
     parser.add_argument(
         "--actions",
         nargs="+",
@@ -1546,36 +1403,16 @@ if __name__ == "__main__":
         help="Actions to perform. Choose one or more.",
     )
     parser.add_argument(
-        "--use-thresholds",
-        action="store_true",
-        default=False,
-        help="Use thresholds for optimization",
+        "--ggf-modelname",
+        default="19oct25_ak4away_ggfbbtt",
+        help="Name of the BDT model to use for sensitivity study in ggf channel",
     )
     parser.add_argument(
         "--use-sm-signals",
         action="store_true",
-        default=True,
-        help="Use total SM signals for sensitivity study",
-    )
-    parser.add_argument(
-        "--plot-dir",
-        help="If making control or template plots, path to directory to save them in",
-        default="/home/users/lumori/bbtautau/",
-        type=str,
-    )
-    parser.add_argument(
-        "--bdt-dir",
-        help="directory where you save your bdt model for inference",
-        default=None,
-        type=str,
-    )
-    parser.add_argument(
-        "--adaptive",
-        action="store_true",
         default=False,
-        help="Use adaptive multi-stage grid refinement during sensitivity optimization",
+        help="Use total SM signals for sensitivity study, i.e. optimize for sum of SM signals",
     )
-    # Adaptive parameters are defined as module-level defaults; no extra CLI flags
     parser.add_argument(
         "--do-vbf",
         action="store_true",
@@ -1595,32 +1432,45 @@ if __name__ == "__main__":
         help="Signal key for VBF optimization (e.g., vbfbbtt or vbfbbtt-k2v0)",
     )
     parser.add_argument(
-        "--vbf-bmin-for-veto",
+        "--overlapping-channels",
+        action="store_true",
+        default=False,
+        help="Make channels non orthogonal: each channel does not veto events selected by previous channels",
+    )
+    parser.add_argument(
+        "--bmin-for-veto",
         type=int,
         default=10,
-        help="Bmin value from which to take the VBF veto cuts",
+        help="Bmin value to use for cross-channel vetoes when not using --overlapping-channels",
+    )
+
+    # Options
+    parser.add_argument(
+        "--use-ParT",
+        action="store_true",
+        default=False,
+        help="Use ParT for sensitivity study instead of BDTs",
+    )
+    parser.add_argument(
+        "--use-thresholds",
+        action="store_true",
+        default=False,
+        help="Use thresholds for optimization",
+    )
+
+    parser.add_argument(
+        "--bdt-dir",
+        help="directory where you have saved your bdt models for inference",
+        default=None,
+        type=str,
+    )
+    parser.add_argument(
+        "--adaptive",
+        action="store_true",
+        default=False,
+        help="Use adaptive multi-stage grid refinement during sensitivity optimization",
     )
 
     args = parser.parse_args()
 
-    for sig_key in args.signals:
-        for channel_key in args.channels:
-            analyse_channel(
-                years=args.years,
-                sig_key=sig_key,
-                channel_key=channel_key,
-                test_mode=args.test_mode,
-                use_bdt=args.use_bdt,
-                modelname=args.modelname,
-                main_plot_dir=args.plot_dir,
-                actions=args.actions,
-                at_inference=args.at_inference,
-                adaptive=args.adaptive,
-                do_vbf=args.do_vbf,
-                vbf_modelname=args.vbf_modelname,
-                vbf_signal_key=args.vbf_signal_key,
-                vbf_bmin_for_veto=args.vbf_bmin_for_veto,
-                bdt_dir=args.bdt_dir,
-                tt_pres=args.tt_pres,
-                use_sm_signals=args.use_sm_signals,
-            )
+    main(args)
