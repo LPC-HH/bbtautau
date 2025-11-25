@@ -157,6 +157,9 @@ def main(args: argparse.Namespace):
         # These are the signal samples to load in the templates
         args.sigs = ["ggfbbtt", "vbfbbtt", "vbfbbtt-k2v0"]
 
+    if args.bgs is None:
+        args.bgs = {bkey: b for bkey, b in SAMPLES.items() if b.get_type() == "bg"}
+
     CHANNEL = CHANNELS[args.channel]
 
     events_dict, cutflow = load_data_channel(

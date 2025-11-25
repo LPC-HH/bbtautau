@@ -16,7 +16,6 @@ from bbtautau.postprocessing.Samples import CHANNELS
 
 # Non-interactive backend for batch/containers
 mpl.use("Agg")
-plt = mpl.pyplot
 
 
 def _ensure_dir(path: Path) -> Path:
