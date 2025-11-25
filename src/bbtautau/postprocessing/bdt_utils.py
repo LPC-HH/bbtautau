@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import pickle
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -11,13 +10,9 @@ import pandas as pd
 import xgboost as xgb
 from boostedhh.utils import PAD_VAL
 
-from bbtautau.bbtautau_utils import Channel
+from bbtautau.postprocessing.bbtautau_types import Channel, LoadedSample
 from bbtautau.postprocessing.bdt_config import bdt_config
-from bbtautau.postprocessing.rocUtils import ROCAnalyzer
 from bbtautau.postprocessing.Samples import CHANNELS
-from bbtautau.postprocessing.utils import LoadedSample
-
-from .bdt import Trainer
 
 # Non-interactive backend for batch/containers
 mpl.use("Agg")
@@ -29,10 +24,26 @@ def _ensure_dir(path: Path) -> Path:
     return path
 
 
+# Centralize this for other applications:
+# Prefix all BDT columns with the signal key to distinguish models
+# Remove trailing 'tt' from signal_key to avoid redundancy (e.g., ggfbbtt -> ggfbb)
+# This gives cleaner names like BDTggfbbtauhtauh instead of BDTggfbbtttauhtauh
+def _get_bdt_key(
+    signal: str, channel: Channel = None, prefix_only: bool = True, suffix: str = "vsAll"
+):
+    signal_base = signal.removesuffix("tt") if signal.endswith("tt") else signal
+    if prefix_only:
+        return f"BDT{signal_base}"
+    else:
+        if channel is None:
+            raise ValueError("Channel is required for non-prefix BDT keys")
+        return f"BDT{signal_base}{channel.tagger_label}{suffix}"
+
+
 def _add_bdt_scores(
     events: pd.DataFrame,
     sample_bdt_preds: np.ndarray,
-    signal_key: str,
+    signal_objective: str,
     multiclass: bool,
     all_outs: bool = True,
     jshift: str = "",
@@ -40,7 +51,7 @@ def _add_bdt_scores(
     """
     Add BDT scores to events DataFrame.
 
-    Now uses signal_key (e.g., 'ggfbbtt', 'vbfbbtt') to namespace all BDT columns,
+    Now uses signal_objective (e.g., 'ggfbbtt', 'vbfbbtt') to namespace all BDT columns,
     so multiple models can coexist in the same DataFrame.
 
     Assumes class mapping to be:
@@ -56,7 +67,7 @@ def _add_bdt_scores(
     Args:
         events: DataFrame to add scores to
         sample_bdt_preds: BDT predictions array
-        signal_key: Signal key (e.g., 'ggfbbtt', 'vbfbbtt') to namespace columns
+        signal_objective: Signal objective (e.g., 'ggfbbtt', 'vbfbbtt') to namespace columns
         multiclass: Whether this is multiclass classification
         all_outs: Whether to add all output scores
         jshift: JEC/JMSR shift label
@@ -65,14 +76,10 @@ def _add_bdt_scores(
     if jshift != "":
         jshift = "_" + jshift
 
-    # Prefix all BDT columns with the signal key to distinguish models
-    # Remove trailing 'tt' from signal_key to avoid redundancy (e.g., ggfbbtt -> ggfbb)
-    # This gives cleaner names like BDTggfbbtauhtauh instead of BDTggfbbtttauhtauh
-    signal_base = signal_key.removesuffix("tt") if signal_key.endswith("tt") else signal_key
-    prefix = f"BDT{signal_base}"
+    prefix = _get_bdt_key(signal_objective, prefix_only=True)
 
     if not multiclass:
-        events[f"{prefix}{jshift}"] = sample_bdt_preds
+        events[prefix + jshift] = sample_bdt_preds
     else:
         he_score = sample_bdt_preds[:, 0]  # TODO could be de-hardcoded
         hh_score = sample_bdt_preds[:, 1]
@@ -115,7 +122,7 @@ def compute_bdt_preds(
     events_dict: dict[str, dict[str, LoadedSample]],
     modelname: str,
     model_dir: Path,
-    signal_key: str,
+    signal_objective: str,
     tt_pres: bool,
     channel: Channel,
     test_mode: bool = False,
@@ -127,14 +134,14 @@ def compute_bdt_preds(
     years and samples of data. The input data is expected to be organized by year and sample name.
 
     The predictions are saved in the directory structure:
-        save_dir / tag / signal_key / modelname / channel.key / year / {sample}_preds.pkl
+        save_dir / tag / signal_objective / modelname / channel.key / year / {sample}_preds.pkl
 
     Args:
         events_dict: Dictionary mapping years to dictionaries of samples. Each sample should be a
             LoadedSample object containing the features needed for prediction.
         modelname: Name of the model to load
         model_dir: Path to the directory containing the model
-        signal_key: Signal key (e.g., 'ggfbbtt', 'vbfbbtt') for organizing saved predictions
+        signal_objective: Signal objective (e.g., 'ggfbbtt', 'vbfbbtt') for organizing saved predictions
         tt_pres: Whether tt preselection is applied
         channel: Channel object with .key attribute
         test_mode: Whether in test mode (uses different directory structure)
@@ -206,7 +213,7 @@ def compute_bdt_preds(
             _add_bdt_scores(
                 events_dict[year][sample].events,
                 y_pred,
-                signal_key=signal_key,
+                signal_objective=signal_objective,
                 multiclass=True,
                 all_outs=True,
             )
@@ -221,7 +228,7 @@ def compute_bdt_preds(
                 else:
                     tag = "full_presel"
 
-                file_dir = Path(save_dir) / tag / signal_key / modelname / channel.key / year
+                file_dir = Path(save_dir) / tag / signal_objective / modelname / channel.key / year
                 file_dir.mkdir(exist_ok=True, parents=True)
                 with (file_dir / f"{sample}_preds.pkl").open("wb") as f:
                     pickle.dump(y_pred, f)
@@ -232,7 +239,7 @@ def compute_bdt_preds(
 def check_bdt_prediction_shapes(
     events_dict: dict[str, dict[str, LoadedSample]],
     modelname: str,
-    signal_key: str,
+    signal_objective: str,
     tt_pres: bool,
     channel: Channel,
     bdt_preds_dir: Path,
@@ -243,7 +250,7 @@ def check_bdt_prediction_shapes(
     Args:
         events_dict: Dictionary with structure {year: {sample: LoadedSample}}
         modelname: Name of the BDT model
-        signal_key: Signal key (e.g., 'ggfbbtt', 'vbfbbtt')
+        signal_objective: Signal objective (e.g., 'ggfbbtt', 'vbfbbtt')
         tt_pres: Whether tt preselection is applied
         channel: Channel object with .key attribute
         bdt_preds_dir: Directory containing BDT predictions
@@ -265,7 +272,7 @@ def check_bdt_prediction_shapes(
             shape_file = (
                 Path(bdt_preds_dir)
                 / tag
-                / signal_key
+                / signal_objective
                 / modelname
                 / channel.key
                 / year
@@ -286,7 +293,7 @@ def check_bdt_prediction_shapes(
 def load_bdt_preds(
     events_dict: dict[str, dict[str, LoadedSample]],
     modelname: str,
-    signal_key: str,
+    signal_objective: str,
     tt_pres: bool,
     channel: Channel,
     bdt_preds_dir: Path,
@@ -321,7 +328,7 @@ def load_bdt_preds(
             pred_file = (
                 Path(bdt_preds_dir)
                 / tag
-                / signal_key
+                / signal_objective
                 / modelname
                 / channel.key
                 / year
@@ -334,7 +341,7 @@ def load_bdt_preds(
             _add_bdt_scores(
                 events_dict[year][sample].events,
                 bdt_preds,
-                signal_key=signal_key,
+                signal_objective=signal_objective,
                 multiclass=multiclass,
                 all_outs=all_outs,
             )
@@ -344,7 +351,7 @@ def compute_or_load_bdt_preds(
     events_dict: dict[str, dict[str, LoadedSample]],
     modelname: str,
     model_dir: Path,
-    signal_key: str,
+    signal_objective: str,
     tt_pres: bool,
     channel: Channel,
     bdt_preds_dir: Path,
@@ -364,7 +371,7 @@ def compute_or_load_bdt_preds(
         events_dict: Dictionary with structure {year: {sample: LoadedSample}}
         modelname: Name of the BDT model
         model_dir: Path to the directory containing the model
-        signal_key: Signal key (e.g., 'ggfbbtt', 'vbfbbtt')
+        signal_objective: Signal objective (e.g., 'ggfbbtt', 'vbfbbtt')
         channel: Channel object with .key attribute
         bdt_preds_dir: Directory containing/to save BDT predictions
         test_mode: Whether in test mode
@@ -376,7 +383,7 @@ def compute_or_load_bdt_preds(
         ...     events_dict=my_events,
         ...     modelname="29July25_loweta_lowreg",
         ...     model_dir=Path("/path/to/models"),
-        ...     signal_key="ggfbbtt",
+        ...     signal_objective="ggfbbtt",
         ...     channel=my_channel,
         ...     bdt_preds_dir=Path("/path/to/predictions"),
         ...     at_inference=False,  # Will try to load if available
@@ -386,13 +393,13 @@ def compute_or_load_bdt_preds(
 
     if at_inference:
         # Compute predictions directly at inference time
-        print(f"Computing BDT predictions at inference for signal '{signal_key}'...")
+        print(f"Computing BDT predictions at inference for signal '{signal_objective}'...")
         start_time = time.time()
         compute_bdt_preds(
             events_dict=events_dict,
             modelname=modelname,
             model_dir=model_dir,
-            signal_key=signal_key,
+            signal_objective=signal_objective,
             channel=channel,
             tt_pres=tt_pres,
             test_mode=test_mode,
@@ -401,11 +408,11 @@ def compute_or_load_bdt_preds(
         print(f"BDT predictions computed in {time.time() - start_time:.2f} seconds")
     else:
         # Try to load existing predictions
-        print(f"Checking for existing BDT predictions for signal '{signal_key}'...")
+        print(f"Checking for existing BDT predictions for signal '{signal_objective}'...")
         shapes_ok = check_bdt_prediction_shapes(
             events_dict=events_dict,
             modelname=modelname,
-            signal_key=signal_key,
+            signal_objective=signal_objective,
             channel=channel,
             tt_pres=tt_pres,
             bdt_preds_dir=bdt_preds_dir,
@@ -413,11 +420,11 @@ def compute_or_load_bdt_preds(
         )
 
         if shapes_ok:
-            print(f"Loading existing BDT predictions for signal '{signal_key}'...")
+            print(f"Loading existing BDT predictions for signal '{signal_objective}'...")
             load_bdt_preds(
                 events_dict=events_dict,
                 modelname=modelname,
-                signal_key=signal_key,
+                signal_objective=signal_objective,
                 channel=channel,
                 tt_pres=tt_pres,
                 bdt_preds_dir=bdt_preds_dir,
@@ -432,187 +439,10 @@ def compute_or_load_bdt_preds(
                 events_dict=events_dict,
                 modelname=modelname,
                 model_dir=model_dir,
-                signal_key=signal_key,
+                signal_objective=signal_objective,
                 channel=channel,
                 tt_pres=tt_pres,
                 test_mode=test_mode,
                 save_dir=bdt_preds_dir,
             )
             print(f"BDT predictions computed in {time.time() - start_time:.2f} seconds")
-
-
-def compare_models(
-    models: list[str],
-    model_dirs: list[str],
-    years: list[str],
-    signal_key: str,
-    samples: list[str] | None = None,
-    data_path: str | None = None,
-    tt_preselection: bool = False,
-    output_dir: str | None = None,
-) -> dict[str, dict[str, float]]:
-    """Load multiple trained models, evaluate, and produce comparison outputs.
-
-    - Saves per-signal overlay ROC plots across models (when comparable)
-    - Saves a CSV with metrics for each (model, signal)
-
-    Returns a nested dict: metrics_by_model[model][signal] -> metrics_dict
-    """
-
-    if samples is None:
-        samples = ["dyjets", "qcd", "ttbarhad", "ttbarll", "ttbarsl"]
-
-    # Use a top-level comparison directory
-    base_out = Path(output_dir) if output_dir is not None else Path("comparison")
-    _ensure_dir(base_out)
-
-    # Build a base trainer for data loading and getting sample information
-    base_trainer = Trainer(
-        years=list(years),
-        signal_key=signal_key,
-        bkg_sample_names=list(samples),
-        modelname=models[0],
-        output_dir=model_dirs[0],
-        data_path=data_path,
-        tt_preselection=tt_preselection,
-    )
-    # Load data only once
-    base_trainer.load_data(force_reload=True)
-
-    # Load boosters and prepare training sets for all models
-    trainers: dict[str, Trainer] = {}
-    for model, model_dir in zip(models, model_dirs):
-        tr = Trainer(
-            years=list(years),
-            signal_key=signal_key,
-            bkg_sample_names=list(samples),
-            modelname=model,
-            output_dir=model_dir,
-            data_path=data_path,
-            tt_preselection=tt_preselection,
-        )
-        # Share the loaded raw events data from base_trainer instead of reloading
-        tr.events_dict = base_trainer.events_dict
-        tr.samples = base_trainer.samples
-        tr.sample_names = base_trainer.sample_names
-        # Prepare training set for this specific model (will use its own feature set)
-        tr.prepare_training_set(save_buffer=False)
-        tr.load_model()
-        trainers[model] = tr
-
-    # Construct combined preds_dict holding per-class events with per-model scores
-    event_filters = {
-        name: base_trainer.dval.get_label() == i for i, name in enumerate(base_trainer.sample_names)
-    }
-
-    preds_dict: dict[str, LoadedSample] = {}
-
-    # Start with weights only; features are not required for ROCAnalyzer
-    for class_name in base_trainer.sample_names:
-        preds_dict[class_name] = LoadedSample(
-            sample=base_trainer.samples[class_name],
-            events=None,
-        )
-
-    # Fill events DataFrames incrementally with model-specific columns
-    for model, tr in trainers.items():
-        # Use the model-specific prepared dval for predictions
-        y_pred = tr.bst.predict(tr.dval)
-        # Sanity check: classifier outputs must match the class set used by base_trainer
-        if y_pred.ndim != 2 or y_pred.shape[1] != len(base_trainer.sample_names):
-            raise ValueError(
-                f"Model '{model}' produces {y_pred.shape[1] if y_pred.ndim==2 else 'invalid'} classes,"
-                f" but base comparison expects {len(base_trainer.sample_names)}."
-                " Ensure models were trained with the same class set/order (signals per channel + backgrounds)."
-            )
-        for class_index, class_name in enumerate(base_trainer.sample_names):
-            mask = event_filters[class_name]
-            # Initialize events frame if needed
-            if preds_dict[class_name].events is None:
-                preds_dict[class_name].events = {
-                    "finalWeight": base_trainer.dval.get_weight()[mask],
-                }
-            # Add per-model per-class score column
-            y_pred_class = y_pred[mask, class_index]
-            preds_dict[class_name].events[f"{model}::{class_name}"] = y_pred_class
-
-    # Convert dicts to DataFrames
-    for class_name in preds_dict:
-        import pandas as pd
-
-        preds_dict[class_name].events = pd.DataFrame(preds_dict[class_name].events)
-
-    # Prepare ROC analyzer with all signals and backgrounds
-    signal_names = [
-        sig_name for sig_name in base_trainer.samples if base_trainer.samples[sig_name].isSignal
-    ]
-    background_names = [
-        bkg_name for bkg_name in base_trainer.samples if not base_trainer.samples[bkg_name].isSignal
-    ]
-
-    roc_analyzer = ROCAnalyzer(
-        years=base_trainer.years,
-        signals={sig: preds_dict[sig] for sig in signal_names},
-        backgrounds={bkg: preds_dict[bkg] for bkg in background_names},
-    )
-
-    # Register discriminants: for each signal and model, build vsAll background discriminant
-    for sig_name in signal_names:
-        for model in models:
-            sig_tagger = f"{model}::{sig_name}"
-            bkg_taggers = [f"{model}::{bkg}" for bkg in background_names]
-            roc_analyzer.process_discriminant(
-                signal_name=sig_name,
-                background_names=background_names,
-                signal_tagger=sig_tagger,
-                background_taggers=bkg_taggers,
-                custom_name=f"{model} {sig_name[-2:]}vsAll",
-            )
-
-    # Compute and plot overlay ROCs per signal
-    roc_analyzer.compute_rocs()
-
-    metrics_by_model: dict[str, dict[str, dict[str, float]]] = {m: {} for m in models}
-    for sig_name in signal_names:
-        # Collect discriminant names for this signal
-        disc_names = [
-            disc.name
-            for disc in roc_analyzer.discriminants.values()
-            if disc.signal_name == sig_name
-        ]
-        # Plot overlay
-        out_dir = _ensure_dir(base_out / "rocs")
-        roc_analyzer.plot_rocs(title=f"Compare {sig_name}", disc_names=disc_names, plot_dir=out_dir)
-
-        # Extract per-disc metrics and group by model
-        for disc in [d for d in roc_analyzer.discriminants.values() if d.signal_name == sig_name]:
-            model = disc.name.split()[0] if " " in disc.name else disc.name
-            if hasattr(disc, "get_metrics"):
-                metrics_by_model[model][sig_name] = disc.get_metrics(as_dict=True)
-
-    # Save combined metrics CSV
-    csv_path = base_out / "comparison_metrics.csv"
-    with csv_path.open("w") as f:
-        all_metric_keys = [
-            "roc_auc",
-            "pr_auc",
-            "f1_score",
-            "precision",
-            "recall",
-            "f1_score_05",
-            "balanced_accuracy",
-            "matthews_corr",
-            "optimal_threshold",
-        ]
-        header = ["model", "signal"] + all_metric_keys
-        f.write(",".join(header) + "\n")
-        for model, by_signal in metrics_by_model.items():
-            for signal, m in by_signal.items():
-                row = [model, signal] + [f"{m.get(k, 0):.6f}" for k in all_metric_keys]
-                f.write(",".join(row) + "\n")
-
-    # Save a JSON index for easy inspection
-    with (base_out / "comparison_index.json").open("w") as jf:
-        json.dump({"models": models, "years": years, "signals": list(signal_names)}, jf, indent=2)
-
-    return metrics_by_model

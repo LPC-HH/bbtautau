@@ -30,7 +30,7 @@ from boostedhh.hh_vars import (
 from boostedhh.hh_vars import years as hh_years
 from hist import Hist
 
-from bbtautau.bbtautau_utils import Channel
+from bbtautau.postprocessing.bbtautau_types import Channel
 from bbtautau.postprocessing.datacardHelpers import (
     ShapeVar,
     Syst,

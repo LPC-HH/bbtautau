@@ -17,7 +17,7 @@ from boostedhh.hh_vars import data_key
 from hist import Hist
 from Samples import SAMPLES
 
-from bbtautau.bbtautau_utils import Channel
+from bbtautau.postprocessing.bbtautau_types import Channel
 
 plt.style.use(hep.style.CMS)
 hep.style.use("CMS")

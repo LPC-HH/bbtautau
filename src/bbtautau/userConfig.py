@@ -43,6 +43,8 @@ BDT_EVAL_DIR = Path("/ceph/cms/store/user/lumori/bbtautau/BDT_predictions/")
 DATA_DIR = "/ceph/cms/store/user/lumori/bbtautau/skimmer/25Sep23AddVars_v12_private_signal"
 DATA_PATHS = path_dict(DATA_DIR)
 
+PLOT_DIR = Path("/home/users/lumori/bbtautau/plots")
+
 # backwards compatibility
 # data_dir_2022 = "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr17bbpresel_v12_private_signal"
 # data_dir_otheryears = "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr24Fix_v12_private_signal"
@@ -55,3 +57,12 @@ SHAPE_VAR = {
     "nbins": 16,
     "blind_window": [110, 150],
 }
+
+PT_CUTS = {
+    "bb": 250,
+    "tt": 200,
+}
+
+# usually will go (hh,ggf)->(hh,vbf)->(hm,ggf), etc.
+CHANNEL_ORDERING = ["hh", "hm", "he"]  # order of applying selection and vetoes
+SIGNAL_ORDERING = ["ggfbbtt", "vbfbbtt"]  # order of applying selection and vetoes

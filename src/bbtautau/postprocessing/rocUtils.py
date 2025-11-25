@@ -30,8 +30,8 @@ from sklearn.metrics import (
     roc_auc_score,
     roc_curve,
 )
-from utils import LoadedSample, rename_jetbranch_ak8
 
+from bbtautau.postprocessing.bbtautau_types import LoadedSample
 from bbtautau.postprocessing.plotting import plotting
 from bbtautau.postprocessing.Samples import SAMPLES
 
@@ -193,7 +193,7 @@ class Discriminant:
             sample_weight=self.get_weights(),
         )
         roc_auc = auc(fpr, tpr)
-        roc = ROC(fpr, tpr, thresholds, rename_jetbranch_ak8(self.get_name()), roc_auc)
+        roc = ROC(fpr, tpr, thresholds, LoadedSample.rename_jetbranch_ak8(self.get_name()), roc_auc)
         self.roc = roc
         return roc
 
