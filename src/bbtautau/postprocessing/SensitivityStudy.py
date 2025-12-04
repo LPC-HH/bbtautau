@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-import warnings
 from collections import defaultdict
-from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
@@ -17,6 +15,7 @@ from boostedhh.utils import PAD_VAL, Sample
 from joblib import Parallel, delayed
 
 from bbtautau.postprocessing import utils
+from bbtautau.postprocessing.bbtautau_types import ABCD, FOM, SRConfig
 from bbtautau.postprocessing.plotting import (
     plot_optimization_sig_eff,
     plot_optimization_thresholds,
@@ -84,13 +83,6 @@ TT_DISC_NAMES_BDT = {
 NON_QCD_BGS = ["ttbarhad", "ttbarsl", "ttbarll"]
 
 
-class FOM:
-    def __init__(self, fom_func, label, name):
-        self.fom_func = fom_func
-        self.label = label
-        self.name = name
-
-
 def fom_2sqrtB_S(b_qcd_sb, s, _tf, non_qcd_bg_in_pass_res=0):
     return np.where(
         s > 0, 2 * np.sqrt(b_qcd_sb * _tf + non_qcd_bg_in_pass_res) / s, -np.nan
@@ -141,104 +133,6 @@ FOMS_TO_OPTIMIZE = [FOMS["2sqrtB_S_var"]]
 """
 
 
-@dataclass
-class ABCD:
-    pass_sideband: float
-    fail_resonant: float
-    fail_sideband: float
-    pass_resonant: float | None = None  # should never be initialized on data!
-    isData: bool = False  # decide whether to determine the pass resonant using abcd method
-
-    pass_resonant_offset: float | None = (
-        None  # if isData, can use to add MC to data-driven estimate of pass resonant
-    )
-
-    def __post_init__(self):
-        # compute the transfer factor
-        self.tf = self.fail_resonant / self.fail_sideband if self.fail_sideband > 0 else 0
-
-        if self.isData:
-            if self.pass_resonant is not None:
-                warnings.warn(
-                    "Pass resonant should not be initialized from data (would be unblinding)! Setting to data driven value",
-                    stacklevel=2,
-                )
-
-            self.pass_resonant = self.fail_resonant / self.tf if self.tf > 0 else 0
-
-    def subtract_MC(self, other: ABCD):
-        """
-        Subtract the MC from the data-driven estimate of the pass resonant.
-        """
-        if not self.isData or other.isData:
-            warnings.warn("Must subtract MC from data. Returning initial object.", stacklevel=2)
-            return self
-
-        return ABCD(
-            pass_sideband=self.pass_sideband - other.pass_sideband,
-            fail_resonant=self.fail_resonant - other.fail_resonant,
-            fail_sideband=self.fail_sideband - other.fail_sideband,
-            isData=True,
-            pass_resonant_offset=other.pass_resonant,
-        )
-
-
-@dataclass
-class SRConfig:
-    """Configuration for a signal region optimization.
-    This supports defining orthogonal signal regions (e.g., VBF-enriched and GGF-enriched).
-    When optimizing one signal, you can exclude events selected by other signals to avoid overlap.
-    Result stored in optima dictionary. Vetos reference other SRConfig objects, vetoing the cuts for the given b_min_for_exclusion.
-    """
-
-    name: str
-    signals: list[str]
-    channel: str
-    bb_disc_name: str
-    tt_disc_name: str
-    optima: dict[str, dict] = None
-    veto_cuts: dict[str, tuple[float, float, str, str]] = (
-        None  # veto_name -> (bb_cut, tt_cut, bb_disc, tt_disc)
-    )
-    bmin_for_exclusion: float = 10.0
-
-    def add_veto_from_optimum(self, veto_sr_config: SRConfig, bmin: float = None):
-        """Extract veto cuts from another SRConfig's optima and add to this region's vetoes.
-
-        Args:
-            veto_sr_config: The SRConfig of the veto region (must have optima populated)
-            bmin: B_min value to extract cuts from (uses veto's bmin_for_exclusion if None)
-        """
-        if veto_sr_config.optima is None:
-            raise ValueError(
-                f"Veto region '{veto_sr_config.name}' has no optima to extract cuts from"
-            )
-
-        bmin = bmin or veto_sr_config.bmin_for_exclusion
-        bmin_key = f"Bmin={bmin}"
-
-        # Extract cuts from the default FOM
-        if (
-            "2sqrtB_S_var" not in veto_sr_config.optima
-            or bmin_key not in veto_sr_config.optima["2sqrtB_S_var"]
-        ):
-            raise ValueError(f"Veto region '{veto_sr_config.name}' missing optima for {bmin_key}")
-
-        optimum = veto_sr_config.optima["2sqrtB_S_var"][bmin_key]
-        bb_cut, tt_cut = optimum["cuts"]
-
-        # Initialize veto structures if needed
-        if self.veto_cuts is None:
-            self.veto_cuts = {}
-
-        self.veto_cuts[veto_sr_config.name] = (
-            bb_cut,
-            tt_cut,
-            veto_sr_config.bb_disc_name,
-            veto_sr_config.tt_disc_name[self.channel],
-        )
-
-
 class Analyser:
     def __init__(
         self,
@@ -280,7 +174,11 @@ class Analyser:
         self.region_name = sr_config.name
 
         self.sig_keys_channel = [sig + sr_config.channel for sig in sr_config.signals]
-        self.all_keys = self.sig_keys_channel + self.channel.data_samples
+        self.all_keys = (
+            self.sig_keys_channel
+            + self.channel.data_samples
+            + (self.showNonDataDrivenPortion + self.dataMinusSimABCD) * NON_QCD_BGS
+        )
 
         print("All keys: ", self.all_keys)
 
@@ -1315,6 +1213,8 @@ class Analyser:
                     channel=self.channel,
                     save_path=self.plot_dir / f"{'_'.join(self.years)}_thresholds",
                     show=False,
+                    bb_disc_label=self.bb_disc_name,
+                    tt_disc_label=self.tt_disc_name_channel,
                 )
             else:
                 # clip_value = 100 if "ggf" in self.sig_key.lower() else None
@@ -1329,6 +1229,8 @@ class Analyser:
                     show=False,
                     use_log_scale=False,
                     clip_value=clip_value,
+                    bb_disc_label=self.bb_disc_name,
+                    tt_disc_label=self.tt_disc_name_channel,
                 )
                 plot_optimization_sig_eff(
                     results=results,
@@ -1340,6 +1242,8 @@ class Analyser:
                     show=False,
                     use_log_scale=True,
                     clip_value=clip_value,
+                    bb_disc_label=self.bb_disc_name,
+                    tt_disc_label=self.tt_disc_name_channel,
                 )
         return results
 
@@ -1459,9 +1363,8 @@ class Analyser:
 
         # Add all evaluated quantities at optimum (they are stored directly, not nested)
         # Skip internal grid arrays and non-scalar values
-        skip_keys = (
-            {}
-        )  # {"BBcut_sig_eff", "TTcut_sig_eff", "fom_map", "TXbb_opt", "TXtt_opt", "sig_eff_cuts"}
+        skip_keys = {"BBcut_sig_eff", "TTcut_sig_eff", "fom_map"}
+        # {"BBcut_sig_eff", "TTcut_sig_eff", "fom_map", "TXbb_opt", "TXtt_opt", "sig_eff_cuts"}
         for k, v in optimum.items():
             if k not in skip_keys:
                 limits[k] = v
