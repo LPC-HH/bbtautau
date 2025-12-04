@@ -53,8 +53,8 @@ from bbtautau.userConfig import SHAPE_VAR
 try:
     rl.util.install_roofit_helpers()
     rl.ParametericSample.PreferRooParametricHist = False
-except:
-    print("rootfit install failed - not an issue for VBF")
+except Exception as e:
+    logging.warning(f"RooFit helpers install failed (not an issue for VBF): {e}")
 
 # logging.basicConfig(level=logging.DEBUG)
 logging.basicConfig(level=logging.INFO)

@@ -93,7 +93,7 @@ control_plot_vars = (
         )
         for i in range(3)
     ]
-    # ak8FatJetParTXbbvsQCD
+    # ak8FatJetParXbbvsQCD
     + [
         ShapeVar(
             var=f"ak8FatJetParTXbbvsQCD{i}",
@@ -176,6 +176,27 @@ def main(args: argparse.Namespace):
     # Keep dictionary structure consistent with legacy code, working out templates one year at a time
     events_dict = events_dict[args.year]
     args.sigs = {s + CHANNEL.key: SAMPLES[s + CHANNEL.key] for s in args.sigs}
+    systematics: dict[str, dict] = {}
+    systematics_path: Path | None = None
+    if args.template_dir:
+        systematics_path = args.template_dir / f"{args.year}_systematics.pkl"
+
+        if systematics_path.exists() and not args.override_systs:
+            try:
+                with systematics_path.open("rb") as syst_file:
+                    loaded_systematics = pickle.load(syst_file)
+                if isinstance(loaded_systematics, dict):
+                    systematics = copy.deepcopy(loaded_systematics)
+                else:
+                    logger.warning(
+                        "Ignoring systematics file %s with unexpected type %s",
+                        systematics_path,
+                        type(loaded_systematics),
+                    )
+            except (pickle.UnpicklingError, EOFError, AttributeError, ValueError) as exc:
+                logger.warning("Failed to load systematics from %s: %s", systematics_path, exc)
+
+    systematics.setdefault(args.year, {})
 
     # Now process each bmin value
     for bmin in args.bmin:
@@ -229,6 +250,7 @@ def main(args: argparse.Namespace):
                     "bmin": bmin,  # Use loop variable, not args.bmin
                     "use_ParT": args.use_ParT,
                     "do_vbf": args.do_vbf,
+                    "bb_disc": args.bb_disc,
                 },
             )
 
@@ -241,6 +263,16 @@ def main(args: argparse.Namespace):
                     args.blinded,
                     shape_vars,
                 )
+
+            # TODO:
+            # if systematics_path is not None:
+            #     try:
+            #         systematics_path.parent.mkdir(parents=True, exist_ok=True)
+            #         with systematics_path.open("wb") as syst_file:
+            #             pickle.dump(systematics, syst_file)
+            #         print("Saved systematics to", systematics_path)
+            #     except OSError as exc:
+            #         logger.warning("Failed to save systematics to %s: %s", systematics_path, exc)
 
             del templates
             gc.collect()
@@ -862,6 +894,18 @@ def parse_args(parser=None):
         default=[10],
         nargs="*",
         type=int,
+    )
+
+    parser.add_argument(
+        "--bb-disc",
+        help="bb discriminator to optimize",
+        default="ak8FatJetParTXbbvsQCD",
+        choices=[
+            "ak8FatJetParTXbbvsQCD",
+            "ak8FatJetParTXbbvsQCDTop",
+            "ak8FatJetPNetXbbvsQCDLegacy",
+        ],
+        type=str,
     )
 
     args = parser.parse_args()

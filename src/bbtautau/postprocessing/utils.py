@@ -295,13 +295,14 @@ def load_samples(
     signals: list[str],
     channels: list[Channel],
     samples: dict[str, Sample] = None,
+    additional_samples: dict[str, Sample] = None,
     restrict_data_to_channel: bool = True,
     filters_dict: dict[str, list[list[tuple]]] = None,
     load_columns: dict[str, list[tuple]] = None,
     load_bgs: bool = False,
     load_data: bool = True,
     loaded_samples: bool = True,
-    multithread: bool = False,
+    multithread: bool = True,
 ) -> dict[str, LoadedSample | pd.DataFrame]:
     """
     Loads and preprocesses physics event samples for a given year and analysis channel.
@@ -320,6 +321,8 @@ def load_samples(
         Dictionary mapping sample names to input file paths. First level keys are "data", "signal", "bg". Second level keys are years.
     samples : dict[str, Sample], optional
         Dictionary of sample objects to load. If None, uses the default `Samples.SAMPLES`. If samples are provided, the flags load_bgs, load_data, restrict_data_to_channel are ignored.
+    additional_samples : dict[str, Sample], optional
+        Dictionary of additional samples to load, without overriding the default samples. Useful when not using `samples` arg, and taking channel-specific samples from `CHANNELS`.
     restrict_data_to_channel : bool, optional
         If True, restricts data loading to samples associated only with the specified channels (default: True). Practical to be used without providing samples.
     filters_dict : dict[str, list[list[tuple]]], optional
@@ -398,6 +401,10 @@ def load_samples(
             for key in Samples.DATASETS:
                 if (key in samples) and (key not in channel.data_samples):
                     del samples[key]
+
+    if additional_samples is not None:
+        for key, sample in additional_samples.items():
+            samples[key] = sample
 
     print(
         f"Loading year {year}, samples",

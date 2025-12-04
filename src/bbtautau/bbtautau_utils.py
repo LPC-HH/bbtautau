@@ -40,3 +40,10 @@ def parse_common_run_args(parser):
     add_bool_arg(
         parser, "fatjet-bb-preselection", default=False, help="apply bb preselection to fatjets"
     )
+
+    parser.add_argument(
+        "--prescale-factor",
+        type=int,
+        default=None,
+        help="prescale factor for skimmer",
+    )

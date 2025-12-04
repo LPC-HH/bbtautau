@@ -24,6 +24,7 @@ def get_processor(
     nano_version: str | None = None,
     fatjet_pt_cut: float | None = None,
     fatjet_bb_preselection: bool | None = None,
+    prescale_factor: int | None = None,
 ):
     # define processor
     if processor == "skimmer":
@@ -36,6 +37,7 @@ def get_processor(
             nano_version=nano_version,
             fatjet_pt_cut=fatjet_pt_cut,
             fatjet_bb_preselection=fatjet_bb_preselection,
+            prescale_factor=prescale_factor,
         )
 
 
@@ -47,6 +49,7 @@ def main(args):
         args.nano_version,
         args.fatjet_pt_cut,
         args.fatjet_bb_preselection,
+        args.prescale_factor,
     )
 
     save_parquet = {"skimmer": True}[args.processor]

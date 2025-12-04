@@ -35,6 +35,19 @@ Search for two boosted (high transverse momentum) Higgs bosons (H) decaying to t
     - [Setup](#setup)
     - [Running locally](#running-locally)
     - [Condor jobs](#condor-jobs)
+    - [Checking jobs](#checking-jobs)
+  - [Postprocessing](#postprocessing)
+    - [Trigger study](#trigger-study)
+    - [Sensitivity study](#sensitivity-study)
+    - [Control plots](#control-plots)
+    - [BDT](#bdt)
+    - [Kubernetes: generate BDT jobs from templates](#kubernetes-generate-bdt-jobs-from-templates)
+    - [Templates](#templates)
+  - [Datacard and fits](#datacard-and-fits)
+    - [CMSSW + Combine Quickstart](#cmssw--combine-quickstart)
+    - [Create datacards](#create-datacards)
+    - [Combine scripts](#combine-scripts)
+    - [Postfit plots](#postfit-plots)
   - [Transferring files to FNAL with Rucio](#transferring-files-to-fnal-with-rucio)
 
 
@@ -385,6 +398,8 @@ e.g. (always from inside the cards folders), this will combine the cards, create
 ```bash
 run_blinded_bbtt.sh --workspace --bfit --limits
 ```
+
+Another script, 'src/bbtautau/combine/run_blinded_bbtt_frzAllConstrainedNuisances.sh' can be used to fit with all constrained nuisances frozen.
 
 See more comments inside the file.
 
