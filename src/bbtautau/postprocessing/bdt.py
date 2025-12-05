@@ -17,8 +17,8 @@ from sklearn.model_selection import train_test_split
 from tabulate import tabulate
 
 from bbtautau.postprocessing.bbtautau_types import LoadedSample
-from bbtautau.postprocessing.bdt_config import bdt_config
-from bbtautau.postprocessing.bdt_utils import _ensure_dir
+from bbtautau.postprocessing.bdt_config import BDT_CONFIG
+from bbtautau.postprocessing.bdt_utils import _ensure_dir, get_expected_sample_order
 from bbtautau.postprocessing.rocUtils import ROCAnalyzer, multiclass_confusion_matrix
 from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES
 from bbtautau.postprocessing.utils import (
@@ -58,7 +58,6 @@ class Trainer:
     def __init__(
         self,
         years: list[str],
-        signal_key: str,
         bkg_sample_names: list[str] = None,
         modelname: str = None,
         data_path: str = None,
@@ -72,22 +71,63 @@ class Trainer:
             years = list(years)
         self.years = years
 
-        self.signal_key = signal_key
-        if bkg_sample_names is not None:
-            self.bkg_sample_names = bkg_sample_names
-
-        # need to load signal before splitting into channels
-        self.samples = {name: SAMPLES[name] for name in [self.signal_key] + self.bkg_sample_names}
-
         # ensure backwards compatibility. Choice of default data paths is done in userConfig.py
         self.data_paths = path_dict(data_path) if data_path is not None else DATA_PATHS
 
         self.modelname = modelname
-        self.bdt_config = bdt_config
+        self.bdt_config = BDT_CONFIG
         self.tt_preselection = tt_preselection
+
+        # Read signals from config (must be specified in config)
+        if "signals" not in self.bdt_config[self.modelname]:
+            raise ValueError(
+                f"Model '{self.modelname}' must specify 'signals' in config. "
+                f"Expected: signals: ['signal1'] or signals: ['signal1', 'signal2']"
+            )
+
+        config_signals = self.bdt_config[self.modelname]["signals"]
+        if not isinstance(config_signals, list) or len(config_signals) not in [1, 2]:
+            raise ValueError(
+                f"Model '{self.modelname}' has invalid 'signals' in config: {config_signals}. "
+                f"Must be a list with 1 or 2 elements."
+            )
+
+        # Use signals from config
+        self.signal_keys = list(config_signals)
+
+        # Infer model_type from number of signals
+        if len(self.signal_keys) == 1:
+            self.model_type = "single_signal"
+        elif len(self.signal_keys) == 2:
+            self.model_type = "unified"
+        else:
+            raise ValueError(
+                f"signals must contain 1 or 2 signals, got {len(self.signal_keys)}: {self.signal_keys}"
+            )
+
+        if bkg_sample_names is not None:
+            self.bkg_sample_names = bkg_sample_names
+
+        # need to load signal before splitting into channels
+        self.samples = {name: SAMPLES[name] for name in self.signal_keys + self.bkg_sample_names}
+
         self.train_vars = self.bdt_config[self.modelname]["train_vars"]
         self.hyperpars = self.bdt_config[self.modelname]["hyperpars"]
         self.feats = [feat for cat in self.train_vars for feat in self.train_vars[cat]]
+
+        # Validate num_class matches number of signals and backgrounds
+        # Each signal has 3 channels (he, hh, hm)
+        # Number of background classes = len(bkg_sample_names)
+        num_signal_classes = len(self.signal_keys) * 3
+        num_bkg_classes = len(self.bkg_sample_names)
+        expected_num_class = num_signal_classes + num_bkg_classes
+        if self.hyperpars.get("num_class") != expected_num_class:
+            raise ValueError(
+                f"Model '{self.modelname}' has num_class={self.hyperpars.get('num_class')} "
+                f"but {len(self.signal_keys)} signal(s) * 3 channels + {num_bkg_classes} backgrounds "
+                f"requires num_class={expected_num_class}. signals={self.signal_keys}, "
+                f"bkg_samples={self.bkg_sample_names}"
+            )
 
         self.events_dict = {year: {} for year in self.years}
 
@@ -131,7 +171,7 @@ class Trainer:
                 self.events_dict[year] = load_samples(
                     year=year,
                     paths=self.data_paths[year],
-                    signals=[self.signal_key],
+                    signals=self.signal_keys,
                     channels=list(CHANNELS.values()),
                     samples=self.samples,
                     filters_dict=filters_dict,
@@ -150,12 +190,17 @@ class Trainer:
                 leptons_assignment(self.events_dict[year], dR_cut=1.5)
                 derive_lepton_variables(self.events_dict[year])
 
-        for ch in CHANNELS:
-            self.samples[f"{self.signal_key}{ch}"] = SAMPLES[f"{self.signal_key}{ch}"]
-        del self.samples[self.signal_key]
+        # Build sample_names using the order defined in bdt_utils. Here order counts!
+        self.sample_names = get_expected_sample_order(self.signal_keys, self.bkg_sample_names)
 
-        # define sample list as signals + bkg samples
-        self.sample_names = [f"{self.signal_key}{ch}" for ch in CHANNELS] + self.bkg_sample_names
+        # Update samples dict to include all signal channels and remove base signal keys; these do not need to be ordered
+        for signal_key in self.signal_keys:
+            for ch in CHANNELS:
+                channel_key = f"{signal_key}{ch}"
+                self.samples[channel_key] = SAMPLES[channel_key]
+            # Remove base signal key from samples dict
+            if signal_key in self.samples:
+                del self.samples[signal_key]
 
     @staticmethod
     def save_stats(stats, filename):
@@ -1004,7 +1049,6 @@ def eval_bdt_preds(
     years: list[str],
     samples: list[str],
     model: str,
-    signal_key: str,
     save: bool = True,
     output_dir: str | None = None,
     data_path: str | None = None,
@@ -1014,7 +1058,7 @@ def eval_bdt_preds(
 
     Args:
         eval_samples: List of sample names to evaluate
-        model: Name of model to use for predictions
+        model: Name of model to use for predictions (signals are read from model config)
 
     One day to be made more flexible (here only integrated with the data you already train on)
     """
@@ -1035,7 +1079,6 @@ def eval_bdt_preds(
     # Load model globally for all years, evaluate by year to reduce memory usage
     bst = Trainer(
         years=years,
-        signal_key=signal_key,
         bkg_sample_names=samples,
         modelname=model,
         data_path=data_path,
@@ -1049,7 +1092,6 @@ def eval_bdt_preds(
         # To reduce memory usage, load data once for each year
         trainer = Trainer(
             years=[year],
-            signal_key=signal_key,
             bkg_sample_names=samples,
             modelname=model,
             data_path=data_path,
@@ -1089,7 +1131,6 @@ def compare_models(
     models: list[str],
     model_dirs: list[str],
     years: list[str],
-    signal_key: str,
     samples: list[str] | None = None,
     data_path: str | None = None,
     tt_preselection: bool = False,
@@ -1100,11 +1141,11 @@ def compare_models(
     - Saves per-signal overlay ROC plots across models (when comparable)
     - Saves a CSV with metrics for each (model, signal)
 
+    Args:
+        models: List of model names (signals are read from each model's config)
+
     Returns a nested dict: metrics_by_model[model][signal] -> metrics_dict
     """
-
-    if samples is None:
-        samples = ["dyjets", "qcd", "ttbarhad", "ttbarll", "ttbarsl"]
 
     # Use a top-level comparison directory
     base_out = Path(output_dir) if output_dir is not None else Path("comparison")
@@ -1113,7 +1154,6 @@ def compare_models(
     # Build a base trainer for data loading and getting sample information
     base_trainer = Trainer(
         years=list(years),
-        signal_key=signal_key,
         bkg_sample_names=list(samples),
         modelname=models[0],
         output_dir=model_dirs[0],
@@ -1128,8 +1168,6 @@ def compare_models(
     for model, model_dir in zip(models, model_dirs):
         tr = Trainer(
             years=list(years),
-            signal_key=signal_key,
-            bkg_sample_names=list(samples),
             modelname=model,
             output_dir=model_dir,
             data_path=data_path,
@@ -1280,12 +1318,6 @@ if __name__ == "__main__":
         help="Name of the model configuration to use",
     )
     parser.add_argument(
-        "--signal-key",
-        type=str,
-        default="ggfbbtt",
-        help="Key for the signal sample",
-    )
-    parser.add_argument(
         "--tt-preselection",
         action="store_true",
         default=False,
@@ -1367,7 +1399,6 @@ if __name__ == "__main__":
                 years=args.years,
                 samples=args.samples,
                 model=args.model,
-                signal_key=args.signal_key,
                 output_dir=args.output_dir,
                 data_path=args.data_path,
                 tt_preselection=args.tt_preselection,
@@ -1399,7 +1430,6 @@ if __name__ == "__main__":
             models=args.models,
             model_dirs=resolved_model_dirs,
             years=args.years,
-            signal_key=args.signal_key,
             samples=args.samples,
             data_path=args.data_path,
             tt_preselection=args.tt_preselection,
@@ -1414,7 +1444,6 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         data_path=args.data_path,
         tt_preselection=args.tt_preselection,
-        signal_key=args.signal_key,
     )
 
     if args.train:

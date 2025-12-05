@@ -1,8 +1,21 @@
 from __future__ import annotations
 
-bdt_config = {
+"""
+BDT Configuration Dictionary
+
+Each model configuration must specify:
+- signals: List of signal keys to use for training (1 or 2 elements)
+    - 1 signal (e.g., ["ggfbbtt"]): 8 classes (3 signal channels + 5 backgrounds)
+        - Class order: [signal_he, signal_hh, signal_hm, dyjets, qcd, ttbarhad, ttbarll, ttbarsl]
+    - 2 signals (e.g., ["ggfbbtt", "vbfbbtt"]): 11 classes (3 ggf + 3 vbf + 5 backgrounds)
+        - Class order: [ggfbbtthe, ggfbbtthh, ggfbbtthm, vbfbbtthe, vbfbbtthh, vbfbbtthm, dyjets, qcd, ttbarhad, ttbarll, ttbarsl]
+- hyperpars.num_class: Must match the number of classes (8 for single signal, 11 for unified)
+"""
+
+BDT_CONFIG = {
     "28May25_baseline": {
         "modelname": "28May25_baseline",
+        "signals": ["ggfbbtt"],  # Signal(s) to use for training
         "hyperpars": {
             "objective": "multi:softprob",
             "max_depth": 9,
@@ -44,6 +57,7 @@ bdt_config = {
     },
     "test": {
         "modelname": "test",
+        "signals": ["ggfbbtt"],
         "hyperpars": {
             "objective": "multi:softprob",
             "max_depth": 12,
@@ -86,6 +100,7 @@ bdt_config = {
     },
     "10July25_baseline": {
         "modelname": "10July25_baseline",
+        "signals": ["ggfbbtt"],
         "hyperpars": {
             "objective": "multi:softprob",
             "max_depth": 9,
@@ -127,6 +142,7 @@ bdt_config = {
     },
     "10July25_leptons": {
         "modelname": "10July25_leptons",
+        "signals": ["ggfbbtt"],
         "hyperpars": {
             "objective": "multi:softprob",
             "max_depth": 12,
@@ -178,6 +194,7 @@ bdt_config = {
     },
     "13July25_leptons_noXbb": {
         "modelname": "13July25_leptons_noXbb",
+        "signals": ["ggfbbtt"],
         "hyperpars": {
             "objective": "multi:softprob",
             "max_depth": 12,
@@ -229,6 +246,7 @@ bdt_config = {
     },
     "29July25_loweta_lowreg": {
         "modelname": "29July25_loweta_lowreg",
+        "signals": ["ggfbbtt"],
         "hyperpars": {
             "objective": "multi:softprob",
             "max_depth": 12,
@@ -281,6 +299,7 @@ bdt_config = {
     },
     "20aug25_loweta_lowreg": {
         "modelname": "20aug25_loweta_lowreg",
+        "signals": ["ggfbbtt"],
         "hyperpars": {
             "objective": "multi:softprob",
             "max_depth": 12,
@@ -337,6 +356,7 @@ bdt_config = {
     },
     "20aug25_loweta_lowreg_vbf": {
         "modelname": "20aug25_loweta_lowreg_vbf",
+        "signals": ["vbfbbtt"],  # VBF-only model
         "hyperpars": {
             "objective": "multi:softprob",
             "max_depth": 12,
@@ -391,8 +411,72 @@ bdt_config = {
             "misc": ["METPt", "METPhi", "ht"],
         },
     },
-    "19oct25_ak4away": {
-        "modelname": "19oct25_ak4away",
+    "19oct25_ak4away_ggfbbtt": {
+        "modelname": "19oct25_ak4away_ggfbbtt",
+        "signals": ["ggfbbtt"],
+        "hyperpars": {
+            "objective": "multi:softprob",
+            "max_depth": 12,
+            "eta": 0.07,
+            "subsample": 0.2,
+            "alpha": 1.0,
+            "gamma": 1.0,
+            "lambda": 1.0,
+            "colsample_bytree": 0.6,
+            "num_parallel_tree": 50,
+            "eval_metric": "mlogloss",
+            "tree_method": "hist",
+            "num_class": 8,
+            "device": "cuda",
+        },
+        "num_rounds": 100,
+        "test_size": 0.2,
+        "random_seed": 42,
+        "var_classes": ["fatjet", "leptons", "misc"],
+        "train_vars": {
+            "fatjet": [
+                "ttFatJetPt",
+                "ttFatJetPhi",
+                "ttFatJetEta",
+                "ttFatJetParTmassResApplied",
+                "ttFatJetParTmassVisApplied",
+                "ttFatJetParTQCD",
+                "ttFatJetParTTop",
+                "ttFatJetParTQCD0HF",
+                "ttFatJetParTQCD1HF",
+                "ttFatJetParTQCD2HF",
+                "ttFatJetParTTopW",
+                "ttFatJetParTTopbW",
+                "ttFatJetParTXtauhtauh",
+                "ttFatJetParTXtauhtaue",
+                "ttFatJetParTXtauhtaum",
+            ],
+            "leptons": [
+                "ttElectronPt",
+                "ttElectronDeltaEta",
+                "ttElectronDeltaPhi",
+                "ttElectron_dRak8Jet",
+                "ttElectronMass",
+                "ttElectroncharge",
+                "ttMuonPt",
+                "ttMuonDeltaEta",
+                "ttMuonDeltaPhi",
+                "ttMuon_dRak8Jet",
+                "ttMuonMass",
+                "ttMuoncharge",
+            ],
+            "away": [
+                "ttJetAwayPt",
+                "ttJetAwayPhi",
+                "ttJetAwayEta",
+                "ttJetAwayMass",
+            ],
+            "misc": ["METPt", "METPhi", "ht"],
+        },
+    },
+    "19oct25_ak4away_vbfbbtt": {
+        "modelname": "19oct25_ak4away_vbfbbtt",
+        "signals": ["vbfbbtt"],
         "hyperpars": {
             "objective": "multi:softprob",
             "max_depth": 12,

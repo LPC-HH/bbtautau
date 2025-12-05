@@ -11,16 +11,109 @@ import xgboost as xgb
 from boostedhh.utils import PAD_VAL
 
 from bbtautau.postprocessing.bbtautau_types import Channel, LoadedSample
-from bbtautau.postprocessing.bdt_config import bdt_config
+from bbtautau.postprocessing.bdt_config import BDT_CONFIG
 from bbtautau.postprocessing.Samples import CHANNELS
+
+"""
+TODO: ensure that if load multiple models, the BDT scores are added correctly to the events dataframe and do not overwrite each other.
+
+"""
+
 
 # Non-interactive backend for batch/containers
 mpl.use("Agg")
+
+# Channel order for BDT models (must match the order used in training)
+# This defines the order of channels for each signal: he, hh, hm
+CHANNEL_ORDER_BDT = ["he", "hh", "hm"]
+
+# Background order for BDT models (must match the order used in training)
+# This defines the order of background samples
+DEFAULT_BKG_ORDER = ["dyjets", "qcd", "ttbarhad", "ttbarll", "ttbarsl"]
+
+
+def get_expected_sample_order(signals: list[str], bkg_sample_names: list[str]) -> list[str]:
+    """Get the expected sample order for BDT model training/inference.
+
+    The order is: signal channels (he, hh, hm) for each signal, then backgrounds.
+    This matches the class order expected by the BDT model.
+
+    Backgrounds are ordered according to DEFAULT_BKG_ORDER if they match,
+    otherwise in the order provided.
+
+    Args:
+        signals: List of signal keys (e.g., ['ggfbbtt'] or ['ggfbbtt', 'vbfbbtt'])
+        bkg_sample_names: List of background sample names
+
+    Returns:
+        List of sample names in the expected order for BDT model classes
+    """
+    sample_names = []
+    # For each signal, add its channels in order: he, hh, hm
+    for signal_key in signals:
+        for ch in CHANNEL_ORDER_BDT:
+            sample_names.append(f"{signal_key}{ch}")
+
+    # Add backgrounds: use DEFAULT_BKG_ORDER if backgrounds match it, otherwise use provided order
+    if set(bkg_sample_names) == set(DEFAULT_BKG_ORDER):
+        # Use the standard order
+        sample_names.extend(DEFAULT_BKG_ORDER)
+    else:
+        # Use the order provided
+        sample_names.extend(bkg_sample_names)
+
+    return sample_names
 
 
 def _ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def get_bdt_preds_dir(
+    base_dir: Path,
+    modelname: str,
+    signal_objectives: list[str],
+    channel: Channel,
+    year: str,
+    tt_pres: bool = False,
+    test_mode: bool = False,
+) -> Path:
+    """Get the directory path for BDT predictions cache files.
+
+    Directory structure: base_dir / tag / signal / modelname / channel.key / year
+
+    Where:
+    - tag is "test", "tt_pres", or "full_presel" based on test_mode and tt_pres
+    - signal is the first signal objective if there's one, otherwise "unified_signals"
+
+    Args:
+        base_dir: Base directory for BDT predictions
+        modelname: Name of the BDT model
+        signal_objectives: List of signal objectives (e.g., ['ggfbbtt'] or ['ggfbbtt', 'vbfbbtt'])
+        channel: Channel object with .key attribute
+        year: Year string (e.g., '2018')
+        tt_pres: Whether tt preselection is applied
+        test_mode: Whether in test mode
+
+    Returns:
+        Path to the directory for BDT predictions
+    """
+    # Determine tag based on test_mode and tt_pres
+    if test_mode:
+        tag = "test"
+    elif tt_pres:
+        tag = "tt_pres"
+    else:
+        tag = "full_presel"
+
+    # Determine signal subdirectory
+    if len(signal_objectives) == 1:
+        signal_dir = signal_objectives[0]
+    else:
+        signal_dir = "unified_signals"
+
+    return base_dir / tag / signal_dir / modelname / channel.key / year
 
 
 # Centralize this for other applications:
@@ -42,86 +135,172 @@ def _get_bdt_key(
 def _add_bdt_scores(
     events: pd.DataFrame,
     sample_bdt_preds: np.ndarray,
-    signal_objective: str,
-    multiclass: bool,
-    all_outs: bool = True,
+    signal_objectives: list[str],  # For unified model, list of signals
     jshift: str = "",
 ):
     """
     Add BDT scores to events DataFrame.
 
-    Now uses signal_objective (e.g., 'ggfbbtt', 'vbfbbtt') to namespace all BDT columns,
+    Now uses signal_objectives (e.g., ['ggfbbtt'] or ['ggfbbtt', 'vbfbbtt']) to namespace all BDT columns,
     so multiple models can coexist in the same DataFrame.
 
-    Assumes class mapping to be:
-    Class 0: bbtthe
-    Class 1: bbtthh
-    Class 2: bbtthm
-    Class 3: dyjets
-    Class 4: qcd
-    Class 5: ttbarhad
-    Class 6: ttbarll
-    Class 7: ttbarsl
+    Class ordering:
+    - single_signal model (8 classes):
+        Class 0: signal_he (e.g., ggfbbtthe or vbfbbtthe)
+        Class 1: signal_hh (e.g., ggfbbtthh or vbfbbtthh)
+        Class 2: signal_hm (e.g., ggfbbtthm or vbfbbtthm)
+        Class 3: dyjets
+        Class 4: qcd
+        Class 5: ttbarhad
+        Class 6: ttbarll
+        Class 7: ttbarsl
+
+    - unified model (11 classes):
+        Class 0-2: first signal channels (he, hh, hm)
+        Class 3-5: second signal channels (he, hh, hm)
+        Class 6: dyjets
+        Class 7: qcd
+        Class 8: ttbarhad
+        Class 9: ttbarll
+        Class 10: ttbarsl
 
     Args:
         events: DataFrame to add scores to
-        sample_bdt_preds: BDT predictions array
-        signal_objective: Signal objective (e.g., 'ggfbbtt', 'vbfbbtt') to namespace columns
-        multiclass: Whether this is multiclass classification
-        all_outs: Whether to add all output scores
-        jshift: JEC/JMSR shift label
+        sample_bdt_preds: BDT predictions array with shape (n_events, n_classes)
+            - For single signal: n_classes = 8 (3 signal channels + 5 backgrounds)
+            - For unified model: n_classes = 11 (6 signal channels + 5 backgrounds)
+        signal_objectives: List of 1 or 2 signal objectives (e.g., ['ggfbbtt'] or ['ggfbbtt', 'vbfbbtt'])
+        jshift: JEC/JMSR shift label (e.g., 'JEC_up', 'JMSR_down')
     """
 
     if jshift != "":
         jshift = "_" + jshift
 
-    prefix = _get_bdt_key(signal_objective, prefix_only=True)
+    # Validate and normalize signal_objectives
+    if not isinstance(signal_objectives, list):
+        raise ValueError(f"signal_objectives must be a list, got {signal_objectives}")
 
-    if not multiclass:
-        events[prefix + jshift] = sample_bdt_preds
-    else:
-        he_score = sample_bdt_preds[:, 0]  # TODO could be de-hardcoded
-        hh_score = sample_bdt_preds[:, 1]
-        hm_score = sample_bdt_preds[:, 2]
+    single_signal = len(signal_objectives) == 1
 
-        events[f"{prefix}tauhtauh{jshift}"] = hh_score
-        events[f"{prefix}tauhtaum{jshift}"] = hm_score
-        events[f"{prefix}tauhtaue{jshift}"] = he_score
+    if single_signal:
+        # Single signal model: 3 signal channels + 5 backgrounds
 
-        if all_outs:
-            events[f"{prefix}DY{jshift}"] = sample_bdt_preds[:, 3]
-            events[f"{prefix}QCD{jshift}"] = sample_bdt_preds[:, 4]
-            events[f"{prefix}TThad{jshift}"] = sample_bdt_preds[:, 5]
-            events[f"{prefix}TTll{jshift}"] = sample_bdt_preds[:, 6]
-            events[f"{prefix}TTSL{jshift}"] = sample_bdt_preds[:, 7]
+        signal_objective = signal_objectives[0]
+
+        events[
+            _get_bdt_key(signal_objective, prefix_only=False, channel=CHANNELS["he"], suffix=jshift)
+        ] = sample_bdt_preds[
+            :, 0
+        ]  # signal channel he
+        events[
+            _get_bdt_key(signal_objective, prefix_only=False, channel=CHANNELS["hh"], suffix=jshift)
+        ] = sample_bdt_preds[
+            :, 1
+        ]  # signal channel hh
+        events[
+            _get_bdt_key(signal_objective, prefix_only=False, channel=CHANNELS["hm"], suffix=jshift)
+        ] = sample_bdt_preds[
+            :, 2
+        ]  # signal channel hm
+
+        events[f"BDTDY{jshift}"] = sample_bdt_preds[:, 3]
+        events[f"BDTQCD{jshift}"] = sample_bdt_preds[:, 4]
+        events[f"BDTTThad{jshift}"] = sample_bdt_preds[:, 5]
+        events[f"BDTTTll{jshift}"] = sample_bdt_preds[:, 6]
+        events[f"BDTTTSL{jshift}"] = sample_bdt_preds[:, 7]
 
         for ch in CHANNELS.values():
-            taukey = ch.tagger_label
-            base_sig = events[f"{prefix}{taukey+jshift}"]
-            events[f"{prefix}{taukey+jshift}vsQCD"] = np.nan_to_num(
-                base_sig / (base_sig + events[f"{prefix}QCD{jshift}"]),
+            base_sig = events[
+                _get_bdt_key(signal_objective, prefix_only=False, channel=ch, suffix=jshift)
+            ]
+            events[
+                _get_bdt_key(
+                    signal_objective, prefix_only=False, channel=ch, suffix=f"vsQCD{jshift}"
+                )
+            ] = np.nan_to_num(
+                base_sig / (base_sig + events[f"BDTQCD{jshift}"]),
                 nan=PAD_VAL,
             )
 
-            events[f"{prefix}{taukey+jshift}vsAll"] = np.nan_to_num(
+            events[
+                _get_bdt_key(
+                    signal_objective, prefix_only=False, channel=ch, suffix=f"vsAll{jshift}"
+                )
+            ] = np.nan_to_num(
                 base_sig
                 / (
                     base_sig
-                    + events[f"{prefix}QCD{jshift}"]
-                    + events[f"{prefix}TThad{jshift}"]
-                    + events[f"{prefix}TTll{jshift}"]
-                    + events[f"{prefix}TTSL{jshift}"]
-                    + events[f"{prefix}DY{jshift}"]
+                    + events[f"BDTQCD{jshift}"]
+                    + events[f"BDTTThad{jshift}"]
+                    + events[f"BDTTTll{jshift}"]
+                    + events[f"BDTTTSL{jshift}"]
+                    + events[f"BDTDY{jshift}"]
                 ),
                 nan=PAD_VAL,
             )
+    else:
+        for i, signal_objective in enumerate(signal_objectives):
+            events[
+                _get_bdt_key(
+                    signal_objective, prefix_only=False, channel=CHANNELS["he"], suffix=jshift
+                )
+            ] = sample_bdt_preds[:, i * 3 + 0]
+            events[
+                _get_bdt_key(
+                    signal_objective, prefix_only=False, channel=CHANNELS["hh"], suffix=jshift
+                )
+            ] = sample_bdt_preds[:, i * 3 + 1]
+            events[
+                _get_bdt_key(
+                    signal_objective, prefix_only=False, channel=CHANNELS["hm"], suffix=jshift
+                )
+            ] = sample_bdt_preds[:, i * 3 + 2]
+
+        events[f"BDTDY{jshift}"] = sample_bdt_preds[:, 6]
+        events[f"BDTQCD{jshift}"] = sample_bdt_preds[:, 7]
+        events[f"BDTTThad{jshift}"] = sample_bdt_preds[:, 8]
+        events[f"BDTTTll{jshift}"] = sample_bdt_preds[:, 9]
+        events[f"BDTTTSL{jshift}"] = sample_bdt_preds[:, 10]
+
+        # Add vsQCD and vsAll discriminants for both signals
+        for signal_objective in signal_objectives:
+            for ch in CHANNELS.values():
+                base_sig = events[
+                    _get_bdt_key(signal_objective, prefix_only=False, channel=ch, suffix=jshift)
+                ]
+
+                events[
+                    _get_bdt_key(
+                        signal_objective, prefix_only=False, channel=ch, suffix=f"vsQCD{jshift}"
+                    )
+                ] = np.nan_to_num(
+                    base_sig / (base_sig + events[f"BDTQCD{jshift}"]),
+                    nan=PAD_VAL,
+                )
+
+                events[
+                    _get_bdt_key(
+                        signal_objective, prefix_only=False, channel=ch, suffix=f"vsAll{jshift}"
+                    )
+                ] = np.nan_to_num(
+                    base_sig
+                    / (
+                        base_sig
+                        + events[f"BDTQCD{jshift}"]
+                        + events[f"BDTTThad{jshift}"]
+                        + events[f"BDTTTll{jshift}"]
+                        + events[f"BDTTTSL{jshift}"]
+                        + events[f"BDTDY{jshift}"]
+                    ),
+                    nan=PAD_VAL,
+                )
 
 
 def compute_bdt_preds(
     events_dict: dict[str, dict[str, LoadedSample]],
     modelname: str,
     model_dir: Path,
-    signal_objective: str,
+    signal_objectives: list[str],
     tt_pres: bool,
     channel: Channel,
     test_mode: bool = False,
@@ -162,22 +341,10 @@ def compute_bdt_preds(
     bst = xgb.Booster()
     bst.load_model(str(model_path))
 
-    # add some flexibility to the modelname
-    if modelname not in bdt_config and modelname.endswith("bbtt"):
-        if modelname.endswith("ggfbbtt"):
-            config_modelname = modelname.removesuffix("_ggfbbtt")
-        elif modelname.endswith("vbfbbtt"):
-            config_modelname = modelname.removesuffix("_vbfbbtt")
-        else:
-            raise ValueError(f"Modelname {modelname} does not end with ggfbbtt or vbfbbtt")
-
-    else:
-        config_modelname = modelname
-
     feature_names = [
         feat
-        for cat in bdt_config[config_modelname]["train_vars"]
-        for feat in bdt_config[config_modelname]["train_vars"][cat]
+        for cat in BDT_CONFIG[modelname]["train_vars"]
+        for feat in BDT_CONFIG[modelname]["train_vars"][cat]
     ]
 
     # Use ThreadPoolExecutor for parallel processing (threads share memory, no pickling needed)
@@ -212,22 +379,19 @@ def compute_bdt_preds(
             _add_bdt_scores(
                 events_dict[year][sample].events,
                 y_pred,
-                signal_objective=signal_objective,
-                multiclass=True,
-                all_outs=True,
+                signal_objectives=signal_objectives,
             )
 
-            if save_dir:
-                # Updated directory structure: modelname/signal/channel/year/
-
-                if test_mode:
-                    tag = "test"
-                elif tt_pres:
-                    tag = "tt_pres"
-                else:
-                    tag = "full_presel"
-
-                file_dir = Path(save_dir) / tag / signal_objective / modelname / channel.key / year
+            if save_dir is not None:
+                file_dir = get_bdt_preds_dir(
+                    base_dir=save_dir,
+                    modelname=modelname,
+                    signal_objectives=signal_objectives,
+                    channel=channel,
+                    year=year,
+                    tt_pres=tt_pres,
+                    test_mode=test_mode,
+                )
                 file_dir.mkdir(exist_ok=True, parents=True)
                 with (file_dir / f"{sample}_preds.pkl").open("wb") as f:
                     pickle.dump(y_pred, f)
@@ -238,7 +402,7 @@ def compute_bdt_preds(
 def check_bdt_prediction_shapes(
     events_dict: dict[str, dict[str, LoadedSample]],
     modelname: str,
-    signal_objective: str,
+    signal_objectives: list[str],
     tt_pres: bool,
     channel: Channel,
     bdt_preds_dir: Path,
@@ -260,23 +424,16 @@ def check_bdt_prediction_shapes(
     """
     for year in events_dict:
         for sample in events_dict[year]:
-            # Updated directory structure: tag/signal/modelname/channel/year/
-            if test_mode:
-                tag = "test"
-            elif tt_pres:
-                tag = "tt_pres"
-            else:
-                tag = "full_presel"
-
-            shape_file = (
-                Path(bdt_preds_dir)
-                / tag
-                / signal_objective
-                / modelname
-                / channel.key
-                / year
-                / f"{sample}_shapes.pkl"
+            preds_dir = get_bdt_preds_dir(
+                base_dir=bdt_preds_dir,
+                modelname=modelname,
+                signal_objectives=signal_objectives,
+                channel=channel,
+                year=year,
+                tt_pres=tt_pres,
+                test_mode=test_mode,
             )
+            shape_file = preds_dir / f"{sample}_shapes.pkl"
             if not shape_file.exists():
                 print(f"Prediction file does not exist: {shape_file}")
                 return False
@@ -292,12 +449,11 @@ def check_bdt_prediction_shapes(
 def load_bdt_preds(
     events_dict: dict[str, dict[str, LoadedSample]],
     modelname: str,
-    signal_objective: str,
+    signal_objectives: list[str],
     tt_pres: bool,
     channel: Channel,
     bdt_preds_dir: Path,
     test_mode: bool = False,
-    all_outs: bool = True,
 ):
     """Load BDT predictions from disk and add scores to events.
 
@@ -307,42 +463,31 @@ def load_bdt_preds(
     Args:
         events_dict: Dictionary with structure {year: {sample: LoadedSample}}
         modelname: Name of the BDT model
-        signal_key: Signal key (e.g., 'ggfbbtt', 'vbfbbtt')
+        signal_objectives: List of signal objectives (e.g., ['ggfbbtt', 'vbfbbtt'])
         channel: Channel object with .key attribute
         bdt_preds_dir: Directory containing BDT predictions
         test_mode: Whether in test mode
-        all_outs: Whether to load all outputs
     """
 
     for year in events_dict:
         for sample in events_dict[year]:
-            # Updated directory structure: modelname/signal/channel/year/
-            if test_mode:
-                tag = "test"
-            elif tt_pres:
-                tag = "tt_pres"
-            else:
-                tag = "full_presel"
-
-            pred_file = (
-                Path(bdt_preds_dir)
-                / tag
-                / signal_objective
-                / modelname
-                / channel.key
-                / year
-                / f"{sample}_preds.pkl"
+            preds_dir = get_bdt_preds_dir(
+                base_dir=bdt_preds_dir,
+                modelname=modelname,
+                signal_objectives=signal_objectives,
+                channel=channel,
+                year=year,
+                tt_pres=tt_pres,
+                test_mode=test_mode,
             )
+            pred_file = preds_dir / f"{sample}_preds.pkl"
 
             bdt_preds = pickle.load(pred_file.open("rb"))
 
-            multiclass = len(bdt_preds.shape) > 1
             _add_bdt_scores(
                 events_dict[year][sample].events,
                 bdt_preds,
-                signal_objective=signal_objective,
-                multiclass=multiclass,
-                all_outs=all_outs,
+                signal_objectives=signal_objectives,
             )
 
 
@@ -350,13 +495,11 @@ def compute_or_load_bdt_preds(
     events_dict: dict[str, dict[str, LoadedSample]],
     modelname: str,
     model_dir: Path,
-    signal_objective: str,
     tt_pres: bool,
     channel: Channel,
     bdt_preds_dir: Path,
     test_mode: bool = False,
     at_inference: bool = False,
-    all_outs: bool = True,
 ):
     """Wrapper function to compute or load BDT predictions.
 
@@ -375,14 +518,12 @@ def compute_or_load_bdt_preds(
         bdt_preds_dir: Directory containing/to save BDT predictions
         test_mode: Whether in test mode
         at_inference: If True, always compute predictions (don't try to load)
-        all_outs: Whether to load/compute all outputs
 
     Example:
         >>> compute_or_load_bdt_preds(
         ...     events_dict=my_events,
         ...     modelname="29July25_loweta_lowreg",
         ...     model_dir=Path("/path/to/models"),
-        ...     signal_objective="ggfbbtt",
         ...     channel=my_channel,
         ...     bdt_preds_dir=Path("/path/to/predictions"),
         ...     at_inference=False,  # Will try to load if available
@@ -390,15 +531,28 @@ def compute_or_load_bdt_preds(
     """
     import time
 
+    if modelname not in BDT_CONFIG:
+        raise ValueError(f"Could not find config for modelname {modelname}")
+
+    if "signals" not in BDT_CONFIG[modelname]:
+        raise ValueError(f"Model '{modelname}' must specify 'signals' in config")
+
+    signal_objectives = BDT_CONFIG[modelname]["signals"]
+    if not isinstance(signal_objectives, list) or len(signal_objectives) not in [1, 2]:
+        raise ValueError(
+            f"Model '{modelname}' has invalid 'signals' in config: {signal_objectives}. "
+            f"Must be a list with 1 or 2 elements."
+        )
+
     if at_inference:
         # Compute predictions directly at inference time
-        print(f"Computing BDT predictions at inference for signal '{signal_objective}'...")
+        print(f"Computing BDT predictions at inference for signal '{signal_objectives}'...")
         start_time = time.time()
         compute_bdt_preds(
             events_dict=events_dict,
             modelname=modelname,
             model_dir=model_dir,
-            signal_objective=signal_objective,
+            signal_objectives=signal_objectives,
             channel=channel,
             tt_pres=tt_pres,
             test_mode=test_mode,
@@ -407,11 +561,11 @@ def compute_or_load_bdt_preds(
         print(f"BDT predictions computed in {time.time() - start_time:.2f} seconds")
     else:
         # Try to load existing predictions
-        print(f"Checking for existing BDT predictions for signal '{signal_objective}'...")
+        print(f"Checking for existing BDT predictions for signals '{signal_objectives}'...")
         shapes_ok = check_bdt_prediction_shapes(
             events_dict=events_dict,
             modelname=modelname,
-            signal_objective=signal_objective,
+            signal_objectives=signal_objectives,
             channel=channel,
             tt_pres=tt_pres,
             bdt_preds_dir=bdt_preds_dir,
@@ -419,16 +573,15 @@ def compute_or_load_bdt_preds(
         )
 
         if shapes_ok:
-            print(f"Loading existing BDT predictions for signal '{signal_objective}'...")
+            print(f"Loading existing BDT predictions for signals '{signal_objectives}'...")
             load_bdt_preds(
                 events_dict=events_dict,
                 modelname=modelname,
-                signal_objective=signal_objective,
+                signal_objectives=signal_objectives,
                 channel=channel,
                 tt_pres=tt_pres,
                 bdt_preds_dir=bdt_preds_dir,
                 test_mode=test_mode,
-                all_outs=all_outs,
             )
             print("BDT predictions loaded successfully")
         else:
@@ -438,7 +591,7 @@ def compute_or_load_bdt_preds(
                 events_dict=events_dict,
                 modelname=modelname,
                 model_dir=model_dir,
-                signal_objective=signal_objective,
+                signal_objectives=signal_objectives,
                 channel=channel,
                 tt_pres=tt_pres,
                 test_mode=test_mode,
