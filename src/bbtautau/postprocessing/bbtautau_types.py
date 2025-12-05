@@ -267,7 +267,16 @@ class SRConfig:
             raise ValueError(f"Veto region '{veto_sr_config.name}' missing optima for {bmin_key}")
 
         optimum = veto_sr_config.optima["2sqrtB_S_var"][bmin_key]
-        bb_cut, tt_cut = optimum["cuts"]
+        bb_cut = optimum.get("TXbb_opt")
+        tt_cut = optimum.get("TXtt_opt")
+
+        if bb_cut is None or tt_cut is None:
+            # For now just put out a warning
+            warnings.warn(
+                f"Veto region '{veto_sr_config.name}' missing optimal cuts for {bmin_key}",
+                stacklevel=2,
+            )
+            return
 
         # Initialize veto structures if needed
         if self.veto_cuts is None:

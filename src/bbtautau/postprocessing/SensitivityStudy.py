@@ -177,7 +177,7 @@ class Analyser:
         self.all_keys = (
             self.sig_keys_channel
             + self.channel.data_samples
-            + (self.showNonDataDrivenPortion + self.dataMinusSimABCD) * NON_QCD_BGS
+            + (self.showNonDataDrivenPortion or self.dataMinusSimABCD) * NON_QCD_BGS
         )
 
         print("All keys: ", self.all_keys)
