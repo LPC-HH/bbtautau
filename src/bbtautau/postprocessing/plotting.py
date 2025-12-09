@@ -273,7 +273,7 @@ def plot_optimization_thresholds(
         bb_disc_label: Label for bb discriminator axis
         tt_disc_label: Label for tt discriminator axis
     """
-    fig, ax = _setup_optimization_plot(years, channel, foms)
+    fig, ax = _setup_optimization_plot(years)
 
     colors = ["b", "purple", "r", "orange"]
     markers = ["x", "o", "s", "D"]
@@ -378,7 +378,7 @@ def plot_optimization_sig_eff(
         bb_disc_label: Label for bb discriminator axis
         tt_disc_label: Label for tt discriminator axis
     """
-    fig, ax = _setup_optimization_plot(years, channel, foms)
+    fig, ax = _setup_optimization_plot(years)
 
     colors = ["b", "purple", "r", "orange"]
     markers = ["x", "o", "s", "D"]
