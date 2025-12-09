@@ -750,7 +750,7 @@ class ROCAnalyzer:
             return disc.compute_roc(), disc.compute_metrics()
 
         # Compute both ROCs and comprehensive metrics
-        results = Parallel(n_jobs=-1)(
+        results = Parallel(n_jobs=-1, prefer="threads")(
             delayed(_rocs_metrics)(disc) for disc in self.discriminants.values()
         )
 

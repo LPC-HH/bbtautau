@@ -816,7 +816,7 @@ class Analyser:
 
         # results is a list of (sig, bkg, tf) tuples
         print(f"Running grid search on {len(bbcut_flat)} points...")
-        results = Parallel(n_jobs=-10, verbose=1)(
+        results = Parallel(n_jobs=-10, prefer="threads", verbose=1)(
             delayed(self.compute_sig_bkg_abcd)(_b, _t) for _b, _t in zip(bbcut_flat, ttcut_flat)
         )
 
