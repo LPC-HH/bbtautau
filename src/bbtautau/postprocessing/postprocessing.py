@@ -25,7 +25,7 @@ from hist import Hist
 import bbtautau.postprocessing.utils as putils
 from bbtautau.postprocessing import Regions, Samples, plotting
 from bbtautau.postprocessing.bbtautau_types import Channel, LoadedSample
-from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES
+from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES, SIGNALS
 from bbtautau.postprocessing.utils import load_data_channel
 from bbtautau.userConfig import (
     CHANNEL_ORDERING,
@@ -153,14 +153,20 @@ def main(args: argparse.Namespace):
 
     print(f"Processing bmin values: {args.bmin}")
 
+    # These are the regions to use: either only ggf or both ggf and vbf
+    signal_regions = copy.deepcopy(SIGNAL_ORDERING) if args.do_vbf else ["ggfbbtt"]
+
     if args.sigs is None:
-        # These are the signal samples to load in the templates
-        args.sigs = ["ggfbbtt", "vbfbbtt", "vbfbbtt-k2v0"]
+        args.sigs = SIGNALS
 
     if args.bgs is None:
         args.bgs = {bkey: b for bkey, b in SAMPLES.items() if b.get_type() == "bg"}
 
     CHANNEL = CHANNELS[args.channel]
+
+    models = None
+    if not args.use_ParT:
+        models = [args.ggf_modelname] + ([args.vbf_modelname] if args.do_vbf else [])
 
     events_dict, cutflow = load_data_channel(
         years=[args.year],  # Wrap single year in list
@@ -168,7 +174,7 @@ def main(args: argparse.Namespace):
         channel=CHANNEL,
         test_mode=args.test_mode,
         tt_pres=args.tt_pres,
-        models=[args.vbf_modelname, args.ggf_modelname] if not args.use_ParT else None,
+        models=models,
         cutflow=True,
         load_bgs=True,
     )
@@ -204,10 +210,7 @@ def main(args: argparse.Namespace):
         print(f"Processing bmin = {bmin}")
         print(f"{'='*60}")
 
-        # these are the regions to use: either only ggf or both ggf and vbf
-        signal_regions = copy.deepcopy(SIGNAL_ORDERING) if args.do_vbf else ["ggfbbtt"]
-
-        print(f"\nGenerating templates for bmin={bmin}")
+        print(f"\nGenerating templates for bmin={bmin}, signal regions={signal_regions}")
 
         for signal_key in signal_regions:
 
@@ -234,6 +237,7 @@ def main(args: argparse.Namespace):
                 args.bgs,
                 CHANNEL,  # Updated channel with new cuts
                 signal_key,
+                signal_regions,
                 shape_vars,
                 {},  # TODO: systematics
                 sig_scale_dict={
@@ -396,6 +400,9 @@ def get_templates(
     bg_keys: list[str],
     channel: Channel,
     signal: str,  # identify which signal our region corresponds to, and what tagger we use to select
+    signal_regions: list[
+        str
+    ],  # all the signal regions we are including (ggf or ggf+vbf); used to do the veto properly
     shape_vars: list[ShapeVar],
     systematics: dict,  # noqa: ARG001
     template_dir: Path = "",
@@ -449,7 +456,7 @@ def get_templates(
     found = False
     # veto all channels/signals earlier in the ordering than the current one
     for channel_iter in CHANNEL_ORDERING:
-        for signal_iter in SIGNAL_ORDERING:
+        for signal_iter in signal_regions:
             if channel_iter == channel.key and signal_iter == signal:
                 found = True
                 break
