@@ -205,7 +205,7 @@ def main(args: argparse.Namespace):
         print(f"{'='*60}")
 
         # these are the regions to use: either only ggf or both ggf and vbf
-        signal_regions = copy(SIGNAL_ORDERING) if args.do_vbf else ["ggfbbtt"]
+        signal_regions = copy.deepcopy(SIGNAL_ORDERING) if args.do_vbf else ["ggfbbtt"]
 
         print(f"\nGenerating templates for bmin={bmin}")
 
