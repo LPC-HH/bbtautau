@@ -148,6 +148,7 @@ class Analyser:
         llsl_weight=1,
         dataMinusSimABCD=False,
         showNonDataDrivenPortion=True,
+        compute_ROC_metrics=False,
     ):
         """Initialize Analyser with support for multiple signals."""
         self.sr_config = sr_config
@@ -163,6 +164,7 @@ class Analyser:
         self.llsl_weight = llsl_weight
         self.dataMinusSimABCD = dataMinusSimABCD
         self.showNonDataDrivenPortion = showNonDataDrivenPortion
+        self.compute_ROC_metrics = compute_ROC_metrics
         print(
             "Using data minus simulated non-QCD backgrounds for ABCD estimation:",
             self.dataMinusSimABCD,
@@ -271,7 +273,7 @@ class Analyser:
             discs_all, signal_name=signal_name_for_fill, background_names=background_names
         )
 
-        self.rocAnalyzer.compute_rocs()
+        self.rocAnalyzer.compute_rocs(compute_metrics=self.compute_ROC_metrics)
 
         # Plot bb discriminants
         self.rocAnalyzer.plot_rocs(title="bbFatJet", disc_names=discs_bb, plot_dir=self.plot_dir)
@@ -1780,6 +1782,12 @@ Examples:
         default="bbFatJetParTXbbvsQCDTop",
         choices=["bbFatJetParTXbbvsQCD", "bbFatJetParTXbbvsQCDTop", "bbFatJetPNetXbbvsQCDLegacy"],
         help="bb discriminator variable",
+    )
+    disc_group.add_argument(
+        "--compute-ROC-metrics",
+        action="store_true",
+        default=False,
+        help="Compute ROC metrics (default: False)",
     )
 
     # =========================================================================
