@@ -303,6 +303,7 @@ def load_samples(
     load_data: bool = True,
     loaded_samples: bool = True,
     multithread: bool = True,
+    loader_n_jobs: int | None = None,
 ) -> dict[str, LoadedSample | pd.DataFrame]:
     """
     Loads and preprocesses physics event samples for a given year and analysis channel.
@@ -424,7 +425,14 @@ def load_samples(
             )
             return None
 
-        data_ = Parallel(n_jobs=2 * len(samples))(
+        # Threaded loading avoids process pickling overhead; cap workers sensibly
+        import os
+
+        n_jobs = loader_n_jobs
+        if n_jobs is None:
+            n_jobs = min(max(1, 2 * len(samples)), os.cpu_count() or 1)
+
+        data_ = Parallel(n_jobs=n_jobs, backend="threading", prefer="threads")(
             delayed(LoadedSample)(
                 sample=sample,
                 events=utils.load_sample(

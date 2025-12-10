@@ -737,26 +737,48 @@ class ROCAnalyzer:
                 background_names,
             )
 
-    def compute_rocs(self, verbose=True):
+    def compute_rocs(self, verbose=True, compute_metrics=False, parallel=False):
         """
-        Compute the ROC curves for all discriminants in parallel using joblib for speed.
-        Stores the results in self.rocs, by erasing anything already there.
+        Compute ROC curves for all discriminants (and optionally metrics).
+
+        Args:
+            verbose (bool): Whether to print timing info.
+            compute_metrics (bool): If True, also compute metrics; metrics are slower and
+                often unnecessary when only ROC curves are needed.
+            parallel (bool): If True, use joblib to parallelize over discriminants.
         """
         if verbose:
             print("Start computing ROCs...")
             t0 = time.time()
 
-        def _rocs_metrics(disc):
-            return disc.compute_roc(), disc.compute_metrics()
+        # Compute ROCs (and optionally metrics)
+        if compute_metrics:
 
-        # Compute both ROCs and comprehensive metrics
-        results = Parallel(n_jobs=-1)(
-            delayed(_rocs_metrics)(disc) for disc in self.discriminants.values()
-        )
+            def _run(disc):
+                return disc.compute_roc(), disc.compute_metrics()
 
-        for disc, (roc, metrics) in zip(self.discriminants.values(), results):
+        else:
+
+            def _run(disc):
+                return disc.compute_roc(), None
+
+        discs = list(self.discriminants.values())
+
+        if parallel:
+            import os
+
+            # cap workers to avoid oversubscription and needless overhead
+            n_jobs = min(len(discs), os.cpu_count() or 1)
+            results = Parallel(n_jobs=n_jobs, prefer="threads")(
+                delayed(_run)(disc) for disc in discs
+            )
+        else:
+            results = [_run(disc) for disc in discs]
+
+        for disc, (roc, metrics) in zip(discs, results):
             disc.roc = roc
-            disc.metrics = metrics
+            if metrics is not None:
+                disc.metrics = metrics
 
         if verbose:
             t1 = time.time()
