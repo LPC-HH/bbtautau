@@ -469,7 +469,10 @@ def get_templates(
             break
 
     # Now a pass/fail region is defined for ggf and vbf. In each we will load all signal samples
-    selection_regions = Regions.get_selection_regions(signal, channel, **selection_region_kwargs)
+    # Apply vetoes from regions that were optimized earlier in the ordering
+    selection_regions = Regions.get_selection_regions(
+        signal, channel, vetoes=vetoes, **selection_region_kwargs
+    )
 
     for rname, region in selection_regions.items():
         pass_region = rname.startswith("pass")
