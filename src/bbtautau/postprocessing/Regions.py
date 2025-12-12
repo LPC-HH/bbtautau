@@ -114,17 +114,7 @@ def get_selection_regions(
     else:
         raise ValueError(f"bb_disc must start with 'ak8', but got: {bb_disc}")
 
-    pass_cuts = {
-        "bbFatJetPt": [250, CUT_MAX_VAL],
-        "ttFatJetPt": [200, CUT_MAX_VAL],
-        bb_disc: [channel.txbb_cut, CUT_MAX_VAL],
-    }
-
-    fail_cuts = {
-        "bbFatJetPt": [250, CUT_MAX_VAL],
-        "ttFatJetPt": [200, CUT_MAX_VAL],
-    }
-
+    # Load cuts first, then build pass_cuts with the correct txbb_cut
     if sensitivity_dir is not None:
         txbb_cut, txtt_cut = extract_optimal_cuts_from_csv(
             Path(sensitivity_dir), signal, channel.key, bmin, use_ParT, do_vbf
@@ -132,6 +122,17 @@ def get_selection_regions(
     else:
         txbb_cut = channel.txbb_cut
         txtt_cut = channel.txtt_cut if use_ParT else channel.txtt_BDT_cut
+
+    pass_cuts = {
+        "bbFatJetPt": [250, CUT_MAX_VAL],
+        "ttFatJetPt": [200, CUT_MAX_VAL],
+        bb_disc: [txbb_cut, CUT_MAX_VAL],  # Use the loaded txbb_cut, not channel default
+    }
+
+    fail_cuts = {
+        "bbFatJetPt": [250, CUT_MAX_VAL],
+        "ttFatJetPt": [200, CUT_MAX_VAL],
+    }
 
     if use_ParT:
         pass_cuts[channel.tt_mass_cut[0]] = channel.tt_mass_cut[1]

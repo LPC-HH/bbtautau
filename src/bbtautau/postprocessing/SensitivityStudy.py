@@ -935,9 +935,7 @@ class Analyser:
                 optimum_result = results.get(fom.name, {}).get(f"Bmin={B_min}")
                 if optimum_result:
                     successful_b_min_vals.append(B_min)
-                    # Drop the large boolean mask (sel_B_min) when writing summa ry CSVs
-                    optimum_clean = {k: v for k, v in optimum_result.items() if k != "sel_B_min"}
-                    bmin_df = self.as_df(optimum_clean, self.years, label=f"Bmin={B_min}")
+                    bmin_df = self.as_df(optimum_result, self.years, label=f"Bmin={B_min}")
                     bmin_dfs.append(bmin_df)
 
             if not bmin_dfs:
@@ -1129,7 +1127,7 @@ class Analyser:
 
         # Add all evaluated quantities at optimum (they are stored directly, not nested)
         # Skip internal grid arrays and non-scalar values
-        skip_keys = {"BBcut_sig_eff", "TTcut_sig_eff", "fom_map"}
+        skip_keys = {"BBcut_sig_eff", "TTcut_sig_eff", "fom_map", "sel_B_min"}
         # {"BBcut_sig_eff", "TTcut_sig_eff", "fom_map", "TXbb_opt", "TXtt_opt", "sig_eff_cuts"}
         for k, v in optimum.items():
             if k not in skip_keys:
