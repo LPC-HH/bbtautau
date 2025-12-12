@@ -301,6 +301,7 @@ def plot_optimization_thresholds(
         # Get optimal cuts
         bb_cut_opt = optimum.get("TXbb_opt")
         tt_cut_opt = optimum.get("TXtt_opt")
+        sel_B_min = optimum.get("sel_B_min")
 
         if bb_cut_opt is None or tt_cut_opt is None:
             continue
@@ -316,6 +317,13 @@ def plot_optimization_thresholds(
                 zorder=10,
             )
         else:
+            ax.contour(
+                bb_grid,
+                tt_grid,
+                ~sel_B_min,
+                colors=c,
+                linestyles="dashdot",
+            )
             ax.scatter(
                 bb_cut_opt,
                 tt_cut_opt,
@@ -399,6 +407,7 @@ def plot_optimization_sig_eff(
             fom_map_raw = optimum.get("fom_map")
             bb_sig_eff_grid = optimum.get("BBcut_sig_eff")
             tt_sig_eff_grid = optimum.get("TTcut_sig_eff")
+            sel_B_min = optimum.get("sel_B_min")
 
             if (
                 fom_map_raw is not None
@@ -450,6 +459,13 @@ def plot_optimization_sig_eff(
                 zorder=10,
             )
         else:
+            ax.contour(
+                bb_sig_eff_grid,
+                tt_sig_eff_grid,
+                ~sel_B_min,
+                colors=c,
+                linestyles="dashdot",
+            )
             ax.scatter(
                 bb_sig_eff_opt,
                 tt_sig_eff_opt,

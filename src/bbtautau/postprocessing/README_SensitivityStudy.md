@@ -65,7 +65,6 @@ Cut_Xtt,0.85,0.88
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--adaptive` | `False` | Use adaptive multi-stage grid refinement |
 | `--use-thresholds` | `False` | Optimize in threshold space (default: signal efficiency) |
 | `--dataMinusSimABCD` | `False` | Use enhanced ABCD: subtract simulated non-QCD backgrounds |
 | `--showNonDataDrivenPortion` | `True` | Include non-QCD (ttbar) background in results |
@@ -104,18 +103,7 @@ python SensitivityStudy.py \
     --years 2022 2022EE 2023 2023BPix
 ```
 
-### 2. Adaptive Grid Search
-
-Uses multi-stage refinement for better precision:
-
-```bash
-python SensitivityStudy.py \
-    --actions sensitivity \
-    --adaptive \
-    --channels he
-```
-
-### 3. Using ParT Instead of BDT
+### 2. Using ParT Instead of BDT
 
 ```bash
 python SensitivityStudy.py \
@@ -124,7 +112,7 @@ python SensitivityStudy.py \
     --channels he hmu
 ```
 
-### 4. Enhanced ABCD Method
+### 3. Enhanced ABCD Method
 
 Subtract simulated non-QCD backgrounds from data in ABCD estimation:
 
@@ -135,7 +123,7 @@ python SensitivityStudy.py \
     --channels he
 ```
 
-### 5. Evaluate at Specific Cuts
+### 4. Evaluate at Specific Cuts
 
 Evaluate signal/background yields at cuts from a previous optimization:
 

@@ -909,7 +909,7 @@ def parse_args(parser=None):
     parser.add_argument(
         "--bb-disc",
         help="bb discriminator to optimize",
-        default="ak8FatJetParTXbbvsQCD",
+        default="ak8FatJetParTXbbvsQCDTop",
         choices=[
             "ak8FatJetParTXbbvsQCD",
             "ak8FatJetParTXbbvsQCDTop",

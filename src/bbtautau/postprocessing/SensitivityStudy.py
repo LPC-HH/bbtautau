@@ -44,23 +44,7 @@ hep.style.use("CMS")
 TODAY = date.today()  # to name output folder
 
 # Default B_min values for optimization
-DEFAULT_BMIN_VALUES = [1, 5, 10, 12]  # Used for non-adaptive mode and final adaptive stage
-DEFAULT_ADAPTIVE_BMIN = 10  # Single B_min used during adaptive refinement iterations
-
-# Adaptive optimization defaults (to avoid too many CLI args)
-ADAPTIVE_STAGES = 2
-ADAPTIVE_TOP_FRAC = 0.1
-ADAPTIVE_PADDING = 1.0
-ADAPTIVE_REFINE_GRIDSIZE = None
-ADAPTIVE_BMIN = DEFAULT_ADAPTIVE_BMIN
-
-adaptive_kwargs = {
-    "adaptive_stages": ADAPTIVE_STAGES,
-    "adaptive_top_frac": ADAPTIVE_TOP_FRAC,
-    "adaptive_padding": ADAPTIVE_PADDING,
-    "adaptive_refine_gridsize": ADAPTIVE_REFINE_GRIDSIZE,
-    "adaptive_bmin": ADAPTIVE_BMIN,
-}
+DEFAULT_BMIN_VALUES = [1, 5, 10, 12]
 
 # Define discriminant names
 # BB_DISC_NAME = "bbFatJetParTXbbvsQCDTop" #Define in args for now
@@ -142,7 +126,6 @@ class Analyser:
         use_ParT: bool | None = None,
         at_inference=False,
         tt_pres=False,
-        adaptive=False,
         bdt_dir=None,
         plot_dir: Path | None = None,
         llsl_weight=1,
@@ -158,7 +141,6 @@ class Analyser:
         self.tt_pres = tt_pres
         self.at_inference = at_inference
         self.use_ParT = use_ParT
-        self.adaptive = adaptive
         self.bdt_dir = bdt_dir
 
         self.llsl_weight = llsl_weight
@@ -895,6 +877,7 @@ class Analyser:
                 evals_opt_fom_bmin["limit"] = limit_opt
                 evals_opt_fom_bmin["TXbb_opt"] = bbcut_opt
                 evals_opt_fom_bmin["TXtt_opt"] = ttcut_opt
+                evals_opt_fom_bmin["sel_B_min"] = sel_B_min
 
                 # Add signal efficiency specific fields if using signal efficiency coordinates
                 if not use_thresholds:
@@ -914,204 +897,7 @@ class Analyser:
 
         return evals_opt
 
-    def _adaptive_refine_limits(
-        self, optimum: dict, use_thresholds: bool, top_fraction: float, padding: float
-    ) -> dict:
-        """Compute refined grid limits for the next stage from the union of padded regions around best points.
-
-        This method:
-        1. Identifies the top N% best grid points (lowest FOM values)
-        2. Creates a padded region around each of these points
-        3. Computes the union of all these regions
-        4. Returns separate (min, max) limits for X and Y axes
-
-        Args:
-            optimum: dict containing FOM map and grid coordinates
-            use_thresholds: Whether using threshold or signal efficiency coordinates
-            top_fraction: Fraction of best points to consider (e.g., 0.1 for top 10%)
-            padding: Padding factor as fraction of grid spacing to add around each point
-
-        Returns:
-            dict: {'x': (x_min, x_max), 'y': (y_min, y_max)}
-        """
-        # Choose the coordinate system to operate in
-        if (
-            not use_thresholds
-            and optimum.get("BBcut_sig_eff") is not None
-            and optimum.get("TTcut_sig_eff") is not None
-        ):
-            X = optimum["BBcut_sig_eff"]
-            Y = optimum["TTcut_sig_eff"]
-        else:
-            X = optimum["BBcut"]
-            Y = optimum["TTcut"]
-
-        fom_map = optimum.get("fom_map")
-        if fom_map is None or X is None or Y is None:
-            # Fallback: keep previous limits
-            x_min, x_max = (float(X.min()), float(X.max())) if X is not None else (0.0, 1.0)
-            y_min, y_max = (float(Y.min()), float(Y.max())) if Y is not None else (0.0, 1.0)
-            return {"x": (x_min, x_max), "y": (y_min, y_max)}
-
-        # Flatten and select top fraction with lowest FOM
-        flat_fom = fom_map.ravel()
-        valid = np.isfinite(flat_fom)
-        if not np.any(valid):
-            return {"x": (float(X.min()), float(X.max())), "y": (float(Y.min()), float(Y.max()))}
-
-        idx = np.where(valid)[0]
-        k = max(1, int(len(idx) * max(0.0, min(top_fraction, 1.0))))
-        best_idx = idx[np.argpartition(flat_fom[valid], k - 1)[:k]]
-
-        # Get coordinates of best points
-        x_flat = X.ravel()
-        y_flat = Y.ravel()
-        x_best = x_flat[best_idx]
-        y_best = y_flat[best_idx]
-
-        # Estimate grid spacing for padding
-        # Use unique sorted values to compute typical spacing
-        x_unique = np.unique(x_flat)
-        y_unique = np.unique(y_flat)
-        x_spacing = np.diff(x_unique).mean() if len(x_unique) > 1 else (X.max() - X.min()) / 10
-        y_spacing = np.diff(y_unique).mean() if len(y_unique) > 1 else (Y.max() - Y.min()) / 10
-
-        # Create padded regions around each best point
-        x_pad = padding * x_spacing
-        y_pad = padding * y_spacing
-
-        # Compute union of all padded regions
-        # For each best point, create a padded box and then take overall min/max
-        x_mins = x_best - x_pad
-        x_maxs = x_best + x_pad
-        y_mins = y_best - y_pad
-        y_maxs = y_best + y_pad
-
-        # Union is the envelope of all these boxes
-        x_min_refined = float(np.min(x_mins))
-        x_max_refined = float(np.max(x_maxs))
-        y_min_refined = float(np.min(y_mins))
-        y_max_refined = float(np.max(y_maxs))
-
-        # Clamp to current grid domain
-        x_min_refined = max(float(X.min()), x_min_refined)
-        x_max_refined = min(float(X.max()), x_max_refined)
-        y_min_refined = max(float(Y.min()), y_min_refined)
-        y_max_refined = min(float(Y.max()), y_max_refined)
-
-        # Sanity check: ensure valid ranges
-        if x_max_refined <= x_min_refined:
-            x_min_refined, x_max_refined = float(X.min()), float(X.max())
-        if y_max_refined <= y_min_refined:
-            y_min_refined, y_max_refined = float(Y.min()), float(Y.max())
-
-        print(
-            f"  Refined limits: X=[{x_min_refined:.4f}, {x_max_refined:.4f}], Y=[{y_min_refined:.4f}, {y_max_refined:.4f}]"
-        )
-
-        return {"x": (x_min_refined, x_max_refined), "y": (y_min_refined, y_max_refined)}
-
-    def adaptive_grid_search_opt(
-        self,
-        initial_gridsize,
-        initial_gridlims,
-        B_min_vals,
-        foms,
-        use_thresholds=False,
-        stages: int = 2,
-        refine_gridsize: int | None = None,
-        top_fraction: float = 0.1,
-        padding: float = 1.0,
-        adaptive_bmin: int = None,
-    ) -> dict:
-        """Multi-stage adaptive refinement around best regions using existing grid_search_opt.
-
-        Strategy:
-        - Intermediate stages (1 to N-1): Run optimization with SINGLE B_min value for speed
-        - Final stage (N): Run optimization with ALL B_min values for complete results
-
-        Args:
-            initial_gridsize: Initial grid size (NxN points)
-            initial_gridlims: Initial grid limits, either tuple (min, max) or dict {'x': (min, max), 'y': (min, max)}
-            B_min_vals: List of minimum background values (used in final stage only)
-            foms: List of FOM functions to optimize
-            use_thresholds: If True, use threshold coords; if False, use signal efficiency coords
-            stages: Number of refinement stages
-            refine_gridsize: Grid size for refinement stages (if None, uses initial_gridsize)
-            top_fraction: Fraction of best points to consider (e.g., 0.1 = top 10%)
-            padding: Padding in units of grid spacing around each best point (e.g., 1.0 = ±1 cell)
-            adaptive_bmin: Single B_min value used for intermediate stages (default: DEFAULT_ADAPTIVE_BMIN)
-
-        Returns:
-            Final stage results dict in same format as grid_search_opt
-
-        Note:
-            The padding parameter is now interpreted as multiples of grid spacing, not fraction of range.
-            Default of 1.0 means each best point is padded by ±1 grid cell.
-        """
-        if adaptive_bmin is None:
-            adaptive_bmin = DEFAULT_ADAPTIVE_BMIN
-
-        gridsize = initial_gridsize
-        gridlims = initial_gridlims
-        final_results = None
-
-        for stage in range(max(1, stages)):
-            # Use single B_min for intermediate stages, all B_min values for final stage
-            is_final_stage = stage == stages - 1
-            current_bmin_vals = B_min_vals if is_final_stage else [adaptive_bmin]
-
-            stage_label = "FINAL" if is_final_stage else f"intermediate (B_min={adaptive_bmin})"
-            print(f"\nAdaptive stage {stage+1}/{stages} ({stage_label}):")
-            print(f"  gridsize={gridsize}, gridlims={gridlims}")
-            print(f"  B_min values: {current_bmin_vals}")
-
-            results = self.grid_search_opt(
-                gridsize=gridsize,
-                gridlims=gridlims,
-                B_min_vals=current_bmin_vals,
-                foms=foms,
-                use_thresholds=use_thresholds,
-            )
-            final_results = results
-
-            # Prepare next stage limits from the adaptive B_min result (not final stage)
-            if stage < stages - 1:
-                refined = False
-                for fom in foms:
-                    fom_res = results.get(fom.name, {})
-                    if not fom_res:
-                        continue
-                    # Look specifically for the adaptive B_min result
-                    opt_key = f"Bmin={adaptive_bmin}"
-                    if opt_key in fom_res:
-                        opt = fom_res[opt_key]
-                        if isinstance(opt, dict) and opt.get("fom_map") is not None:
-                            gridlims = self._adaptive_refine_limits(
-                                opt,
-                                use_thresholds=use_thresholds,
-                                top_fraction=top_fraction,
-                                padding=padding,
-                            )
-                            refined = True
-                            break
-
-                if not refined:
-                    print("Adaptive refinement: no valid regions found, stopping early.")
-                    break
-
-                gridsize = refine_gridsize or gridsize
-
-        return final_results
-
-    def perform_optimization(
-        self,
-        use_thresholds=False,
-        plot=True,
-        b_min_vals=None,
-        adaptive: bool = False,
-        **adaptive_kw,
-    ):
+    def perform_optimization(self, use_thresholds=False, plot=True, b_min_vals=None):
         """
         Perform sensitivity optimization.
 
@@ -1119,13 +905,6 @@ class Analyser:
             use_thresholds: Use threshold coordinates instead of signal efficiency
             plot: Generate plots
             b_min_vals: List of B_min values to optimize
-            adaptive: Use adaptive multi-stage grid refinement
-            **adaptive_kw: Adaptive optimization kwargs (only used if adaptive=True):
-                - adaptive_stages (int): Number of refinement stages (default: ADAPTIVE_STAGES)
-                - adaptive_top_frac (float): Fraction of best points to consider (default: ADAPTIVE_TOP_FRAC)
-                - adaptive_padding (float): Padding around best points (default: ADAPTIVE_PADDING)
-                - adaptive_refine_gridsize (int): Grid size for refinement (default: None, uses initial)
-                - adaptive_bmin (int): B_min for intermediate stages (default: ADAPTIVE_BMIN)
         """
         if b_min_vals is None:
             b_min_vals = [1, 10] if self.test_mode else DEFAULT_BMIN_VALUES
@@ -1135,37 +914,20 @@ class Analyser:
             gridsize = 20
         else:
             gridlims = (0.7, 1) if use_thresholds else (0.25, 0.75)
-            gridsize = 50 if not adaptive else 20
+            gridsize = 50
 
         foms = FOMS_TO_OPTIMIZE
 
-        if adaptive:
-            # Extract adaptive kwargs with defaults from module-level constants
-            results = self.adaptive_grid_search_opt(
-                initial_gridsize=gridsize,
-                initial_gridlims=gridlims,
-                B_min_vals=b_min_vals,
-                foms=foms,
-                use_thresholds=use_thresholds,
-                stages=adaptive_kw.get("adaptive_stages", ADAPTIVE_STAGES),
-                refine_gridsize=adaptive_kw.get(
-                    "adaptive_refine_gridsize", ADAPTIVE_REFINE_GRIDSIZE
-                ),
-                top_fraction=adaptive_kw.get("adaptive_top_frac", ADAPTIVE_TOP_FRAC),
-                padding=adaptive_kw.get("adaptive_padding", ADAPTIVE_PADDING),
-                adaptive_bmin=adaptive_kw.get("adaptive_bmin", ADAPTIVE_BMIN),
-            )
-        else:
-            results = self.grid_search_opt(
-                gridsize=gridsize,
-                gridlims=gridlims,
-                B_min_vals=b_min_vals,
-                foms=foms,
-                use_thresholds=use_thresholds,
-            )
+        results = self.grid_search_opt(
+            gridsize=gridsize,
+            gridlims=gridlims,
+            B_min_vals=b_min_vals,
+            foms=foms,
+            use_thresholds=use_thresholds,
+        )
 
+        # Save results to CSV files
         successful_b_min_vals = []
-
         saved_files = []
         for fom in foms:
             bmin_dfs = []
@@ -1392,7 +1154,6 @@ def analyse_channel(
     tt_pres=False,
     use_ParT=False,
     at_inference=False,
-    adaptive=False,
     bdt_dir=None,
     plot_dir=None,
     llsl_weight=1,
@@ -1426,7 +1187,6 @@ def analyse_channel(
         use_ParT=use_ParT,
         at_inference=at_inference,
         llsl_weight=llsl_weight,
-        adaptive=adaptive,
         bdt_dir=bdt_dir,
         plot_dir=plot_dir,
         dataMinusSimABCD=dataMinusSimABCD,
@@ -1446,8 +1206,6 @@ def analyse_channel(
         analyser.prepare_sensitivity()
         return analyser.perform_optimization(
             use_thresholds=False,
-            adaptive=adaptive,
-            **adaptive_kwargs,
         )
     elif "fom_study" in actions:
         analyser.prepare_sensitivity()
@@ -1464,7 +1222,6 @@ def analyse_channel(
 def get_plot_dir(
     test_mode: bool,
     tt_pres: bool,
-    adaptive: bool,
     use_ParT: bool,
     do_vbf: bool,
     use_sm_signals: bool,
@@ -1479,8 +1236,7 @@ def get_plot_dir(
     else:
         test_dir = "full_presel"
 
-    tag = "adaptive/" if adaptive else "grid/"
-    tag += "ParT/" if use_ParT else "BDT/"
+    tag = "ParT/" if use_ParT else "BDT/"
     tag += "do_vbf/" if do_vbf else "ggf_only/"
     tag += "sm_signals/" if use_sm_signals else "ggf_only/"
     tag += "overlapping_channels/" if overlapping_channels else "orthogonal_channels/"
@@ -1551,7 +1307,6 @@ def main(args):
             plot_dir = get_plot_dir(
                 args.test_mode,
                 args.tt_pres,
-                args.adaptive,
                 args.use_ParT,
                 args.do_vbf,
                 args.use_sm_signals,
@@ -1568,7 +1323,6 @@ def main(args):
                 use_ParT=args.use_ParT,
                 actions=args.actions,
                 at_inference=args.at_inference,
-                adaptive=args.adaptive,
                 bdt_dir=args.bdt_dir,
                 plot_dir=plot_dir,
                 cuts_file=args.cuts_file,
@@ -1679,12 +1433,6 @@ Examples:
     # =========================================================================
     sens_group = parser.add_argument_group(
         "Sensitivity Action", "Arguments for --actions sensitivity (grid search optimization)"
-    )
-    sens_group.add_argument(
-        "--adaptive",
-        action="store_true",
-        default=False,
-        help="Use adaptive multi-stage grid refinement",
     )
     sens_group.add_argument(
         "--use-thresholds",

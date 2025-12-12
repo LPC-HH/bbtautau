@@ -286,5 +286,5 @@ class SRConfig:
             bb_cut,
             tt_cut,
             veto_sr_config.bb_disc_name,
-            veto_sr_config.tt_disc_name[self.channel],
+            veto_sr_config.tt_disc_name[veto_sr_config.channel],
         )
