@@ -313,7 +313,7 @@ def plot_optimization_thresholds(
                 color=c,
                 label="Global optimum",
                 marker=m,
-                s=100,
+                s=80,
                 zorder=10,
             )
         else:
@@ -330,7 +330,7 @@ def plot_optimization_thresholds(
                 color=c,
                 label=f"Optimum $B\\geq {B_min}$",
                 marker=m,
-                s=100,
+                s=80,
                 zorder=10,
             )
 
@@ -407,7 +407,6 @@ def plot_optimization_sig_eff(
             fom_map_raw = optimum.get("fom_map")
             bb_sig_eff_grid = optimum.get("BBcut_sig_eff")
             tt_sig_eff_grid = optimum.get("TTcut_sig_eff")
-            sel_B_min = optimum.get("sel_B_min")
 
             if (
                 fom_map_raw is not None
@@ -442,6 +441,8 @@ def plot_optimization_sig_eff(
 
         # Get optimal signal efficiency cuts from dict
         sig_eff_cuts = optimum.get("sig_eff_cuts")
+        sel_B_min = optimum.get("sel_B_min")
+
         if sig_eff_cuts is None:
             # Fall back to threshold cuts if sig_eff_cuts not available
             continue
@@ -455,7 +456,7 @@ def plot_optimization_sig_eff(
                 color=c,
                 label="Global optimum",
                 marker=m,
-                s=100,
+                s=80,
                 zorder=10,
             )
         else:
@@ -472,7 +473,7 @@ def plot_optimization_sig_eff(
                 color=c,
                 label=f"Optimum $B\\geq {B_min}$",
                 marker=m,
-                s=100,
+                s=80,
                 zorder=10,
             )
 

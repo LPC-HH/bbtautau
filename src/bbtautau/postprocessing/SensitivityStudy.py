@@ -935,7 +935,9 @@ class Analyser:
                 optimum_result = results.get(fom.name, {}).get(f"Bmin={B_min}")
                 if optimum_result:
                     successful_b_min_vals.append(B_min)
-                    bmin_df = self.as_df(optimum_result, self.years, label=f"Bmin={B_min}")
+                    # Drop the large boolean mask (sel_B_min) when writing summa ry CSVs
+                    optimum_clean = {k: v for k, v in optimum_result.items() if k != "sel_B_min"}
+                    bmin_df = self.as_df(optimum_clean, self.years, label=f"Bmin={B_min}")
                     bmin_dfs.append(bmin_df)
 
             if not bmin_dfs:
