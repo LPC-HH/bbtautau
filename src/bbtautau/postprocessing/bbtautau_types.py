@@ -206,7 +206,7 @@ class ABCD:
                     stacklevel=2,
                 )
 
-            self.pass_resonant = self.fail_resonant / self.tf if self.tf > 0 else 0
+            self.pass_resonant = self.pass_sideband * self.tf if self.tf > 0 else 0
 
     def subtract_MC(self, other: ABCD):
         """
@@ -286,5 +286,5 @@ class SRConfig:
             bb_cut,
             tt_cut,
             veto_sr_config.bb_disc_name,
-            veto_sr_config.tt_disc_name[self.channel],
+            veto_sr_config.tt_disc_name[veto_sr_config.channel],
         )

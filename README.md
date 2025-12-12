@@ -378,7 +378,7 @@ pip3 install -e .
 After activating the above CMSSW environment (go inside the CMSSW folder and do `cmsenv`), you can use the CreateDatacard.py script as so (from your src/bbtautau folder):
 
 ```bash
-python3 postprocessing/CreateDatacard.py --sigs bbtt --templates-dir postprocessing/templates/25Apr25LudoCuts --model-name 25Apr25PassFix
+python3 postprocessing/CreateDatacard.py --sigs ggfbbtt --templates-dir postprocessing/templates/25Apr25LudoCuts --model-name 25Apr25PassFix
 ```
 
 By default, this will create datacards for all three channels summed across years in the `cards/model-name` directory.

@@ -19,13 +19,13 @@
 ####################################################################################################
 
 years=("2022" "2022EE" "2023" "2023BPix")
-channels=("hh" "he" "hm")
+channels=("hh" "hm" "he")
 bmin_values=(10)  # Default to single value, can be overridden with --bmin
 
 MAIN_DIR="/home/users/lumori/bbtautau"
 SCRIPT_DIR="${MAIN_DIR}/src/bbtautau/postprocessing"
 DATA_DIR="/ceph/cms/store/user/lumori/bbtautau/skimmer/25Sep23AddVars_v12_private_signal"
-SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2025-12-09/"
+SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2025-12-11/"
 TAG=""
 USE_PART=0
 DO_VBF=0
