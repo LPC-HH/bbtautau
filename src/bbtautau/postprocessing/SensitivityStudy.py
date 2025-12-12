@@ -1252,7 +1252,7 @@ def main(args):
     Processes each channel sequentially, optimizing signal regions in order:
     GGF first, then VBF (if enabled). Later regions veto events selected by earlier ones.
     """
-    # Signal regions to optimize: for now, GGF first, then VBF
+    # Signal regions to optimize: GGF first, then VBF (if enabled)
     signal_regions = SIGNAL_ORDERING if args.do_vbf else ["ggfbbtt"]
 
     # BDT models to load (None if using ParT)
@@ -1260,8 +1260,8 @@ def main(args):
     if not args.use_ParT:
         models = [args.ggf_modelname] + ([args.vbf_modelname] if args.do_vbf else [])
 
-    # Track optimized regions for vetoes
-    optimized_regions: dict[str, SRConfig] = {}  # across all channels (orthogonal mode)
+    # Track optimized regions for vetoes (key = signal_channel, e.g., "ggfbbtthh")
+    optimized_regions: dict[str, SRConfig] = {}
 
     tt_disc_map = TT_DISC_NAMES_PART if args.use_ParT else TT_DISC_NAMES_BDT
 
@@ -1286,15 +1286,15 @@ def main(args):
 
         channel_regions: list[SRConfig] = []  # within current channel (overlapping mode)
 
-        for region_name in signal_regions:
-            print(f"\n  Optimizing: {region_name}")
+        for signal_name in signal_regions:
+            print(f"\n  Optimizing: {signal_name} in {channel_key}")
 
             sr_config = SRConfig(
-                name=region_name,
-                signals=SM_SIGNALS if args.use_sm_signals else [region_name],
+                name=signal_name,
+                signals=SM_SIGNALS if args.use_sm_signals else [signal_name],
                 channel=channel_key,
                 bb_disc_name=args.bb_disc,
-                tt_disc_name=tt_disc_map[region_name],
+                tt_disc_name=tt_disc_map[signal_name],
             )
 
             # Apply vetoes from previously optimized regions
@@ -1332,10 +1332,10 @@ def main(args):
                 showNonDataDrivenPortion=args.showNonDataDrivenPortion,
             )
 
-            # Register for future vetoes
+            # Register for future vetoes (key includes channel to avoid overwrites)
             channel_regions.append(sr_config)
             if not args.overlapping_channels:
-                optimized_regions[sr_config.name] = sr_config
+                optimized_regions[f"{sr_config.name}{sr_config.channel}"] = sr_config
 
 
 if __name__ == "__main__":
