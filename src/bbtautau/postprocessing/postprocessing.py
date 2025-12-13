@@ -242,7 +242,7 @@ def main(args: argparse.Namespace):
                 {},  # TODO: systematics
                 sig_scale_dict={
                     f"ggfbbtt{CHANNEL.key}": 300,
-                    f"vbfbbtt{CHANNEL.key}": 40,
+                    f"vbfbbtt{CHANNEL.key}": 500,
                     f"vbfbbtt-k2v0{CHANNEL.key}": 40,
                 },
                 # prev_cutflow=cutflow, Tried to add this but seems to not work. May want to fix later
@@ -507,7 +507,6 @@ def get_templates(
         sig_events = {}
         for sig_key in sig_keys:
             lsample = events_dict[sig_key]
-            sig_events[sig_key] = lsample.copy_from_selection(sel[sig_key], do_deepcopy=True)
 
             # if region.signal:
             #     corrections.apply_txbb_sfs(

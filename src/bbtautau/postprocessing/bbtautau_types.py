@@ -282,7 +282,9 @@ class SRConfig:
         if self.veto_cuts is None:
             self.veto_cuts = {}
 
-        self.veto_cuts[veto_sr_config.name] = (
+        # Use unique key including channel to avoid overwrites when vetoing same signal from different channels
+        veto_key = f"{veto_sr_config.name}{veto_sr_config.channel}"
+        self.veto_cuts[veto_key] = (
             bb_cut,
             tt_cut,
             veto_sr_config.bb_disc_name,
