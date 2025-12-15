@@ -507,6 +507,7 @@ def get_templates(
         sig_events = {}
         for sig_key in sig_keys:
             lsample = events_dict[sig_key]
+            sig_events[sig_key] = lsample.copy_from_selection(sel[sig_key], do_deepcopy=True)
 
             # if region.signal:
             #     corrections.apply_txbb_sfs(
