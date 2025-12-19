@@ -522,6 +522,10 @@ def get_CA_MASS(fatjets: FatJetArray, taus: TauArray, met: MissingET, subjets: J
     init_fields = {
 
         "CA_mass_merged": (-999.0, float),
+        "CA_msoftdrop_merged": (-999.0, float),
+        "CA_globalParT_massVisApplied_merged": (-999.0, float),
+        "CA_globalParT_massResApplied_merged": (-999.0, float),
+        "CA_particleNet_mass_legacy_merged": (-999.0, float),
         "CA_Tauflag": (0, int),
 
         "CA_one_elec_in_fatjet": (0, int),
@@ -868,6 +872,74 @@ def get_CA_MASS(fatjets: FatJetArray, taus: TauArray, met: MissingET, subjets: J
                 ((~no1subjet) & (~no1electron) & (~dR_elec_vs_subjet1), mass_subjet1_et),
                 ((~no1subjet) & (~no1electron) & (~dR_elec_vs_subjet0), mass_subjet_et),
                 ((~no1tau)    & (~no1electron), mass_boostedtau_et),
+            ],
+
+            "CA_msoftdrop_merged": [
+
+                (no2subjet & no2tau, msoftdrop_fatjet_tt),
+                (~no2subjet,  msoftdrop_subjet),
+                (~no2tau,     msoftdrop_boostedtau),
+
+                (~no1muon, msoftdrop_fatjet_mt),
+                ((~no1subjet) & (~no1muon) & (~dR_muon_vs_subjet1), msoftdrop_subjet1_mt),
+                ((~no1subjet) & (~no1muon) & (~dR_muon_vs_subjet0), msoftdrop_subjet_mt),
+                ((~no1tau)    & (~no1muon), msoftdrop_boostedtau_mt),
+
+                (~no1electron, msoftdrop_fatjet_et),
+                ((~no1subjet) & (~no1electron) & (~dR_elec_vs_subjet1), msoftdrop_subjet1_et),
+                ((~no1subjet) & (~no1electron) & (~dR_elec_vs_subjet0), msoftdrop_subjet_et),
+                ((~no1tau)    & (~no1electron), msoftdrop_boostedtau_et),
+            ],
+
+            "CA_globalParT_massVisApplied_merged": [
+
+                (no2subjet & no2tau, globalParT_massVisApplied_fatjet_tt),
+                (~no2subjet,  globalParT_massVisApplied_subjet),
+                (~no2tau,     globalParT_massVisApplied_boostedtau),
+
+                (~no1muon, globalParT_massVisApplied_fatjet_mt),
+                ((~no1subjet) & (~no1muon) & (~dR_muon_vs_subjet1), globalParT_massVisApplied_subjet1_mt),
+                ((~no1subjet) & (~no1muon) & (~dR_muon_vs_subjet0), globalParT_massVisApplied_subjet_mt),
+                ((~no1tau)    & (~no1muon), globalParT_massVisApplied_boostedtau_mt),
+
+                (~no1electron, globalParT_massVisApplied_fatjet_et),
+                ((~no1subjet) & (~no1electron) & (~dR_elec_vs_subjet1), globalParT_massVisApplied_subjet1_et),
+                ((~no1subjet) & (~no1electron) & (~dR_elec_vs_subjet0), globalParT_massVisApplied_subjet_et),
+                ((~no1tau)    & (~no1electron), globalParT_massVisApplied_boostedtau_et),
+            ],
+
+            "CA_globalParT_massResApplied_merged": [
+
+                (no2subjet & no2tau, globalParT_massResApplied_fatjet_tt),
+                (~no2subjet,  globalParT_massResApplied_subjet),
+                (~no2tau,     globalParT_massResApplied_boostedtau),
+
+                (~no1muon, globalParT_massResApplied_fatjet_mt),
+                ((~no1subjet) & (~no1muon) & (~dR_muon_vs_subjet1), globalParT_massResApplied_subjet1_mt),
+                ((~no1subjet) & (~no1muon) & (~dR_muon_vs_subjet0), globalParT_massResApplied_subjet_mt),
+                ((~no1tau)    & (~no1muon), globalParT_massResApplied_boostedtau_mt),
+
+                (~no1electron, globalParT_massResApplied_fatjet_et),
+                ((~no1subjet) & (~no1electron) & (~dR_elec_vs_subjet1), globalParT_massResApplied_subjet1_et),
+                ((~no1subjet) & (~no1electron) & (~dR_elec_vs_subjet0), globalParT_massResApplied_subjet_et),
+                ((~no1tau)    & (~no1electron), globalParT_massResApplied_boostedtau_et),
+            ],
+
+            "CA_particleNet_mass_legacy_merged": [
+
+                (no2subjet & no2tau, particleNet_mass_legacy_fatjet_tt),
+                (~no2subjet,  particleNet_mass_legacy_subjet),
+                (~no2tau,     particleNet_mass_legacy_boostedtau),
+
+                (~no1muon, particleNet_mass_legacy_fatjet_mt),
+                ((~no1subjet) & (~no1muon) & (~dR_muon_vs_subjet1), particleNet_mass_legacy_subjet1_mt),
+                ((~no1subjet) & (~no1muon) & (~dR_muon_vs_subjet0), particleNet_mass_legacy_subjet_mt),
+                ((~no1tau)    & (~no1muon), particleNet_mass_legacy_boostedtau_mt),
+
+                (~no1electron, particleNet_mass_legacy_fatjet_et),
+                ((~no1subjet) & (~no1electron) & (~dR_elec_vs_subjet1), particleNet_mass_legacy_subjet1_et),
+                ((~no1subjet) & (~no1electron) & (~dR_elec_vs_subjet0), particleNet_mass_legacy_subjet_et),
+                ((~no1tau)    & (~no1electron), particleNet_mass_legacy_boostedtau_et),
             ],
 
             "CA_Tauflag": [

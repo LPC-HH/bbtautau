@@ -241,6 +241,10 @@ class bbtautauSkimmer(SkimmerABC):
         # CA variables
         ca_vars = [
             "mass_merged",
+            "msoftdrop_merged",
+            "globalParT_massVisApplied_merged",
+            "globalParT_massResApplied_merged",
+            "particleNet_mass_legacy_merged",
             "Tauflag",
 
             "one_elec_in_fatjet",
