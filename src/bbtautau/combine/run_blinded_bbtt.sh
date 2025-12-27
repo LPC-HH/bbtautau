@@ -56,6 +56,7 @@ verbose=9
 bias=-1
 mintol=0.1  # --cminDefaultMinimizerTolerance
 # maxcalls=1000000000  # --X-rtd MINIMIZER_MaxCalls
+SIG_REGIONS=("ggfbbtt")
 CHANNELS=("hh" "he" "hm")
 channellabel=""
 
@@ -64,6 +65,10 @@ eval set -- "$options"
 
 while true; do
     case "$1" in
+        --do-vbf)
+            shift
+            SIG_REGIONS+=("vbfbbtt")
+            ;;
         --channel)
             shift
             CHANNELS=($1)
@@ -190,22 +195,27 @@ CMS_PARAMS_LABEL="CMS_bbtautau_boosted"
 ccargs=""
 maskunblindedargs=""
 maskblindedargs=""
-for channel in "${CHANNELS[@]}"; do
-    ccargs+="${channel}fail=${cards_dir}/${channel}fail.txt ${channel}failMCBlinded=${cards_dir}/${channel}failMCBlinded.txt ${channel}pass=${cards_dir}/${channel}pass.txt ${channel}passMCBlinded=${cards_dir}/${channel}passMCBlinded.txt "
-    maskunblindedargs+="mask_${channel}fail=1,mask_${channel}failBlinded=0,mask_${channel}pass=1,mask_${channel}passBlinded=0,"
-    maskblindedargs+="mask_${channel}fail=0,mask_${channel}failBlinded=1,mask_${channel}pass=0,mask_${channel}passBlinded=1,"
+
+for sig_region in "${SIG_REGIONS[@]}"; do
+    for channel in "${CHANNELS[@]}"; do
+        ccargs+="${sig_region}${channel}fail=${cards_dir}/${sig_region}${channel}fail.txt ${sig_region}${channel}failMCBlinded=${cards_dir}/${sig_region}${channel}failMCBlinded.txt ${sig_region}${channel}pass=${cards_dir}/${sig_region}${channel}pass.txt ${sig_region}${channel}passMCBlinded=${cards_dir}/${sig_region}${channel}passMCBlinded.txt "
+        maskunblindedargs+="mask_${sig_region}${channel}fail=1,mask_${sig_region}${channel}failBlinded=0,mask_${sig_region}${channel}pass=1,mask_${sig_region}${channel}passBlinded=0,"
+        maskblindedargs+="mask_${sig_region}${channel}fail=0,mask_${sig_region}${channel}failBlinded=1,mask_${sig_region}${channel}pass=0,mask_${sig_region}${channel}passBlinded=1,"
+    done
 done
 
 
 # freeze fail region qcd params in blinded bins
 setparamsblinded=""
 freezeparamsblinded=""
-for channel in "${CHANNELS[@]}"; do
-    for bin in {5..8}
-    do
-        # would need to use regex here for multiple fail regions
-        setparamsblinded+="${CMS_PARAMS_LABEL}_tf_dataResidual_${channel}Bin${bin}=0,"
-        freezeparamsblinded+="${CMS_PARAMS_LABEL}_tf_dataResidual_${channel}Bin${bin},"
+for sig_region in "${SIG_REGIONS[@]}"; do
+    for channel in "${CHANNELS[@]}"; do
+        for bin in {5..8}
+        do
+            # would need to use regex here for multiple fail regions
+            setparamsblinded+="${CMS_PARAMS_LABEL}_tf_dataResidual_${sig_region}${channel}Bin${bin}=0,"
+            freezeparamsblinded+="${CMS_PARAMS_LABEL}_tf_dataResidual_${sig_region}${channel}Bin${bin},"
+        done
     done
 done
 
