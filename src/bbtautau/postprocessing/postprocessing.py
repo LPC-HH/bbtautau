@@ -218,11 +218,11 @@ def main(args: argparse.Namespace):
             template_dir_bmin = (
                 args.template_dir
                 / f"bmin_{bmin}"
-                / (CHANNEL.key if args.template_dir else "")
                 / signal_key
+                / (CHANNEL.key if args.template_dir else "")
             )
             plot_dir_bmin = (
-                args.plot_dir / f"bmin_{bmin}" / (CHANNEL.key if args.plot_dir else "") / signal_key
+                args.plot_dir / f"bmin_{bmin}" / signal_key / (CHANNEL.key if args.plot_dir else "")
             )
 
             if template_dir_bmin:
