@@ -261,6 +261,9 @@ def get_columns(
             ("ht", 1),
             ("nElectrons", 1),
             ("nMuons", 1),
+            ("run", 1),
+            ("event", 1),
+            ("luminosityBlock", 1),
         ]
 
     columns_mc = copy.deepcopy(columns_data)
@@ -1009,21 +1012,29 @@ def load_data_channel(
         derive_lepton_variables(events_dict[year])
 
     # Load or compute BDT predictions for all signals in a single pass
+    # Only compute predictions for matching model-signal pairs to avoid overwriting discriminator columns
+    # (e.g., ggf model should only be used with ggfbbtt signal_objective, vbf model with vbfbbtt)
     if models is not None:
         for model in models:
             for sig in signals:
-                compute_or_load_bdt_preds(
-                    events_dict=events_dict,
-                    modelname=model,
-                    model_dir=model_dir,
-                    signal_objective=sig,
-                    channel=channel,
-                    bdt_preds_dir=bdt_eval_dir,
-                    tt_pres=tt_pres,
-                    test_mode=test_mode,
-                    at_inference=at_inference,
-                    all_outs=True,
-                )
+                # Match model to signal: model name should contain the signal base name
+                # e.g., "ggfbbtt" model matches "ggfbbtt" signal, "vbfbbtt" model matches "vbfbbtt" signal
+                # This prevents VBF model from overwriting GGF discriminator columns when signal_objective="ggfbbtt"
+                sig_base = sig.removesuffix("tt") if sig.endswith("tt") else sig
+                # Needed this minimal fix and now it works. But still some redundant logic with modelname and signal_objective could be merged in a dictionary. signal_objective needed to label the BDT branches
+                if sig_base in model.lower():
+                    compute_or_load_bdt_preds(
+                        events_dict=events_dict,
+                        modelname=model,
+                        model_dir=model_dir,
+                        signal_objective=sig,
+                        channel=channel,
+                        bdt_preds_dir=bdt_eval_dir,
+                        tt_pres=tt_pres,
+                        test_mode=test_mode,
+                        at_inference=at_inference,
+                        all_outs=True,
+                    )
 
     if cutflow:
         return events_dict, cutflow

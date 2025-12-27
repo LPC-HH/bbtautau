@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import json
 import logging
 from collections import defaultdict
 from datetime import date
@@ -398,7 +400,6 @@ class Analyser:
         """Prepare discriminants and kinematic variables for optimization."""
 
         mtt1, mtt2 = self.channel.tt_mass_cut[1]
-        mbb1, mbb2 = SHAPE_VAR["blind_window"]
 
         # just a safety check
         if not set(self.all_keys) <= set(self.events_dict[self.years[0]].keys()):
@@ -406,8 +407,8 @@ class Analyser:
                 f"All keys {self.all_keys} do not match the keys in the events dictionary {list(self.events_dict[self.years[0]].keys())}"
             )
 
-        # Compute pt cuts and safety bbmass cuts once for all samples
-        pt_veto_cuts = {
+        # Compute pt cuts and safety bbmass cuts once for all samples (NO vetoes applied here)
+        base_presel_cuts = {
             key: (self._concat_years("bbFatJetPt", key) > PT_CUTS["bb"])
             & (self._concat_years("ttFatJetPt", key) > PT_CUTS["tt"])
             & (self._concat_years(SHAPE_VAR["name"], key) > SHAPE_VAR["range"][0])
@@ -418,33 +419,15 @@ class Analyser:
         if self.use_ParT:
             # apply the tt mass cuts in the preprocessing stage if we do not use the BDT
             for sig_key in self.sig_keys_channel:
-                pt_veto_cuts[sig_key] &= (
+                base_presel_cuts[sig_key] &= (
                     self._concat_years(self.channel.tt_mass_cut[0], sig_key) > mtt1
                 ) & (self._concat_years(self.channel.tt_mass_cut[0], sig_key) < mtt2)
             for key in self.channel.data_samples:
-                pt_veto_cuts[key] &= (
+                base_presel_cuts[key] &= (
                     self._concat_years(self.channel.tt_mass_cut[0], key) < mtt1
                 ) | (self._concat_years(self.channel.tt_mass_cut[0], key) > mtt2)
 
-        # Apply veto cuts: exclude events passing veto region selections
-        if self.sr_config.veto_cuts:
-            for veto_key in self.sr_config.veto_cuts:
-                veto_bb_cut, veto_tt_cut, veto_bb_disc, veto_tt_disc = self.sr_config.veto_cuts[
-                    veto_key
-                ]
-                # Create veto mask
-                print(veto_key, veto_bb_cut, veto_tt_cut, veto_bb_disc, veto_tt_disc)
-                veto_mask = {
-                    key: ~(
-                        (self._concat_years(veto_bb_disc, key) > veto_bb_cut)
-                        & (self._concat_years(veto_tt_disc, key) > veto_tt_cut)
-                    )
-                    for key in self.all_keys
-                }
-                # Combine veto mask with pt_cuts
-                pt_veto_cuts = {key: pt_veto_cuts[key] & veto_mask[key] for key in self.all_keys}
-
-        # Extract main discriminants and kinematics
+        # Define sample groupings
         sig_vs_bkg_groups = {
             "signal": self.sig_keys_channel,
             "data": self.channel.data_samples,
@@ -455,32 +438,79 @@ class Analyser:
             for non_qcd_bkg in NON_QCD_BGS:
                 sig_vs_bkg_groups[non_qcd_bkg] = [non_qcd_bkg]
 
-        self.sensitivity_vars = {
+        self._sig_vs_bkg_groups = sig_vs_bkg_groups
+
+        # Extract all variables with base preselection
+        mbb1, mbb2 = SHAPE_VAR["blind_window"]
+
+        base_vars = {
             "txbbs": self._extract_var_with_cuts(
-                self.bb_disc_name, pt_veto_cuts, concatenate_samples=sig_vs_bkg_groups
+                self.bb_disc_name, base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
             ),
             "txtts": self._extract_var_with_cuts(
-                self.tt_disc_name_channel, pt_veto_cuts, concatenate_samples=sig_vs_bkg_groups
+                self.tt_disc_name_channel, base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
             ),
             "massbb": self._extract_var_with_cuts(
-                SHAPE_VAR["name"], pt_veto_cuts, concatenate_samples=sig_vs_bkg_groups
+                SHAPE_VAR["name"], base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
             ),
             "masstt": self._extract_var_with_cuts(
-                self.channel.tt_mass_cut[0], pt_veto_cuts, concatenate_samples=sig_vs_bkg_groups
+                self.channel.tt_mass_cut[0], base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
             ),
             "finalWeight": self._extract_var_with_cuts(
-                "finalWeight", pt_veto_cuts, concatenate_samples=sig_vs_bkg_groups
+                "finalWeight", base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
+            ),
+            "run": self._extract_var_with_cuts(
+                "run", base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
+            ),
+            "event": self._extract_var_with_cuts(
+                "event", base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
+            ),
+            "luminosityBlock": self._extract_var_with_cuts(
+                "luminosityBlock", base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
             ),
         }
 
-        # pre-compute the sideband cuts for all groups
-        self.sideband_cuts = {
-            group_name: (self.sensitivity_vars["massbb"][group_name] < mbb1)
-            | (self.sensitivity_vars["massbb"][group_name] > mbb2)
+        # Extract veto discriminant vars
+        base_veto_disc_vars = {}
+        if self.sr_config.veto_regions:
+            for veto_sr_config in self.sr_config.veto_regions:
+                veto_bb_disc = veto_sr_config.bb_disc_name
+                veto_tt_disc = veto_sr_config.tt_disc_name[veto_sr_config.channel]
+                if veto_bb_disc not in base_veto_disc_vars:
+                    base_veto_disc_vars[veto_bb_disc] = self._extract_var_with_cuts(
+                        veto_bb_disc, base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
+                    )
+                if veto_tt_disc not in base_veto_disc_vars:
+                    base_veto_disc_vars[veto_tt_disc] = self._extract_var_with_cuts(
+                        veto_tt_disc, base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
+                    )
+
+        # Compute sideband cuts from massbb
+        base_sideband_cuts = {
+            group_name: (base_vars["massbb"][group_name] < mbb1)
+            | (base_vars["massbb"][group_name] > mbb2)
             for group_name in sig_vs_bkg_groups
         }
 
-        del self.sensitivity_vars["massbb"]
+        # Remove massbb from vars (not needed for optimization)
+        del base_vars["massbb"]
+
+        # Store base versions (these are the immutable references)
+        self._base_sensitivity_vars = base_vars
+        self._base_veto_disc_vars = base_veto_disc_vars
+        self._base_sideband_cuts = base_sideband_cuts
+
+        # Set working copies (these will be modified when applying vetoes)
+        self._restore_base_sensitivity_vars()
+
+    def _restore_base_sensitivity_vars(self) -> None:
+        """Restore sensitivity_vars to base state by copying from stored base versions.
+
+        Called before each B_min iteration to start from a clean (un-vetoed) state.
+        """
+        self.sensitivity_vars = copy.deepcopy(self._base_sensitivity_vars)
+        self._veto_disc_vars = copy.deepcopy(self._base_veto_disc_vars)
+        self.sideband_cuts = copy.deepcopy(self._base_sideband_cuts)
 
     def _pass_cuts(self, group_name, txbbcut, txttcut):
         return (self.sensitivity_vars["txbbs"][group_name] > txbbcut) & (
@@ -631,6 +661,40 @@ class Analyser:
 
         return results
 
+    def get_passing_events(self, txbbcut: float, txttcut: float) -> list:
+        """
+        Get list of data events passing the selection cuts.
+
+        Uses pre-extracted sensitivity_vars which already have preselection and vetoes applied.
+
+        Args:
+            txbbcut: Cut value for bb tagger
+            txttcut: Cut value for tt tagger
+
+        Returns:
+            List of event dicts with keys: run, lumi, event
+        """
+        # Discriminant cuts on data
+        pass_cuts = self._pass_cuts("data", txbbcut, txttcut)
+
+        # Extract event identifiers
+        passing_events = []
+        if np.any(pass_cuts):
+            run_vals = self.sensitivity_vars["run"]["data"][pass_cuts]
+            lumi_vals = self.sensitivity_vars["luminosityBlock"]["data"][pass_cuts]
+            event_vals = self.sensitivity_vars["event"]["data"][pass_cuts]
+
+            for run, lumi, event in zip(run_vals, lumi_vals, event_vals):
+                passing_events.append(
+                    {
+                        "run": int(run),
+                        "lumi": int(lumi),
+                        "event": int(event),
+                    }
+                )
+
+        return passing_events
+
     def run_evaluation(
         self,
         cuts_file: str | Path,
@@ -713,6 +777,181 @@ class Analyser:
         out.to_csv(outpath, index=False)
         print(f"Results saved to: {outpath}")
 
+    def _apply_veto_masks_for_bmin(self, bmin: int) -> None:
+        """Apply veto masks for a specific B_min value to sensitivity_vars.
+
+        This modifies self.sensitivity_vars in place by applying veto masks
+        extracted from veto_regions for the given bmin value.
+
+        Args:
+            bmin: B_min value to get veto cuts from
+        """
+        if not self.sr_config.veto_regions:
+            return  # No vetoes to apply
+
+        veto_cuts = self.sr_config.get_veto_cuts_for_bmin(bmin)
+        if not veto_cuts:
+            return  # No valid veto cuts for this bmin
+
+        print(f"    Applying vetoes for Bmin={bmin}: {list(veto_cuts.keys())}")
+
+        # Build combined veto mask for all veto regions
+        for veto_key, (veto_bb_cut, veto_tt_cut, veto_bb_disc, veto_tt_disc) in veto_cuts.items():
+            print(
+                f"      {veto_key}: bb>{veto_bb_cut:.4f} ({veto_bb_disc}), tt>{veto_tt_cut:.4f} ({veto_tt_disc})"
+            )
+
+            # Get veto discriminant values (pre-extracted in prepare_sensitivity)
+            veto_bb_vals = self._veto_disc_vars[veto_bb_disc]
+            veto_tt_vals = self._veto_disc_vars[veto_tt_disc]
+
+            # Apply veto: keep events that do NOT pass the veto region cuts
+            for group_name in self._sig_vs_bkg_groups:
+                veto_mask = ~(
+                    (veto_bb_vals[group_name] > veto_bb_cut)
+                    & (veto_tt_vals[group_name] > veto_tt_cut)
+                )
+                # Apply mask to all sensitivity vars for this group
+                for var_name in self.sensitivity_vars:
+                    self.sensitivity_vars[var_name][group_name] = self.sensitivity_vars[var_name][
+                        group_name
+                    ][veto_mask]
+                # Update sideband_cuts
+                self.sideband_cuts[group_name] = self.sideband_cuts[group_name][veto_mask]
+                # Update veto disc vars
+                for disc_name in self._veto_disc_vars:
+                    self._veto_disc_vars[disc_name][group_name] = self._veto_disc_vars[disc_name][
+                        group_name
+                    ][veto_mask]
+
+    def _run_grid_search(
+        self,
+        BBcut,
+        TTcut,
+        BBcutSigEff,
+        TTcutSigEff,
+        B_min_vals: list[int],
+        foms,
+        use_thresholds: bool,
+    ) -> dict:
+        """Run grid search and find optima for given B_min values.
+
+        Args:
+            BBcut, TTcut: Threshold meshgrids
+            BBcutSigEff, TTcutSigEff: Signal efficiency meshgrids (None if use_thresholds)
+            B_min_vals: List of B_min values to find optima for
+            foms: List of FOM functions
+            use_thresholds: Whether using threshold coordinates
+
+        Returns:
+            dict: {fom_name: {f"Bmin={bmin}": optimum_dict, ...}, ...}
+        """
+        # Flatten the grid for parallel evaluation
+        bbcut_flat = BBcut.ravel()
+        ttcut_flat = TTcut.ravel()
+        grid_shape = BBcut.shape
+
+        # Run grid search (expensive - done once)
+        print(f"Running grid search on {len(bbcut_flat)} points...")
+        results = Parallel(n_jobs=-10, prefer="threads", verbose=1)(
+            delayed(self.compute_sig_bkg_abcd)(_b, _t) for _b, _t in zip(bbcut_flat, ttcut_flat)
+        )
+
+        # Unpack results
+        evals = defaultdict(list)
+        for sig_pass, bg_data, bg_non_qcd, breakdown in results:
+            evals["sig_pass"].append(sig_pass)
+            evals["data_pass_resonant"].append(bg_data.pass_resonant)
+            evals["data_pass_sideband"].append(bg_data.pass_sideband)
+            evals["TF_data"].append(bg_data.tf)
+
+            if bg_non_qcd is not None:
+                evals["non_qcd_pass_resonant"].append(bg_non_qcd.pass_resonant)
+
+            # Store breakdown of non-QCD backgrounds by category (only if breakdown was computed)
+            if breakdown is not None:
+                for non_qcd_bkg in NON_QCD_BGS:
+                    evals[f"{non_qcd_bkg}_pass_resonant"].append(breakdown.get(non_qcd_bkg, 0))
+
+            # subtract the non-QCD background from the data if desired
+            if self.dataMinusSimABCD and bg_non_qcd is not None:
+                bg_data_qcd_only = bg_data.subtract_MC(bg_non_qcd)
+                evals["data_qcd_only_pass_sideband"].append(bg_data_qcd_only.pass_sideband)
+                evals["TF_qcd_only"].append(bg_data_qcd_only.tf)
+
+        # Reshape to 2D grid
+        evals = {k: np.array(v).reshape(grid_shape) for k, v in evals.items()}
+
+        # Find optima for each FOM and B_min combination
+        evals_opt = {fom.name: {} for fom in foms}
+
+        for fom in foms:
+            # Compute FOM values once (same for all B_min)
+            if self.dataMinusSimABCD:
+                limits = fom.fom_func(
+                    evals["data_qcd_only_pass_sideband"],
+                    evals["sig_pass"],
+                    evals["TF_qcd_only"],
+                    non_qcd_bg_in_pass_res=evals["non_qcd_pass_resonant"],
+                )
+            else:
+                limits = fom.fom_func(
+                    evals["data_pass_sideband"],
+                    evals["sig_pass"],
+                    evals["TF_data"],
+                    non_qcd_bg_in_pass_res=0,
+                )
+
+            # Find optimum for each B_min
+            for B_min in B_min_vals:
+                sel_B_min = evals["data_pass_sideband"] >= B_min
+
+                if not np.any(sel_B_min):
+                    print(f"Warning: No points satisfy B_min>{B_min} for FOM={fom.name}. Skipping.")
+                    continue
+
+                sel_indices = np.argwhere(sel_B_min)
+                selected_limits = limits[sel_B_min]
+                min_idx_in_selected = np.argmin(selected_limits)
+                idx_opt = tuple(sel_indices[min_idx_in_selected])
+                limit_opt = selected_limits[min_idx_in_selected]
+
+                # Get optimal cuts (always in threshold space)
+                bbcut_opt, ttcut_opt = BBcut[idx_opt], TTcut[idx_opt]
+
+                evals_opt_fom_bmin = {k: v[idx_opt] for k, v in evals.items()}
+                evals_opt_fom_bmin["limit"] = limit_opt
+                evals_opt_fom_bmin["TXbb_opt"] = bbcut_opt
+                evals_opt_fom_bmin["TXtt_opt"] = ttcut_opt
+                evals_opt_fom_bmin["sel_B_min"] = sel_B_min
+
+                # Add signal efficiency specific fields if using signal efficiency coordinates
+                if not use_thresholds:
+                    bbcut_sig_eff_opt = BBcutSigEff[idx_opt]
+                    ttcut_sig_eff_opt = TTcutSigEff[idx_opt]
+                    evals_opt_fom_bmin.update(
+                        {
+                            "sig_eff_cuts": (bbcut_sig_eff_opt, ttcut_sig_eff_opt),
+                            "BBcut_sig_eff": BBcutSigEff,
+                            "TTcut_sig_eff": TTcutSigEff,
+                            "fom_map": limits,
+                        }
+                    )
+
+                else:
+                    evals_opt_fom_bmin.update(
+                        {
+                            "fom_map": limits,
+                        }
+                    )
+
+                # Compute passing events at optimal cuts (vetoes already applied via sensitivity_vars)
+                evals_opt_fom_bmin["passing_events"] = self.get_passing_events(bbcut_opt, ttcut_opt)
+
+                evals_opt[fom.name][f"Bmin={B_min}"] = evals_opt_fom_bmin
+
+        return evals_opt
+
     def grid_search_opt(
         self,
         gridsize,
@@ -724,21 +963,24 @@ class Analyser:
         """
         Grid search optimization for signal/background discrimination.
 
+        If veto_regions are present, runs separate grid searches per B_min to apply
+        the correct veto cuts for each B_min value. Otherwise, runs a single grid
+        search and filters results per B_min.
+
         Args:
             gridsize: Size of the grid (gridsize x gridsize points)
             gridlims: Either a single tuple (min, max) used for both axes,
                      or a dict with keys 'x' and 'y': {'x': (min, max), 'y': (min, max)}
             B_min_vals: List of minimum background values to test
             foms: List of figure-of-merit functions
-            normalize_sig: Whether to normalize signal yields
-            use_sig_eff: If True, use signal efficiency coordinates; if False, use raw thresholds
+            use_thresholds: If True, use threshold coordinates; if False, use signal efficiency
 
         Returns:
             Optimum: Results dictionary containing optimization results
 
         Note:
-            When use_sig_eff=True, gridlims should be efficiency values (0.0 to 1.0).
-            When use_sig_eff=False, gridlims should be raw threshold values.
+            When use_thresholds=False, gridlims should be efficiency values (0.0 to 1.0).
+            When use_thresholds=True, gridlims should be raw threshold values.
         """
 
         # Parse gridlims: support both single tuple and dict format
@@ -794,108 +1036,39 @@ class Analyser:
             BBcutSigEff = None
             TTcutSigEff = None
 
-        # Flatten the grid for parallel evaluation
-        bbcut_flat = BBcut.ravel()
-        ttcut_flat = TTcut.ravel()
+        # Check if we need per-B_min veto handling
+        has_veto_regions = bool(self.sr_config.veto_regions)
 
-        # results is a list of (sig, bkg, tf) tuples
-        print(f"Running grid search on {len(bbcut_flat)} points...")
-        results = Parallel(n_jobs=-10, prefer="threads", verbose=1)(
-            delayed(self.compute_sig_bkg_abcd)(_b, _t) for _b, _t in zip(bbcut_flat, ttcut_flat)
-        )
+        if has_veto_regions:
+            # Run separate grid searches per B_min with matching veto cuts
+            print(f"Running per-B_min grid searches (with vetoes) on {BBcut.size} points each...")
+            evals_opt = {fom.name: {} for fom in foms}
 
-        # Unpack results - each result is (sig_pass, bg_data, bg_non_qcd, breakdown_non_qcd_pass_res)
-        grid_shape = BBcut.shape
-
-        evals = defaultdict(list)
-
-        for sig_pass, bg_data, bg_non_qcd, breakdown in results:
-            evals["sig_pass"].append(sig_pass)
-            evals["data_pass_resonant"].append(bg_data.pass_resonant)
-            evals["data_pass_sideband"].append(bg_data.pass_sideband)
-
-            evals["TF_data"].append(bg_data.tf)
-            if bg_non_qcd is not None:
-                evals["non_qcd_pass_resonant"].append(bg_non_qcd.pass_resonant)
-
-            # Store breakdown of non-QCD backgrounds by category (only if breakdown was computed)
-            if breakdown is not None:
-                for non_qcd_bkg in NON_QCD_BGS:
-                    evals[f"{non_qcd_bkg}_pass_resonant"].append(breakdown.get(non_qcd_bkg, 0))
-
-            # subtract the non-QCD background from the data if desired
-            if self.dataMinusSimABCD and bg_non_qcd is not None:
-                bg_data_qcd_only = bg_data.subtract_MC(bg_non_qcd)
-                evals["data_qcd_only_pass_sideband"].append(bg_data_qcd_only.pass_sideband)
-                evals["TF_qcd_only"].append(bg_data_qcd_only.tf)
-
-        # Reshape to 2D grid
-        evals = {k: np.array(v).reshape(grid_shape) for k, v in evals.items()}
-
-        # # Compute signal efficiency Need this?
-        # evals["sig_eff"] = evals["sig_pass"] / np.sum(self.sensitivity_vars["finalWeight"]["signal"])
-
-        # Now that have map with sigs, bkgs, go and compute FOMs
-        evals_opt = {}
-
-        for fom in foms:
-            evals_opt[fom.name] = {}
             for B_min in B_min_vals:
+                print(f"\n  Processing Bmin={B_min}...")
 
-                evals_opt[fom.name][f"Bmin={B_min}"] = {}
+                # Restore to base sensitivity vars (before vetoes)
+                self._restore_base_sensitivity_vars()
 
-                sel_B_min = evals["data_pass_sideband"] >= B_min
-                if self.dataMinusSimABCD:
-                    limits = fom.fom_func(
-                        evals["data_qcd_only_pass_sideband"],
-                        evals["sig_pass"],
-                        evals["TF_qcd_only"],
-                        non_qcd_bg_in_pass_res=evals["non_qcd_pass_resonant"],
-                    )
-                else:
-                    limits = fom.fom_func(
-                        evals["data_pass_sideband"],
-                        evals["sig_pass"],
-                        evals["TF_data"],
-                        non_qcd_bg_in_pass_res=0,
-                    )
-                if not np.any(sel_B_min):
-                    print(f"Warning: No points satisfy B_min>{B_min} for FOM={fom.name}. Skipping.")
-                    continue
+                # Apply veto masks for this B_min
+                self._apply_veto_masks_for_bmin(B_min)
 
-                sel_indices = np.argwhere(sel_B_min)
-                selected_limits = limits[sel_B_min]
-                min_idx_in_selected = np.argmin(selected_limits)
-                idx_opt = tuple(sel_indices[min_idx_in_selected])
-                limit_opt = selected_limits[min_idx_in_selected]
+                # Run grid search for this single B_min
+                results_bmin = self._run_grid_search(
+                    BBcut, TTcut, BBcutSigEff, TTcutSigEff, [B_min], foms, use_thresholds
+                )
 
-                # Get optimal cuts (always in threshold space)
-                bbcut_opt, ttcut_opt = BBcut[idx_opt], TTcut[idx_opt]
+                # Merge results
+                for fom_name in results_bmin:
+                    evals_opt[fom_name].update(results_bmin[fom_name])
 
-                # dictionary that stores all evaluated quantities at the optimum point
-                evals_opt_fom_bmin = {k: v[idx_opt] for k, v in evals.items()}
-                evals_opt_fom_bmin["limit"] = limit_opt
-                evals_opt_fom_bmin["TXbb_opt"] = bbcut_opt
-                evals_opt_fom_bmin["TXtt_opt"] = ttcut_opt
-                evals_opt_fom_bmin["sel_B_min"] = sel_B_min
+            return evals_opt
 
-                # Add signal efficiency specific fields if using signal efficiency coordinates
-                if not use_thresholds:
-                    bbcut_sig_eff_opt = BBcutSigEff[idx_opt]
-                    ttcut_sig_eff_opt = TTcutSigEff[idx_opt]
-
-                    evals_opt_fom_bmin.update(
-                        {
-                            "sig_eff_cuts": (bbcut_sig_eff_opt, ttcut_sig_eff_opt),
-                            "BBcut_sig_eff": BBcutSigEff,
-                            "TTcut_sig_eff": TTcutSigEff,
-                            "fom_map": limits,
-                        }
-                    )
-
-                evals_opt[fom.name][f"Bmin={B_min}"] = evals_opt_fom_bmin
-
-        return evals_opt
+        else:
+            # No vetoes: run single grid search for all B_min values at once
+            return self._run_grid_search(
+                BBcut, TTcut, BBcutSigEff, TTcutSigEff, B_min_vals, foms, use_thresholds
+            )
 
     def perform_optimization(self, use_thresholds=False, plot=True, b_min_vals=None):
         """
@@ -945,7 +1118,7 @@ class Analyser:
             # Create DataFrame for this FOM and transpose it
             fom_df = pd.concat(bmin_dfs).set_index("Label").T
             print(f"\nResults for FOM: {fom.name}")
-            print(self.channel.label, "\n", fom_df.to_markdown())
+            print(self.channel.label, "\n", fom_df.round(3).to_markdown())
 
             # Save separate CSV file for each FOM
             output_csv = (
@@ -963,6 +1136,23 @@ class Analyser:
         print(f"\nSaved {len(saved_files)} CSV files:")
         for file in saved_files:
             print(f"  - {file}")
+
+        # Save passing events to JSON for each B_min value
+        passing_events_json = {}
+        for fom in foms:
+            for B_min in b_min_vals:
+                optimum_result = results.get(fom.name, {}).get(f"Bmin={B_min}")
+                if optimum_result and "passing_events" in optimum_result:
+                    passing_events_json[f"Bmin={B_min}"] = optimum_result["passing_events"]
+
+        if passing_events_json:
+            output_json = (
+                self.plot_dir
+                / f"{'_'.join(self.years)}_passing_events_{foms[0].name}_{'thresh' if use_thresholds else 'sigeff'}.json"
+            )
+            with Path.open(output_json, "w") as f:
+                json.dump(passing_events_json, f, indent=2)
+            print(f"Saved passing events to: {output_json}")
 
         if plot:
             while len(successful_b_min_vals) > 4:
@@ -1127,7 +1317,7 @@ class Analyser:
 
         # Add all evaluated quantities at optimum (they are stored directly, not nested)
         # Skip internal grid arrays and non-scalar values
-        skip_keys = {"BBcut_sig_eff", "TTcut_sig_eff", "fom_map", "sel_B_min"}
+        skip_keys = {"BBcut_sig_eff", "TTcut_sig_eff", "fom_map", "sel_B_min", "passing_events"}
         # {"BBcut_sig_eff", "TTcut_sig_eff", "fom_map", "TXbb_opt", "TXtt_opt", "sig_eff_cuts"}
         for k, v in optimum.items():
             if k not in skip_keys:
@@ -1297,12 +1487,12 @@ def main(args):
                 tt_disc_name=tt_disc_map[signal_name],
             )
 
-            # Apply vetoes from previously optimized regions
+            # Add veto regions from previously optimized regions
             regions_to_veto = (
                 optimized_regions.values() if not args.overlapping_channels else channel_regions
             )
             for veto_region in regions_to_veto:
-                sr_config.add_veto_from_optimum(veto_region, bmin=args.bmin_for_veto)
+                sr_config.add_veto_region(veto_region)
 
             plot_dir = get_plot_dir(
                 args.test_mode,
@@ -1475,12 +1665,6 @@ Examples:
         action="store_true",
         default=False,
         help="Allow channels to overlap (no cross-channel vetoes)",
-    )
-    sr_group.add_argument(
-        "--bmin-for-veto",
-        type=int,
-        default=10,
-        help="B_min for cross-region/channel vetoes (default: 10)",
     )
 
     # =========================================================================

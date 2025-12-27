@@ -25,7 +25,7 @@ bmin_values=(10)  # Default to single value, can be overridden with --bmin
 MAIN_DIR="/home/users/lumori/bbtautau"
 SCRIPT_DIR="${MAIN_DIR}/src/bbtautau/postprocessing"
 DATA_DIR="/ceph/cms/store/user/lumori/bbtautau/skimmer/25Sep23AddVars_v12_private_signal"
-SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2025-12-12/"
+SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2025-12-27/" #"${MAIN_DIR}/plots/SensitivityStudy/2025-12-12/" is bmin = 10, "${MAIN_DIR}/plots/SensitivityStudy/2025-12-15/" is bmin = 5
 TAG=""
 USE_PART=0
 DO_VBF=0
