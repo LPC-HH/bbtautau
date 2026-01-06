@@ -346,6 +346,11 @@ See `postprocessing/bash_scripts/MakeTemplates.sh` for an example.
 
 ## Datacard and fits
 
+Foreword: when dealing with multiple signals and signal regions:
+- to specify one or more signal processes to be included in the cards (e.g. ggf + SM vbf or just BSM vbf), specify the argument `--sigs [ggfbbtt, vbfbbtt, vbfbbttk2v0]
+- to specify the strategy according to what we do in the `SensitivityStudy.py` step, i.e. using one signal region per channel (ggf) or using two regions per channel (ggf and vbf), we use the `--do-vbf` argument in `run_blinded_bbtt.sh` when running combine.
+These past two items are independent: with either strategy, one can choose the signal samples to consider freely. (One should clearly not mix SM with BSM samples in the cards.)
+
 
 ### CMSSW + Combine Quickstart
 

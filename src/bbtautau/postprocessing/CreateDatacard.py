@@ -701,7 +701,9 @@ def alphabet_fit(
     # Independent nuisances to float QCD in each fail bin
     qcd_params = np.array(
         [
-            rl.IndependentParameter(f"{CMS_PARAMS_LABEL}_tf_dataResidual_{channel.key}Bin{i}", 0)
+            rl.IndependentParameter(
+                f"{CMS_PARAMS_LABEL}_tf_dataResidual_{sr_key}{channel.key}Bin{i}", 0
+            )
             for i in range(m_obs.nbins)
         ]
     )
@@ -779,7 +781,7 @@ def alphabet_fit(
 
         # transfer factor
         tf_dataResidual = rl.BasisPoly(
-            f"{CMS_PARAMS_LABEL}_tf_dataResidual_{channel.key}{sr}",
+            f"{CMS_PARAMS_LABEL}_tf_dataResidual_{sr_key}{channel.key}{sr}",
             (shape_var.orders[sr],),
             [shape_var.name],
             basis="Bernstein",
