@@ -7,8 +7,6 @@ Authors: Ludovico Mori
 from __future__ import annotations
 
 from pathlib import Path
-from boostedhh import hh_vars
-from boostedhh.utils import Sample
 
 
 def path_dict(path: str, path_2022: str = None):
@@ -41,56 +39,16 @@ MODEL_DIR = Path(
     "/home/users/lumori/bbtautau/src/bbtautau/postprocessing/classifier/trained_models"
 )
 CLASSIFIER_DIR = Path("/home/users/lumori/bbtautau/src/bbtautau/postprocessing/classifier/")
+BDT_EVAL_DIR = Path("/ceph/cms/store/user/lumori/bbtautau/BDT_predictions/")
 DATA_DIR = "/ceph/cms/store/user/lumori/bbtautau/skimmer/25Sep23AddVars_v12_private_signal"
 DATA_PATHS = path_dict(DATA_DIR)
+
+PLOT_DIR = Path("/home/users/lumori/bbtautau/plots")
 
 # backwards compatibility
 # data_dir_2022 = "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr17bbpresel_v12_private_signal"
 # data_dir_otheryears = "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr24Fix_v12_private_signal"
 # DATA_PATHS = path_dict(data_dir_2022, data_dir_otheryears)
-
-Enhanced_ABCD_SAMPLES = {
-    "jetmet": Sample(
-        selector="^(JetHT|JetMET)",
-        label="JetMET",
-        isData=True,
-    ),
-    "tau": Sample(
-        selector="^Tau_Run",
-        label="Tau",
-        isData=True,
-    ),
-    "muon": Sample(
-        selector="^Muon_Run",
-        label="Muon",
-        isData=True,
-    ),
-    "egamma": Sample(
-        selector="^EGamma_Run",
-        label="EGamma",
-        isData=True,
-    ),
-    "ttbarhad": Sample(
-        selector="^TTto4Q",
-        label="TT Had",
-        isSignal=False,
-    ),
-    "ttbarsl": Sample(
-        selector="^TTtoLNu2Q",
-        label="TT SL",
-        isSignal=False,
-    ),
-    "ttbarll": Sample(
-        selector="^TTto2L2Nu",
-        label="TT LL",
-        isSignal=False,
-    ),
-    "bbtt": Sample(
-        selector=hh_vars.bbtt_sigs["bbtt"],
-        label=r"ggF HHbb$\tau\tau$",
-        isSignal=True,
-    ),
-}
 
 # Probably could make a file just to configure the fit
 SHAPE_VAR = {
@@ -99,3 +57,12 @@ SHAPE_VAR = {
     "nbins": 16,
     "blind_window": [110, 150],
 }
+
+PT_CUTS = {
+    "bb": 250,
+    "tt": 200,
+}
+
+# usually will go (hh,ggf)->(hh,vbf)->(hm,ggf), etc.
+CHANNEL_ORDERING = ["hh", "hm", "he"]  # order of applying selection and vetoes
+SIGNAL_ORDERING = ["ggfbbtt", "vbfbbtt"]  # order of applying selection and vetoes

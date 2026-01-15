@@ -56,14 +56,37 @@ verbose=9
 bias=-1
 mintol=0.1  # --cminDefaultMinimizerTolerance
 # maxcalls=1000000000  # --X-rtd MINIMIZER_MaxCalls
+SIG_REGIONS=("ggfbbtt")
 CHANNELS=("hh" "he" "hm")
 channellabel=""
+siglabel="ggf"
 
-options=$(getopt -o "wblsdrgti" --long "channel:,workspace,bfit,limits,significance,dfit,dfitasimov,toylimits,gofdata,goftoys,gentoys,dnll,impactsi,impactsf:,impactsc:,bias:,seed:,numtoys:,mintol:,toysname:,toysfile:,verbose:" -- "$@")
+options=$(getopt -o "wblsdrgti" --long "channel:,sig-region:,workspace,bfit,limits,significance,dfit,dfitasimov,toylimits,gofdata,goftoys,gentoys,dnll,impactsi,impactsf:,impactsc:,bias:,seed:,numtoys:,mintol:,toysname:,toysfile:,verbose:" -- "$@")
 eval set -- "$options"
 
 while true; do
     case "$1" in
+        --sig-region)
+            shift
+            case "$1" in
+                ggf)
+                    SIG_REGIONS=("ggfbbtt")
+                    siglabel="ggf"
+                    ;;
+                vbf)
+                    SIG_REGIONS=("vbfbbtt")
+                    siglabel="vbf"
+                    ;;
+                all)
+                    SIG_REGIONS=("ggfbbtt" "vbfbbtt")
+                    siglabel="allsigs"
+                    ;;
+                *)
+                    echo "ERROR: Invalid sig-region '$1'. Use 'ggf', 'vbf', or 'all'"
+                    exit 1
+                    ;;
+            esac
+            ;;
         --channel)
             shift
             CHANNELS=($1)
@@ -162,6 +185,8 @@ seed=$seed numtoys=$numtoys toysname=$toysname toysfile=$toysfile mintol=$mintol
 verbose=$verbose"
 
 echo "Model: $(pwd)"
+echo "Signal regions: ${SIG_REGIONS[*]}"
+echo "Channels: ${CHANNELS[*]}"
 
 ####################################################################################################
 # Set up fit arguments
@@ -172,9 +197,11 @@ echo "Model: $(pwd)"
 
 dataset=data_obs
 cards_dir="./"
-ws=${cards_dir}/combined_${channellabel}
+# Build label from channel and signal region
+label="${siglabel}${channellabel}"
+ws=${cards_dir}/combined_${label}
 wsm=${ws}_withmasks
-wsm_snapshot=higgsCombine${channellabel}Snapshot.MultiDimFit.mH125
+wsm_snapshot=higgsCombine${label}Snapshot.MultiDimFit.mH125
 
 outsdir=${cards_dir}/outs
 mkdir -p $outsdir
@@ -190,22 +217,27 @@ CMS_PARAMS_LABEL="CMS_bbtautau_boosted"
 ccargs=""
 maskunblindedargs=""
 maskblindedargs=""
-for channel in "${CHANNELS[@]}"; do
-    ccargs+="${channel}fail=${cards_dir}/${channel}fail.txt ${channel}failMCBlinded=${cards_dir}/${channel}failMCBlinded.txt ${channel}pass=${cards_dir}/${channel}pass.txt ${channel}passMCBlinded=${cards_dir}/${channel}passMCBlinded.txt "
-    maskunblindedargs+="mask_${channel}fail=1,mask_${channel}failBlinded=0,mask_${channel}pass=1,mask_${channel}passBlinded=0,"
-    maskblindedargs+="mask_${channel}fail=0,mask_${channel}failBlinded=1,mask_${channel}pass=0,mask_${channel}passBlinded=1,"
+
+for sig_region in "${SIG_REGIONS[@]}"; do
+    for channel in "${CHANNELS[@]}"; do
+        ccargs+="${sig_region}${channel}fail=${cards_dir}/${sig_region}${channel}fail.txt ${sig_region}${channel}failMCBlinded=${cards_dir}/${sig_region}${channel}failMCBlinded.txt ${sig_region}${channel}pass=${cards_dir}/${sig_region}${channel}pass.txt ${sig_region}${channel}passMCBlinded=${cards_dir}/${sig_region}${channel}passMCBlinded.txt "
+        maskunblindedargs+="mask_${sig_region}${channel}fail=1,mask_${sig_region}${channel}failBlinded=0,mask_${sig_region}${channel}pass=1,mask_${sig_region}${channel}passBlinded=0,"
+        maskblindedargs+="mask_${sig_region}${channel}fail=0,mask_${sig_region}${channel}failBlinded=1,mask_${sig_region}${channel}pass=0,mask_${sig_region}${channel}passBlinded=1,"
+    done
 done
 
 
 # freeze fail region qcd params in blinded bins
 setparamsblinded=""
 freezeparamsblinded=""
-for channel in "${CHANNELS[@]}"; do
-    for bin in {5..8}
-    do
-        # would need to use regex here for multiple fail regions
-        setparamsblinded+="${CMS_PARAMS_LABEL}_tf_dataResidual_${channel}Bin${bin}=0,"
-        freezeparamsblinded+="${CMS_PARAMS_LABEL}_tf_dataResidual_${channel}Bin${bin},"
+for sig_region in "${SIG_REGIONS[@]}"; do
+    for channel in "${CHANNELS[@]}"; do
+        for bin in {5..8}
+        do
+            # would need to use regex here for multiple fail regions
+            setparamsblinded+="${CMS_PARAMS_LABEL}_tf_dataResidual_${sig_region}${channel}Bin${bin}=0,"
+            freezeparamsblinded+="${CMS_PARAMS_LABEL}_tf_dataResidual_${sig_region}${channel}Bin${bin},"
+        done
     done
 done
 
@@ -253,7 +285,7 @@ if [ $workspace = 1 ]; then
     echo "Running text2workspace"
     # text2workspace.py -D $dataset $ws.txt --channel-masks -o $wsm.root 2>&1 | tee $outsdir/text2workspace.txt
     # new version got rid of -D arg??
-    text2workspace.py $ws.txt --channel-masks -o $wsm.root 2>&1 | tee $outsdir/${channellabel}text2workspace.txt
+    text2workspace.py $ws.txt --channel-masks -o $wsm.root 2>&1 | tee $outsdir/${label}text2workspace.txt
 else
     if [ ! -f "$wsm.root" ]; then
         echo "Workspace doesn't exist! Use the -w|--workspace option to make workspace first"
@@ -268,9 +300,9 @@ if [ $bfit = 1 ]; then
     --cminDefaultMinimizerStrategy 1 --cminDefaultMinimizerTolerance "$mintol" --X-rtd MINIMIZER_MaxCalls=400000 \
     --setParameters "${maskunblindedargs},${setparamsblinded},r=0"  \
     --freezeParameters "r,${freezeparamsblinded}" \
-    -n ${channellabel}Snapshot 2>&1 | tee $outsdir/${channellabel}MultiDimFit.txt
+    -n ${label}Snapshot 2>&1 | tee $outsdir/${label}MultiDimFit.txt
 else
-    if [ ! -f "higgsCombineSnapshot.MultiDimFit.mH125.root" ]; then
+    if [ ! -f higgsCombine${label}Snapshot.MultiDimFit.mH125.root ]; then
         echo "Background-only fit snapshot doesn't exist! Use the -b|--bfit option to run fit first. (Ignore this if you're only creating the workspace.)"
         exit 1
     fi
@@ -279,10 +311,10 @@ fi
 
 if [ $limits = 1 ]; then
     echo "Expected limits (MC Unblinded)"
-    combine -M AsymptoticLimits -m 125 -d ${wsm_snapshot}.root --snapshotName MultiDimFit -v $verbose -n "$channellabel" \
+    combine -M AsymptoticLimits -m 125 -d ${wsm_snapshot}.root --snapshotName MultiDimFit -v $verbose -n "$label" \
     -t 1 --saveWorkspace --saveToys --bypassFrequentistFit --rMax 100 \
     ${unblindedparams},r=0 -s "$seed" \
-    --floatParameters "${freezeparamsblinded},r" --toysFrequentist --run blind 2>&1 | tee $outsdir/${channellabel}AsymptoticLimits.txt
+    --floatParameters "${freezeparamsblinded},r" --toysFrequentist --run blind 2>&1 | tee $outsdir/${label}AsymptoticLimits.txt
 fi
 
 
@@ -313,14 +345,14 @@ if [ $dfit = 1 ]; then
     --setParameters "${maskunblindedargs},${setparamsblinded}" \
     --freezeParameters "${freezeparamsblinded}" \
     --cminDefaultMinimizerStrategy 1  --cminDefaultMinimizerTolerance "$mintol" --X-rtd MINIMIZER_MaxCalls=400000 \
-    -n ${channellabel}Blinded --ignoreCovWarning -v $verbose 2>&1 | tee $outsdir/${channellabel}FitDiagnostics.txt
+    -n ${label}Blinded --ignoreCovWarning -v $verbose 2>&1 | tee $outsdir/${label}FitDiagnostics.txt
     # --saveShapes --saveNormalizations --saveWithUncertainties --saveOverallShapes \
 
-    python3 $CMSSW_BASE/src/HiggsAnalysis/CombinedLimit/test/diffNuisances.py fitDiagnosticsBlinded.root -g nuisance_pulls.root --all --regex='^(?!.*mcstat)'  --vtol=0.3 --stol=0.1 --vtol2=2.0 --stol2=0.5
+    python3 $CMSSW_BASE/src/HiggsAnalysis/CombinedLimit/test/diffNuisances.py fitDiagnostics${label}Blinded.root -g nuisance_pulls.root --all --regex='^(?!.*mcstat)'  --vtol=0.3 --stol=0.1 --vtol2=2.0 --stol2=0.5
 
     echo "Fit Shapes"
-    PostFitShapesFromWorkspace --dataset "$dataset" -w ${wsm}.root --output ${channellabel}FitShapes.root \
-    -m 125 -f fitDiagnosticsBlinded.root:fit_b --postfit --print 2>&1 | tee $outsdir/${channellabel}FitShapes.txt
+    PostFitShapesFromWorkspace --dataset "$dataset" -w ${wsm}.root --output ${label}FitShapes.root \
+    -m 125 -f fitDiagnostics${label}Blinded.root:fit_b --postfit --print 2>&1 | tee $outsdir/${label}FitShapes.txt
 fi
 
 
