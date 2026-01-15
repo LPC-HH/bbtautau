@@ -302,7 +302,7 @@ if [ $bfit = 1 ]; then
     --freezeParameters "r,${freezeparamsblinded}" \
     -n ${label}Snapshot 2>&1 | tee $outsdir/${label}MultiDimFit.txt
 else
-    if [ ! -f "higgsCombineSnapshot.MultiDimFit.mH125.root" ]; then
+    if [ ! -f higgsCombine${label}Snapshot.MultiDimFit.mH125.root ]; then
         echo "Background-only fit snapshot doesn't exist! Use the -b|--bfit option to run fit first. (Ignore this if you're only creating the workspace.)"
         exit 1
     fi
@@ -348,7 +348,7 @@ if [ $dfit = 1 ]; then
     -n ${label}Blinded --ignoreCovWarning -v $verbose 2>&1 | tee $outsdir/${label}FitDiagnostics.txt
     # --saveShapes --saveNormalizations --saveWithUncertainties --saveOverallShapes \
 
-    python3 $CMSSW_BASE/src/HiggsAnalysis/CombinedLimit/test/diffNuisances.py fitDiagnosticsBlinded.root -g nuisance_pulls.root --all --regex='^(?!.*mcstat)'  --vtol=0.3 --stol=0.1 --vtol2=2.0 --stol2=0.5
+    python3 $CMSSW_BASE/src/HiggsAnalysis/CombinedLimit/test/diffNuisances.py fitDiagnostics${label}Blinded.root -g nuisance_pulls.root --all --regex='^(?!.*mcstat)'  --vtol=0.3 --stol=0.1 --vtol2=2.0 --stol2=0.5
 
     echo "Fit Shapes"
     PostFitShapesFromWorkspace --dataset "$dataset" -w ${wsm}.root --output ${label}FitShapes.root \

@@ -5,12 +5,12 @@
 # Usage: ./meta_run_blinded.sh [combined|individual|both] [--cmds <commands>]
 
 # Configuration
-CARDS_BASE_DIR="/home/users/lumori/bbtautau/src/bbtautau/cards/26Jan6-vbf-k2v0"
+CARDS_BASE_DIR="/home/users/lumori/bbtautau/src/bbtautau/cards/26Jan6-vbf"
 SCRIPT_PATH="/home/users/lumori/bbtautau/src/bbtautau/combine/run_blinded_bbtt.sh"
 CHANNELS=("hh" "hm" "he")
 
 # Default values
-DEFAULT_CMDS="--bfit --limits"
+DEFAULT_CMDS="--bfit --limits --dfit"
 cmds="$DEFAULT_CMDS"
 do_vbf=0
 

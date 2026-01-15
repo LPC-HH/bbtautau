@@ -20,7 +20,7 @@
 
 years=("2022" "2022EE" "2023" "2023BPix")
 channels=("hh" "hm" "he")
-bmin_values=(10)  # Default to single value, can be overridden with --bmin
+bmin_values=(5 10 12)  # Can be overridden with --bmin
 
 MAIN_DIR="/home/users/lumori/bbtautau"
 SCRIPT_DIR="${MAIN_DIR}/src/bbtautau/postprocessing"
