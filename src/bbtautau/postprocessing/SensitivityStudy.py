@@ -1086,8 +1086,8 @@ class Analyser:
             gridlims = (0.3, 1) if use_thresholds else (0.2, 0.9)
             gridsize = 20
         else:
-            gridlims = (0.7, 1) if use_thresholds else (0.25, 0.75)
-            gridsize = 50
+            gridlims = (0.7, 1) if use_thresholds else (0.15, 0.85)
+            gridsize = 80
 
         foms = FOMS_TO_OPTIMIZE
 
@@ -1428,7 +1428,7 @@ def get_plot_dir(
 
     tag = "ParT/" if use_ParT else "BDT/"
     tag += "do_vbf/" if do_vbf else "ggf_only/"
-    tag += "sm_signals/" if use_sm_signals else "ggf_only/"
+    tag += "sm_signals/" if use_sm_signals else "separate_signals/"
     tag += "overlapping_channels/" if overlapping_channels else "orthogonal_channels/"
     tag += f"{sr_config.name}/{sr_config.channel}"
 
@@ -1536,7 +1536,7 @@ if __name__ == "__main__":
         epilog="""
 Examples:
   # Run sensitivity optimization with BDT
-  python SensitivityStudy.py --actions sensitivity --channels he hmu
+  python SensitivityStudy.py --actions sensitivity --channels he hm
 
   # Evaluate at specific cuts from a CSV file
   python SensitivityStudy.py --actions evaluate --cuts-file results.csv --eval-bmin 10 --outfile eval.csv
