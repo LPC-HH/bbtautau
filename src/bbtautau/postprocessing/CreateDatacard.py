@@ -42,7 +42,6 @@ from bbtautau.postprocessing.datacardHelpers import (
 from bbtautau.postprocessing.Samples import (
     CHANNELS,
     SIGNALS,
-    SIGNALS_CHANNELS,
     sig_keys_ggf,
     sig_keys_vbf,
     single_h_keys,
@@ -203,7 +202,7 @@ if args.only_sm:
     sig_keys_ggf = [f"ggfbbtt{channel.key}" for channel in channels]
     sig_keys_vbf = [f"vbfbbtt{channel.key}" for channel in channels]
 
-all_sig_keys = SIGNALS_CHANNELS
+all_sig_keys = SIGNALS
 sig_keys = []
 hist_names = {}  # names of hist files for the samples
 
@@ -457,6 +456,7 @@ def get_year_updown(
 
 def fill_regions(
     model: rl.Model,
+    sr_key: str,
     channel: rl.Channel,
     regions: list[str],
     templates_dict: dict,  # noqa: ARG001
@@ -474,6 +474,7 @@ def fill_regions(
 
     Args:
         model (rl.Model): rhalphalib model
+        sr_key: str: signal region key (ggfbbtt or vbfbbtt etc.)
         regions (List[str]): list of regions to fill
         templates_dict (Dict): dictionary of all templates
         templates_summed (Dict): dictionary of templates summed across years
@@ -501,7 +502,7 @@ def fill_regions(
         blind_str = MCB_LABEL if region.endswith(MCB_LABEL) else ""  # noqa: F841
 
         logging.info(f"\tStarting region: {region}")
-        ch = rl.Channel(channel.key + region.replace("_", ""))  # can't have '_'s in name
+        ch = rl.Channel(sr_key + channel.key + region.replace("_", ""))  # can't have '_'s in name
         model.addChannel(ch)
 
         for sample_name, card_name in mc_samples.items():
@@ -669,7 +670,7 @@ def fill_regions(
             # tie MC stats parameters together in blinded and "unblinded" region
             channel_name = region_noblinded
             ch.autoMCStats(
-                channel_name=f"{CMS_PARAMS_LABEL}_{channel.key}{channel_name}",
+                channel_name=f"{CMS_PARAMS_LABEL}_{sr_key}{channel.key}{channel_name}",
                 threshold=args.mcstats_threshold,
                 epsilon=args.epsilon,
             )
@@ -680,6 +681,7 @@ def fill_regions(
 
 def alphabet_fit(
     model: rl.Model,
+    sr_key: str,
     channel: Channel,
     shape_vars: list[ShapeVar],
     templates_summed: dict,
@@ -687,6 +689,8 @@ def alphabet_fit(
     min_qcd_val: float | None = None,
     unblinded: bool = False,
 ):
+    print(model)
+
     shape_var = shape_vars[0]
     m_obs = rl.Observable(shape_var.name, shape_var.bins)
 
@@ -697,7 +701,9 @@ def alphabet_fit(
     # Independent nuisances to float QCD in each fail bin
     qcd_params = np.array(
         [
-            rl.IndependentParameter(f"{CMS_PARAMS_LABEL}_tf_dataResidual_{channel.key}Bin{i}", 0)
+            rl.IndependentParameter(
+                f"{CMS_PARAMS_LABEL}_tf_dataResidual_{sr_key}{channel.key}Bin{i}", 0
+            )
             for i in range(m_obs.nbins)
         ]
     )
@@ -706,7 +712,7 @@ def alphabet_fit(
 
     blind_strs = [""] if unblinded else ["", MCB_LABEL]
     for blind_str in blind_strs:
-        failChName = f"{channel.key}fail{blind_str}".replace("_", "")
+        failChName = f"{sr_key}{channel.key}fail{blind_str}".replace("_", "")
         logging.info(f"Setting up fail region {failChName}")
         failCh = model[failChName]
 
@@ -775,7 +781,7 @@ def alphabet_fit(
 
         # transfer factor
         tf_dataResidual = rl.BasisPoly(
-            f"{CMS_PARAMS_LABEL}_tf_dataResidual_{channel.key}{sr}",
+            f"{CMS_PARAMS_LABEL}_tf_dataResidual_{sr_key}{channel.key}{sr}",
             (shape_var.orders[sr],),
             [shape_var.name],
             basis="Bernstein",
@@ -786,7 +792,7 @@ def alphabet_fit(
         tf_params_pass = qcd_eff * tf_dataResidual_params  # scale params initially by qcd eff
 
         for blind_str in blind_strs:
-            passChName = f"{channel.key}{sr}{blind_str}".replace("_", "")
+            passChName = f"{sr_key}{channel.key}{sr}{blind_str}".replace("_", "")
             passCh = model[passChName]
 
             pass_qcd = rl.TransferFactorSample(
@@ -802,6 +808,7 @@ def alphabet_fit(
 def createDatacardAlphabet(
     args,
     model: rl.Model,
+    sr_key: str,
     channel: rl.Channel,
     templates_dict: dict,
     templates_summed: dict,
@@ -817,6 +824,7 @@ def createDatacardAlphabet(
     # Fill templates per sample, incl. systematics
     fill_args = [
         model,
+        sr_key,
         channel,
         regions,
         templates_dict,
@@ -832,6 +840,7 @@ def createDatacardAlphabet(
 
     fit_args = [
         model,
+        sr_key,
         channel,
         shape_vars,
         templates_summed,
@@ -851,56 +860,83 @@ def main(args):
 
     logging.info(f"Found analysis directories: {[d.name for d in analysis_dirs]}")
 
-    # Process each analysis subfolder
+    # Process each analysis subfolder. In current state will be just 1 bmin value.
     for analysis_dir in analysis_dirs:
+        print(analysis_dir)
         analysis_name = analysis_dir.name
         logging.info(f"Processing analysis: {analysis_name}")
 
-        # Create a separate model for each analysis
-        model = rl.Model(f"HHModel_{analysis_name}")
+        # Check for signal region subfolders in analysis_dir
+        sr_subdirs = [d.name for d in analysis_dir.iterdir() if d.is_dir()]
 
-        for channel in channels:
-            # Check if channel directory exists in this analysis
-            channel_path = analysis_dir / channel.key
-            if not channel_path.exists():
-                logging.warning(f"Channel {channel.key} not found in {analysis_name}, skipping")
-                continue
-
-            # templates per region per year, templates per region summed across years
-            templates_dict, templates_summed = get_templates(
-                str(channel_path), years, args.sig_separate, args.scale_templates
+        if len(sr_subdirs) == 0:
+            logging.warning(f"No signal region subfolders found in {analysis_name}, skipping")
+            continue
+        if len(sr_subdirs) == 1:
+            sr_keys = sr_subdirs
+            logging.info(f"Found single signal region: {sr_keys[0]}")
+        else:
+            logging.info(f"Found multiple signal regions: {sr_subdirs}")
+            user_input = (
+                input(f"Process all {len(sr_subdirs)} signal regions? [y/n]: ").strip().lower()
             )
+            if user_input in ["y", "yes"]:
+                sr_keys = sr_subdirs
+            else:
+                logging.info("User chose not to process multiple signal regions. Exiting.")
+                break
 
-            # random template from which to extract shape vars
-            sample_templates: Hist = templates_summed[next(iter(templates_summed.keys()))]
+        # Loop over signal region subfolders
+        for sr_key in sr_keys:
+            logging.info(f"Processing signal region: {sr_key}")
 
-            # [mH(bb)]
-            shape_vars = [
-                ShapeVar(
-                    name=axis.name,
-                    bins=axis.edges,
-                    orders={sr: args.nTF[i] for i, sr in enumerate(signal_regions)},
+            # Create a separate model for each analysis/signal region combination
+            model = rl.Model(f"HHModel_{analysis_name}_{sr_key}")
+
+            for channel in channels:
+                # Check if channel directory exists in this analysis
+                channel_path = analysis_dir / sr_key / channel.key
+                if not channel_path.exists():
+                    logging.warning(
+                        f"Channel {channel.key} not found in {analysis_name}/{sr_key}, skipping"
+                    )
+                    continue
+
+                # templates per region per year, templates per region summed across years
+                templates_dict, templates_summed = get_templates(
+                    str(channel_path), years, args.sig_separate, args.scale_templates
                 )
-                for _, axis in enumerate(sample_templates.axes[1:])
-            ]
 
-            createDatacardAlphabet(
-                args, model, channel, templates_dict, templates_summed, shape_vars
-            )
+                # random template from which to extract shape vars
+                sample_templates: Hist = templates_summed[next(iter(templates_summed.keys()))]
 
-        ##############################################
-        # Save model for this analysis
-        ##############################################
+                # [mH(bb)]
+                shape_vars = [
+                    ShapeVar(
+                        name=axis.name,
+                        bins=axis.edges,
+                        orders={sr: args.nTF[i] for i, sr in enumerate(signal_regions)},
+                    )
+                    for _, axis in enumerate(sample_templates.axes[1:])
+                ]
 
-        logging.info(f"rendering combine model for {analysis_name}")
-        base_cards_dir = Path(args.cards_dir)
-        out_dir = base_cards_dir / args.model_name / analysis_name
-        out_dir.mkdir(parents=True, exist_ok=True)
+                createDatacardAlphabet(
+                    args, model, sr_key, channel, templates_dict, templates_summed, shape_vars
+                )
 
-        model.renderCombine(out_dir)
+            ##############################################
+            # Save model for this analysis/signal region
+            ##############################################
 
-        with Path(f"{out_dir}/model.pkl").open("wb") as fout:
-            pickle.dump(model, fout, 2)  # use python 2 compatible protocol
+            logging.info(f"rendering combine model for {analysis_name}")
+            base_cards_dir = Path(args.cards_dir)
+            out_dir = base_cards_dir / args.model_name / analysis_name
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            model.renderCombine(out_dir)
+
+            with Path(f"{out_dir}/model.pkl").open("wb") as fout:
+                pickle.dump(model, fout, 2)  # use python 2 compatible protocol
 
 
 main(args)

@@ -273,7 +273,7 @@ def plot_optimization_thresholds(
         bb_disc_label: Label for bb discriminator axis
         tt_disc_label: Label for tt discriminator axis
     """
-    fig, ax = _setup_optimization_plot(years, channel, foms)
+    fig, ax = _setup_optimization_plot(years)
 
     colors = ["b", "purple", "r", "orange"]
     markers = ["x", "o", "s", "D"]
@@ -301,6 +301,7 @@ def plot_optimization_thresholds(
         # Get optimal cuts
         bb_cut_opt = optimum.get("TXbb_opt")
         tt_cut_opt = optimum.get("TXtt_opt")
+        sel_B_min = optimum.get("sel_B_min")
 
         if bb_cut_opt is None or tt_cut_opt is None:
             continue
@@ -312,17 +313,24 @@ def plot_optimization_thresholds(
                 color=c,
                 label="Global optimum",
                 marker=m,
-                s=100,
+                s=80,
                 zorder=10,
             )
         else:
+            ax.contour(
+                bb_grid,
+                tt_grid,
+                ~sel_B_min,
+                colors=c,
+                linestyles="dashdot",
+            )
             ax.scatter(
                 bb_cut_opt,
                 tt_cut_opt,
                 color=c,
                 label=f"Optimum $B\\geq {B_min}$",
                 marker=m,
-                s=100,
+                s=80,
                 zorder=10,
             )
 
@@ -378,7 +386,7 @@ def plot_optimization_sig_eff(
         bb_disc_label: Label for bb discriminator axis
         tt_disc_label: Label for tt discriminator axis
     """
-    fig, ax = _setup_optimization_plot(years, channel, foms)
+    fig, ax = _setup_optimization_plot(years)
 
     colors = ["b", "purple", "r", "orange"]
     markers = ["x", "o", "s", "D"]
@@ -433,6 +441,8 @@ def plot_optimization_sig_eff(
 
         # Get optimal signal efficiency cuts from dict
         sig_eff_cuts = optimum.get("sig_eff_cuts")
+        sel_B_min = optimum.get("sel_B_min")
+
         if sig_eff_cuts is None:
             # Fall back to threshold cuts if sig_eff_cuts not available
             continue
@@ -446,17 +456,24 @@ def plot_optimization_sig_eff(
                 color=c,
                 label="Global optimum",
                 marker=m,
-                s=100,
+                s=80,
                 zorder=10,
             )
         else:
+            ax.contour(
+                bb_sig_eff_grid,
+                tt_sig_eff_grid,
+                ~sel_B_min,
+                colors=c,
+                linestyles="dashdot",
+            )
             ax.scatter(
                 bb_sig_eff_opt,
                 tt_sig_eff_opt,
                 color=c,
                 label=f"Optimum $B\\geq {B_min}$",
                 marker=m,
-                s=100,
+                s=80,
                 zorder=10,
             )
 

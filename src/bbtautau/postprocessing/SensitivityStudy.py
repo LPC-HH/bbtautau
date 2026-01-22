@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import json
 import logging
 from collections import defaultdict
 from datetime import date
@@ -44,23 +46,7 @@ hep.style.use("CMS")
 TODAY = date.today()  # to name output folder
 
 # Default B_min values for optimization
-DEFAULT_BMIN_VALUES = [1, 5, 10, 12]  # Used for non-adaptive mode and final adaptive stage
-DEFAULT_ADAPTIVE_BMIN = 10  # Single B_min used during adaptive refinement iterations
-
-# Adaptive optimization defaults (to avoid too many CLI args)
-ADAPTIVE_STAGES = 2
-ADAPTIVE_TOP_FRAC = 0.1
-ADAPTIVE_PADDING = 1.0
-ADAPTIVE_REFINE_GRIDSIZE = None
-ADAPTIVE_BMIN = DEFAULT_ADAPTIVE_BMIN
-
-adaptive_kwargs = {
-    "adaptive_stages": ADAPTIVE_STAGES,
-    "adaptive_top_frac": ADAPTIVE_TOP_FRAC,
-    "adaptive_padding": ADAPTIVE_PADDING,
-    "adaptive_refine_gridsize": ADAPTIVE_REFINE_GRIDSIZE,
-    "adaptive_bmin": ADAPTIVE_BMIN,
-}
+DEFAULT_BMIN_VALUES = [1, 5, 10, 12]
 
 # Define discriminant names
 # BB_DISC_NAME = "bbFatJetParTXbbvsQCDTop" #Define in args for now
@@ -142,12 +128,12 @@ class Analyser:
         use_ParT: bool | None = None,
         at_inference=False,
         tt_pres=False,
-        adaptive=False,
         bdt_dir=None,
         plot_dir: Path | None = None,
         llsl_weight=1,
         dataMinusSimABCD=False,
         showNonDataDrivenPortion=True,
+        compute_ROC_metrics=False,
     ):
         """Initialize Analyser with support for multiple signals."""
         self.sr_config = sr_config
@@ -157,12 +143,12 @@ class Analyser:
         self.tt_pres = tt_pres
         self.at_inference = at_inference
         self.use_ParT = use_ParT
-        self.adaptive = adaptive
         self.bdt_dir = bdt_dir
 
         self.llsl_weight = llsl_weight
         self.dataMinusSimABCD = dataMinusSimABCD
         self.showNonDataDrivenPortion = showNonDataDrivenPortion
+        self.compute_ROC_metrics = compute_ROC_metrics
         print(
             "Using data minus simulated non-QCD backgrounds for ABCD estimation:",
             self.dataMinusSimABCD,
@@ -177,7 +163,7 @@ class Analyser:
         self.all_keys = (
             self.sig_keys_channel
             + self.channel.data_samples
-            + (self.showNonDataDrivenPortion + self.dataMinusSimABCD) * NON_QCD_BGS
+            + (self.showNonDataDrivenPortion or self.dataMinusSimABCD) * NON_QCD_BGS
         )
 
         print("All keys: ", self.all_keys)
@@ -271,7 +257,7 @@ class Analyser:
             discs_all, signal_name=signal_name_for_fill, background_names=background_names
         )
 
-        self.rocAnalyzer.compute_rocs()
+        self.rocAnalyzer.compute_rocs(compute_metrics=self.compute_ROC_metrics)
 
         # Plot bb discriminants
         self.rocAnalyzer.plot_rocs(title="bbFatJet", disc_names=discs_bb, plot_dir=self.plot_dir)
@@ -414,7 +400,6 @@ class Analyser:
         """Prepare discriminants and kinematic variables for optimization."""
 
         mtt1, mtt2 = self.channel.tt_mass_cut[1]
-        mbb1, mbb2 = SHAPE_VAR["blind_window"]
 
         # just a safety check
         if not set(self.all_keys) <= set(self.events_dict[self.years[0]].keys()):
@@ -422,8 +407,8 @@ class Analyser:
                 f"All keys {self.all_keys} do not match the keys in the events dictionary {list(self.events_dict[self.years[0]].keys())}"
             )
 
-        # Compute pt cuts and safety bbmass cuts once for all samples
-        pt_veto_cuts = {
+        # Compute pt cuts and safety bbmass cuts once for all samples (NO vetoes applied here)
+        base_presel_cuts = {
             key: (self._concat_years("bbFatJetPt", key) > PT_CUTS["bb"])
             & (self._concat_years("ttFatJetPt", key) > PT_CUTS["tt"])
             & (self._concat_years(SHAPE_VAR["name"], key) > SHAPE_VAR["range"][0])
@@ -434,33 +419,15 @@ class Analyser:
         if self.use_ParT:
             # apply the tt mass cuts in the preprocessing stage if we do not use the BDT
             for sig_key in self.sig_keys_channel:
-                pt_veto_cuts[sig_key] &= (
+                base_presel_cuts[sig_key] &= (
                     self._concat_years(self.channel.tt_mass_cut[0], sig_key) > mtt1
                 ) & (self._concat_years(self.channel.tt_mass_cut[0], sig_key) < mtt2)
             for key in self.channel.data_samples:
-                pt_veto_cuts[key] &= (
+                base_presel_cuts[key] &= (
                     self._concat_years(self.channel.tt_mass_cut[0], key) < mtt1
                 ) | (self._concat_years(self.channel.tt_mass_cut[0], key) > mtt2)
 
-        # Apply veto cuts: exclude events passing veto region selections
-        if self.sr_config.veto_cuts:
-            for veto_key in self.sr_config.veto_cuts:
-                veto_bb_cut, veto_tt_cut, veto_bb_disc, veto_tt_disc = self.sr_config.veto_cuts[
-                    veto_key
-                ]
-                # Create veto mask
-                print(veto_key, veto_bb_cut, veto_tt_cut, veto_bb_disc, veto_tt_disc)
-                veto_mask = {
-                    key: ~(
-                        (self._concat_years(veto_bb_disc, key) > veto_bb_cut)
-                        & (self._concat_years(veto_tt_disc, key) > veto_tt_cut)
-                    )
-                    for key in self.all_keys
-                }
-                # Combine veto mask with pt_cuts
-                pt_veto_cuts = {key: pt_veto_cuts[key] & veto_mask[key] for key in self.all_keys}
-
-        # Extract main discriminants and kinematics
+        # Define sample groupings
         sig_vs_bkg_groups = {
             "signal": self.sig_keys_channel,
             "data": self.channel.data_samples,
@@ -471,32 +438,79 @@ class Analyser:
             for non_qcd_bkg in NON_QCD_BGS:
                 sig_vs_bkg_groups[non_qcd_bkg] = [non_qcd_bkg]
 
-        self.sensitivity_vars = {
+        self._sig_vs_bkg_groups = sig_vs_bkg_groups
+
+        # Extract all variables with base preselection
+        mbb1, mbb2 = SHAPE_VAR["blind_window"]
+
+        base_vars = {
             "txbbs": self._extract_var_with_cuts(
-                self.bb_disc_name, pt_veto_cuts, concatenate_samples=sig_vs_bkg_groups
+                self.bb_disc_name, base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
             ),
             "txtts": self._extract_var_with_cuts(
-                self.tt_disc_name_channel, pt_veto_cuts, concatenate_samples=sig_vs_bkg_groups
+                self.tt_disc_name_channel, base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
             ),
             "massbb": self._extract_var_with_cuts(
-                SHAPE_VAR["name"], pt_veto_cuts, concatenate_samples=sig_vs_bkg_groups
+                SHAPE_VAR["name"], base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
             ),
             "masstt": self._extract_var_with_cuts(
-                self.channel.tt_mass_cut[0], pt_veto_cuts, concatenate_samples=sig_vs_bkg_groups
+                self.channel.tt_mass_cut[0], base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
             ),
             "finalWeight": self._extract_var_with_cuts(
-                "finalWeight", pt_veto_cuts, concatenate_samples=sig_vs_bkg_groups
+                "finalWeight", base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
+            ),
+            "run": self._extract_var_with_cuts(
+                "run", base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
+            ),
+            "event": self._extract_var_with_cuts(
+                "event", base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
+            ),
+            "luminosityBlock": self._extract_var_with_cuts(
+                "luminosityBlock", base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
             ),
         }
 
-        # pre-compute the sideband cuts for all groups
-        self.sideband_cuts = {
-            group_name: (self.sensitivity_vars["massbb"][group_name] < mbb1)
-            | (self.sensitivity_vars["massbb"][group_name] > mbb2)
+        # Extract veto discriminant vars
+        base_veto_disc_vars = {}
+        if self.sr_config.veto_regions:
+            for veto_sr_config in self.sr_config.veto_regions:
+                veto_bb_disc = veto_sr_config.bb_disc_name
+                veto_tt_disc = veto_sr_config.tt_disc_name[veto_sr_config.channel]
+                if veto_bb_disc not in base_veto_disc_vars:
+                    base_veto_disc_vars[veto_bb_disc] = self._extract_var_with_cuts(
+                        veto_bb_disc, base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
+                    )
+                if veto_tt_disc not in base_veto_disc_vars:
+                    base_veto_disc_vars[veto_tt_disc] = self._extract_var_with_cuts(
+                        veto_tt_disc, base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
+                    )
+
+        # Compute sideband cuts from massbb
+        base_sideband_cuts = {
+            group_name: (base_vars["massbb"][group_name] < mbb1)
+            | (base_vars["massbb"][group_name] > mbb2)
             for group_name in sig_vs_bkg_groups
         }
 
-        del self.sensitivity_vars["massbb"]
+        # Remove massbb from vars (not needed for optimization)
+        del base_vars["massbb"]
+
+        # Store base versions (these are the immutable references)
+        self._base_sensitivity_vars = base_vars
+        self._base_veto_disc_vars = base_veto_disc_vars
+        self._base_sideband_cuts = base_sideband_cuts
+
+        # Set working copies (these will be modified when applying vetoes)
+        self._restore_base_sensitivity_vars()
+
+    def _restore_base_sensitivity_vars(self) -> None:
+        """Restore sensitivity_vars to base state by copying from stored base versions.
+
+        Called before each B_min iteration to start from a clean (un-vetoed) state.
+        """
+        self.sensitivity_vars = copy.deepcopy(self._base_sensitivity_vars)
+        self._veto_disc_vars = copy.deepcopy(self._base_veto_disc_vars)
+        self.sideband_cuts = copy.deepcopy(self._base_sideband_cuts)
 
     def _pass_cuts(self, group_name, txbbcut, txttcut):
         return (self.sensitivity_vars["txbbs"][group_name] > txbbcut) & (
@@ -647,6 +661,40 @@ class Analyser:
 
         return results
 
+    def get_passing_events(self, txbbcut: float, txttcut: float) -> list:
+        """
+        Get list of data events passing the selection cuts.
+
+        Uses pre-extracted sensitivity_vars which already have preselection and vetoes applied.
+
+        Args:
+            txbbcut: Cut value for bb tagger
+            txttcut: Cut value for tt tagger
+
+        Returns:
+            List of event dicts with keys: run, lumi, event
+        """
+        # Discriminant cuts on data
+        pass_cuts = self._pass_cuts("data", txbbcut, txttcut)
+
+        # Extract event identifiers
+        passing_events = []
+        if np.any(pass_cuts):
+            run_vals = self.sensitivity_vars["run"]["data"][pass_cuts]
+            lumi_vals = self.sensitivity_vars["luminosityBlock"]["data"][pass_cuts]
+            event_vals = self.sensitivity_vars["event"]["data"][pass_cuts]
+
+            for run, lumi, event in zip(run_vals, lumi_vals, event_vals):
+                passing_events.append(
+                    {
+                        "run": int(run),
+                        "lumi": int(lumi),
+                        "event": int(event),
+                    }
+                )
+
+        return passing_events
+
     def run_evaluation(
         self,
         cuts_file: str | Path,
@@ -729,6 +777,181 @@ class Analyser:
         out.to_csv(outpath, index=False)
         print(f"Results saved to: {outpath}")
 
+    def _apply_veto_masks_for_bmin(self, bmin: int) -> None:
+        """Apply veto masks for a specific B_min value to sensitivity_vars.
+
+        This modifies self.sensitivity_vars in place by applying veto masks
+        extracted from veto_regions for the given bmin value.
+
+        Args:
+            bmin: B_min value to get veto cuts from
+        """
+        if not self.sr_config.veto_regions:
+            return  # No vetoes to apply
+
+        veto_cuts = self.sr_config.get_veto_cuts_for_bmin(bmin)
+        if not veto_cuts:
+            return  # No valid veto cuts for this bmin
+
+        print(f"    Applying vetoes for Bmin={bmin}: {list(veto_cuts.keys())}")
+
+        # Build combined veto mask for all veto regions
+        for veto_key, (veto_bb_cut, veto_tt_cut, veto_bb_disc, veto_tt_disc) in veto_cuts.items():
+            print(
+                f"      {veto_key}: bb>{veto_bb_cut:.4f} ({veto_bb_disc}), tt>{veto_tt_cut:.4f} ({veto_tt_disc})"
+            )
+
+            # Get veto discriminant values (pre-extracted in prepare_sensitivity)
+            veto_bb_vals = self._veto_disc_vars[veto_bb_disc]
+            veto_tt_vals = self._veto_disc_vars[veto_tt_disc]
+
+            # Apply veto: keep events that do NOT pass the veto region cuts
+            for group_name in self._sig_vs_bkg_groups:
+                veto_mask = ~(
+                    (veto_bb_vals[group_name] > veto_bb_cut)
+                    & (veto_tt_vals[group_name] > veto_tt_cut)
+                )
+                # Apply mask to all sensitivity vars for this group
+                for var_name in self.sensitivity_vars:
+                    self.sensitivity_vars[var_name][group_name] = self.sensitivity_vars[var_name][
+                        group_name
+                    ][veto_mask]
+                # Update sideband_cuts
+                self.sideband_cuts[group_name] = self.sideband_cuts[group_name][veto_mask]
+                # Update veto disc vars
+                for disc_name in self._veto_disc_vars:
+                    self._veto_disc_vars[disc_name][group_name] = self._veto_disc_vars[disc_name][
+                        group_name
+                    ][veto_mask]
+
+    def _run_grid_search(
+        self,
+        BBcut,
+        TTcut,
+        BBcutSigEff,
+        TTcutSigEff,
+        B_min_vals: list[int],
+        foms,
+        use_thresholds: bool,
+    ) -> dict:
+        """Run grid search and find optima for given B_min values.
+
+        Args:
+            BBcut, TTcut: Threshold meshgrids
+            BBcutSigEff, TTcutSigEff: Signal efficiency meshgrids (None if use_thresholds)
+            B_min_vals: List of B_min values to find optima for
+            foms: List of FOM functions
+            use_thresholds: Whether using threshold coordinates
+
+        Returns:
+            dict: {fom_name: {f"Bmin={bmin}": optimum_dict, ...}, ...}
+        """
+        # Flatten the grid for parallel evaluation
+        bbcut_flat = BBcut.ravel()
+        ttcut_flat = TTcut.ravel()
+        grid_shape = BBcut.shape
+
+        # Run grid search (expensive - done once)
+        print(f"Running grid search on {len(bbcut_flat)} points...")
+        results = Parallel(n_jobs=-10, prefer="threads", verbose=1)(
+            delayed(self.compute_sig_bkg_abcd)(_b, _t) for _b, _t in zip(bbcut_flat, ttcut_flat)
+        )
+
+        # Unpack results
+        evals = defaultdict(list)
+        for sig_pass, bg_data, bg_non_qcd, breakdown in results:
+            evals["sig_pass"].append(sig_pass)
+            evals["data_pass_resonant"].append(bg_data.pass_resonant)
+            evals["data_pass_sideband"].append(bg_data.pass_sideband)
+            evals["TF_data"].append(bg_data.tf)
+
+            if bg_non_qcd is not None:
+                evals["non_qcd_pass_resonant"].append(bg_non_qcd.pass_resonant)
+
+            # Store breakdown of non-QCD backgrounds by category (only if breakdown was computed)
+            if breakdown is not None:
+                for non_qcd_bkg in NON_QCD_BGS:
+                    evals[f"{non_qcd_bkg}_pass_resonant"].append(breakdown.get(non_qcd_bkg, 0))
+
+            # subtract the non-QCD background from the data if desired
+            if self.dataMinusSimABCD and bg_non_qcd is not None:
+                bg_data_qcd_only = bg_data.subtract_MC(bg_non_qcd)
+                evals["data_qcd_only_pass_sideband"].append(bg_data_qcd_only.pass_sideband)
+                evals["TF_qcd_only"].append(bg_data_qcd_only.tf)
+
+        # Reshape to 2D grid
+        evals = {k: np.array(v).reshape(grid_shape) for k, v in evals.items()}
+
+        # Find optima for each FOM and B_min combination
+        evals_opt = {fom.name: {} for fom in foms}
+
+        for fom in foms:
+            # Compute FOM values once (same for all B_min)
+            if self.dataMinusSimABCD:
+                limits = fom.fom_func(
+                    evals["data_qcd_only_pass_sideband"],
+                    evals["sig_pass"],
+                    evals["TF_qcd_only"],
+                    non_qcd_bg_in_pass_res=evals["non_qcd_pass_resonant"],
+                )
+            else:
+                limits = fom.fom_func(
+                    evals["data_pass_sideband"],
+                    evals["sig_pass"],
+                    evals["TF_data"],
+                    non_qcd_bg_in_pass_res=0,
+                )
+
+            # Find optimum for each B_min
+            for B_min in B_min_vals:
+                sel_B_min = evals["data_pass_sideband"] >= B_min
+
+                if not np.any(sel_B_min):
+                    print(f"Warning: No points satisfy B_min>{B_min} for FOM={fom.name}. Skipping.")
+                    continue
+
+                sel_indices = np.argwhere(sel_B_min)
+                selected_limits = limits[sel_B_min]
+                min_idx_in_selected = np.argmin(selected_limits)
+                idx_opt = tuple(sel_indices[min_idx_in_selected])
+                limit_opt = selected_limits[min_idx_in_selected]
+
+                # Get optimal cuts (always in threshold space)
+                bbcut_opt, ttcut_opt = BBcut[idx_opt], TTcut[idx_opt]
+
+                evals_opt_fom_bmin = {k: v[idx_opt] for k, v in evals.items()}
+                evals_opt_fom_bmin["limit"] = limit_opt
+                evals_opt_fom_bmin["TXbb_opt"] = bbcut_opt
+                evals_opt_fom_bmin["TXtt_opt"] = ttcut_opt
+                evals_opt_fom_bmin["sel_B_min"] = sel_B_min
+
+                # Add signal efficiency specific fields if using signal efficiency coordinates
+                if not use_thresholds:
+                    bbcut_sig_eff_opt = BBcutSigEff[idx_opt]
+                    ttcut_sig_eff_opt = TTcutSigEff[idx_opt]
+                    evals_opt_fom_bmin.update(
+                        {
+                            "sig_eff_cuts": (bbcut_sig_eff_opt, ttcut_sig_eff_opt),
+                            "BBcut_sig_eff": BBcutSigEff,
+                            "TTcut_sig_eff": TTcutSigEff,
+                            "fom_map": limits,
+                        }
+                    )
+
+                else:
+                    evals_opt_fom_bmin.update(
+                        {
+                            "fom_map": limits,
+                        }
+                    )
+
+                # Compute passing events at optimal cuts (vetoes already applied via sensitivity_vars)
+                evals_opt_fom_bmin["passing_events"] = self.get_passing_events(bbcut_opt, ttcut_opt)
+
+                evals_opt[fom.name][f"Bmin={B_min}"] = evals_opt_fom_bmin
+
+        return evals_opt
+
     def grid_search_opt(
         self,
         gridsize,
@@ -740,21 +963,24 @@ class Analyser:
         """
         Grid search optimization for signal/background discrimination.
 
+        If veto_regions are present, runs separate grid searches per B_min to apply
+        the correct veto cuts for each B_min value. Otherwise, runs a single grid
+        search and filters results per B_min.
+
         Args:
             gridsize: Size of the grid (gridsize x gridsize points)
             gridlims: Either a single tuple (min, max) used for both axes,
                      or a dict with keys 'x' and 'y': {'x': (min, max), 'y': (min, max)}
             B_min_vals: List of minimum background values to test
             foms: List of figure-of-merit functions
-            normalize_sig: Whether to normalize signal yields
-            use_sig_eff: If True, use signal efficiency coordinates; if False, use raw thresholds
+            use_thresholds: If True, use threshold coordinates; if False, use signal efficiency
 
         Returns:
             Optimum: Results dictionary containing optimization results
 
         Note:
-            When use_sig_eff=True, gridlims should be efficiency values (0.0 to 1.0).
-            When use_sig_eff=False, gridlims should be raw threshold values.
+            When use_thresholds=False, gridlims should be efficiency values (0.0 to 1.0).
+            When use_thresholds=True, gridlims should be raw threshold values.
         """
 
         # Parse gridlims: support both single tuple and dict format
@@ -810,306 +1036,41 @@ class Analyser:
             BBcutSigEff = None
             TTcutSigEff = None
 
-        # Flatten the grid for parallel evaluation
-        bbcut_flat = BBcut.ravel()
-        ttcut_flat = TTcut.ravel()
+        # Check if we need per-B_min veto handling
+        has_veto_regions = bool(self.sr_config.veto_regions)
 
-        # results is a list of (sig, bkg, tf) tuples
-        print(f"Running grid search on {len(bbcut_flat)} points...")
-        results = Parallel(n_jobs=-10, verbose=1)(
-            delayed(self.compute_sig_bkg_abcd)(_b, _t) for _b, _t in zip(bbcut_flat, ttcut_flat)
-        )
+        if has_veto_regions:
+            # Run separate grid searches per B_min with matching veto cuts
+            print(f"Running per-B_min grid searches (with vetoes) on {BBcut.size} points each...")
+            evals_opt = {fom.name: {} for fom in foms}
 
-        # Unpack results - each result is (sig_pass, bg_data, bg_non_qcd, breakdown_non_qcd_pass_res)
-        grid_shape = BBcut.shape
-
-        evals = defaultdict(list)
-
-        for sig_pass, bg_data, bg_non_qcd, breakdown in results:
-            evals["sig_pass"].append(sig_pass)
-            evals["data_pass_resonant"].append(bg_data.pass_resonant)
-            evals["data_pass_sideband"].append(bg_data.pass_sideband)
-
-            evals["TF_data"].append(bg_data.tf)
-            if bg_non_qcd is not None:
-                evals["non_qcd_pass_resonant"].append(bg_non_qcd.pass_resonant)
-
-            # Store breakdown of non-QCD backgrounds by category (only if breakdown was computed)
-            if breakdown is not None:
-                for non_qcd_bkg in NON_QCD_BGS:
-                    evals[f"{non_qcd_bkg}_pass_resonant"].append(breakdown.get(non_qcd_bkg, 0))
-
-            # subtract the non-QCD background from the data if desired
-            if self.dataMinusSimABCD and bg_non_qcd is not None:
-                bg_data_qcd_only = bg_data.subtract_MC(bg_non_qcd)
-                evals["data_qcd_only_pass_sideband"].append(bg_data_qcd_only.pass_sideband)
-                evals["TF_qcd_only"].append(bg_data_qcd_only.tf)
-
-        # Reshape to 2D grid
-        evals = {k: np.array(v).reshape(grid_shape) for k, v in evals.items()}
-
-        # # Compute signal efficiency Need this?
-        # evals["sig_eff"] = evals["sig_pass"] / np.sum(self.sensitivity_vars["finalWeight"]["signal"])
-
-        # Now that have map with sigs, bkgs, go and compute FOMs
-        evals_opt = {}
-
-        for fom in foms:
-            evals_opt[fom.name] = {}
             for B_min in B_min_vals:
+                print(f"\n  Processing Bmin={B_min}...")
 
-                evals_opt[fom.name][f"Bmin={B_min}"] = {}
+                # Restore to base sensitivity vars (before vetoes)
+                self._restore_base_sensitivity_vars()
 
-                sel_B_min = evals["data_pass_sideband"] >= B_min
-                if self.dataMinusSimABCD:
-                    limits = fom.fom_func(
-                        evals["data_qcd_only_pass_sideband"],
-                        evals["sig_pass"],
-                        evals["TF_qcd_only"],
-                        non_qcd_bg_in_pass_res=evals["non_qcd_pass_resonant"],
-                    )
-                else:
-                    limits = fom.fom_func(
-                        evals["data_pass_sideband"],
-                        evals["sig_pass"],
-                        evals["TF_data"],
-                        non_qcd_bg_in_pass_res=0,
-                    )
-                if not np.any(sel_B_min):
-                    print(f"Warning: No points satisfy B_min>{B_min} for FOM={fom.name}. Skipping.")
-                    continue
+                # Apply veto masks for this B_min
+                self._apply_veto_masks_for_bmin(B_min)
 
-                sel_indices = np.argwhere(sel_B_min)
-                selected_limits = limits[sel_B_min]
-                min_idx_in_selected = np.argmin(selected_limits)
-                idx_opt = tuple(sel_indices[min_idx_in_selected])
-                limit_opt = selected_limits[min_idx_in_selected]
+                # Run grid search for this single B_min
+                results_bmin = self._run_grid_search(
+                    BBcut, TTcut, BBcutSigEff, TTcutSigEff, [B_min], foms, use_thresholds
+                )
 
-                # Get optimal cuts (always in threshold space)
-                bbcut_opt, ttcut_opt = BBcut[idx_opt], TTcut[idx_opt]
+                # Merge results
+                for fom_name in results_bmin:
+                    evals_opt[fom_name].update(results_bmin[fom_name])
 
-                # dictionary that stores all evaluated quantities at the optimum point
-                evals_opt_fom_bmin = {k: v[idx_opt] for k, v in evals.items()}
-                evals_opt_fom_bmin["limit"] = limit_opt
-                evals_opt_fom_bmin["TXbb_opt"] = bbcut_opt
-                evals_opt_fom_bmin["TXtt_opt"] = ttcut_opt
+            return evals_opt
 
-                # Add signal efficiency specific fields if using signal efficiency coordinates
-                if not use_thresholds:
-                    bbcut_sig_eff_opt = BBcutSigEff[idx_opt]
-                    ttcut_sig_eff_opt = TTcutSigEff[idx_opt]
-
-                    evals_opt_fom_bmin.update(
-                        {
-                            "sig_eff_cuts": (bbcut_sig_eff_opt, ttcut_sig_eff_opt),
-                            "BBcut_sig_eff": BBcutSigEff,
-                            "TTcut_sig_eff": TTcutSigEff,
-                            "fom_map": limits,
-                        }
-                    )
-
-                evals_opt[fom.name][f"Bmin={B_min}"] = evals_opt_fom_bmin
-
-        return evals_opt
-
-    def _adaptive_refine_limits(
-        self, optimum: dict, use_thresholds: bool, top_fraction: float, padding: float
-    ) -> dict:
-        """Compute refined grid limits for the next stage from the union of padded regions around best points.
-
-        This method:
-        1. Identifies the top N% best grid points (lowest FOM values)
-        2. Creates a padded region around each of these points
-        3. Computes the union of all these regions
-        4. Returns separate (min, max) limits for X and Y axes
-
-        Args:
-            optimum: dict containing FOM map and grid coordinates
-            use_thresholds: Whether using threshold or signal efficiency coordinates
-            top_fraction: Fraction of best points to consider (e.g., 0.1 for top 10%)
-            padding: Padding factor as fraction of grid spacing to add around each point
-
-        Returns:
-            dict: {'x': (x_min, x_max), 'y': (y_min, y_max)}
-        """
-        # Choose the coordinate system to operate in
-        if (
-            not use_thresholds
-            and optimum.get("BBcut_sig_eff") is not None
-            and optimum.get("TTcut_sig_eff") is not None
-        ):
-            X = optimum["BBcut_sig_eff"]
-            Y = optimum["TTcut_sig_eff"]
         else:
-            X = optimum["BBcut"]
-            Y = optimum["TTcut"]
-
-        fom_map = optimum.get("fom_map")
-        if fom_map is None or X is None or Y is None:
-            # Fallback: keep previous limits
-            x_min, x_max = (float(X.min()), float(X.max())) if X is not None else (0.0, 1.0)
-            y_min, y_max = (float(Y.min()), float(Y.max())) if Y is not None else (0.0, 1.0)
-            return {"x": (x_min, x_max), "y": (y_min, y_max)}
-
-        # Flatten and select top fraction with lowest FOM
-        flat_fom = fom_map.ravel()
-        valid = np.isfinite(flat_fom)
-        if not np.any(valid):
-            return {"x": (float(X.min()), float(X.max())), "y": (float(Y.min()), float(Y.max()))}
-
-        idx = np.where(valid)[0]
-        k = max(1, int(len(idx) * max(0.0, min(top_fraction, 1.0))))
-        best_idx = idx[np.argpartition(flat_fom[valid], k - 1)[:k]]
-
-        # Get coordinates of best points
-        x_flat = X.ravel()
-        y_flat = Y.ravel()
-        x_best = x_flat[best_idx]
-        y_best = y_flat[best_idx]
-
-        # Estimate grid spacing for padding
-        # Use unique sorted values to compute typical spacing
-        x_unique = np.unique(x_flat)
-        y_unique = np.unique(y_flat)
-        x_spacing = np.diff(x_unique).mean() if len(x_unique) > 1 else (X.max() - X.min()) / 10
-        y_spacing = np.diff(y_unique).mean() if len(y_unique) > 1 else (Y.max() - Y.min()) / 10
-
-        # Create padded regions around each best point
-        x_pad = padding * x_spacing
-        y_pad = padding * y_spacing
-
-        # Compute union of all padded regions
-        # For each best point, create a padded box and then take overall min/max
-        x_mins = x_best - x_pad
-        x_maxs = x_best + x_pad
-        y_mins = y_best - y_pad
-        y_maxs = y_best + y_pad
-
-        # Union is the envelope of all these boxes
-        x_min_refined = float(np.min(x_mins))
-        x_max_refined = float(np.max(x_maxs))
-        y_min_refined = float(np.min(y_mins))
-        y_max_refined = float(np.max(y_maxs))
-
-        # Clamp to current grid domain
-        x_min_refined = max(float(X.min()), x_min_refined)
-        x_max_refined = min(float(X.max()), x_max_refined)
-        y_min_refined = max(float(Y.min()), y_min_refined)
-        y_max_refined = min(float(Y.max()), y_max_refined)
-
-        # Sanity check: ensure valid ranges
-        if x_max_refined <= x_min_refined:
-            x_min_refined, x_max_refined = float(X.min()), float(X.max())
-        if y_max_refined <= y_min_refined:
-            y_min_refined, y_max_refined = float(Y.min()), float(Y.max())
-
-        print(
-            f"  Refined limits: X=[{x_min_refined:.4f}, {x_max_refined:.4f}], Y=[{y_min_refined:.4f}, {y_max_refined:.4f}]"
-        )
-
-        return {"x": (x_min_refined, x_max_refined), "y": (y_min_refined, y_max_refined)}
-
-    def adaptive_grid_search_opt(
-        self,
-        initial_gridsize,
-        initial_gridlims,
-        B_min_vals,
-        foms,
-        use_thresholds=False,
-        stages: int = 2,
-        refine_gridsize: int | None = None,
-        top_fraction: float = 0.1,
-        padding: float = 1.0,
-        adaptive_bmin: int = None,
-    ) -> dict:
-        """Multi-stage adaptive refinement around best regions using existing grid_search_opt.
-
-        Strategy:
-        - Intermediate stages (1 to N-1): Run optimization with SINGLE B_min value for speed
-        - Final stage (N): Run optimization with ALL B_min values for complete results
-
-        Args:
-            initial_gridsize: Initial grid size (NxN points)
-            initial_gridlims: Initial grid limits, either tuple (min, max) or dict {'x': (min, max), 'y': (min, max)}
-            B_min_vals: List of minimum background values (used in final stage only)
-            foms: List of FOM functions to optimize
-            use_thresholds: If True, use threshold coords; if False, use signal efficiency coords
-            stages: Number of refinement stages
-            refine_gridsize: Grid size for refinement stages (if None, uses initial_gridsize)
-            top_fraction: Fraction of best points to consider (e.g., 0.1 = top 10%)
-            padding: Padding in units of grid spacing around each best point (e.g., 1.0 = ±1 cell)
-            adaptive_bmin: Single B_min value used for intermediate stages (default: DEFAULT_ADAPTIVE_BMIN)
-
-        Returns:
-            Final stage results dict in same format as grid_search_opt
-
-        Note:
-            The padding parameter is now interpreted as multiples of grid spacing, not fraction of range.
-            Default of 1.0 means each best point is padded by ±1 grid cell.
-        """
-        if adaptive_bmin is None:
-            adaptive_bmin = DEFAULT_ADAPTIVE_BMIN
-
-        gridsize = initial_gridsize
-        gridlims = initial_gridlims
-        final_results = None
-
-        for stage in range(max(1, stages)):
-            # Use single B_min for intermediate stages, all B_min values for final stage
-            is_final_stage = stage == stages - 1
-            current_bmin_vals = B_min_vals if is_final_stage else [adaptive_bmin]
-
-            stage_label = "FINAL" if is_final_stage else f"intermediate (B_min={adaptive_bmin})"
-            print(f"\nAdaptive stage {stage+1}/{stages} ({stage_label}):")
-            print(f"  gridsize={gridsize}, gridlims={gridlims}")
-            print(f"  B_min values: {current_bmin_vals}")
-
-            results = self.grid_search_opt(
-                gridsize=gridsize,
-                gridlims=gridlims,
-                B_min_vals=current_bmin_vals,
-                foms=foms,
-                use_thresholds=use_thresholds,
+            # No vetoes: run single grid search for all B_min values at once
+            return self._run_grid_search(
+                BBcut, TTcut, BBcutSigEff, TTcutSigEff, B_min_vals, foms, use_thresholds
             )
-            final_results = results
 
-            # Prepare next stage limits from the adaptive B_min result (not final stage)
-            if stage < stages - 1:
-                refined = False
-                for fom in foms:
-                    fom_res = results.get(fom.name, {})
-                    if not fom_res:
-                        continue
-                    # Look specifically for the adaptive B_min result
-                    opt_key = f"Bmin={adaptive_bmin}"
-                    if opt_key in fom_res:
-                        opt = fom_res[opt_key]
-                        if isinstance(opt, dict) and opt.get("fom_map") is not None:
-                            gridlims = self._adaptive_refine_limits(
-                                opt,
-                                use_thresholds=use_thresholds,
-                                top_fraction=top_fraction,
-                                padding=padding,
-                            )
-                            refined = True
-                            break
-
-                if not refined:
-                    print("Adaptive refinement: no valid regions found, stopping early.")
-                    break
-
-                gridsize = refine_gridsize or gridsize
-
-        return final_results
-
-    def perform_optimization(
-        self,
-        use_thresholds=False,
-        plot=True,
-        b_min_vals=None,
-        adaptive: bool = False,
-        **adaptive_kw,
-    ):
+    def perform_optimization(self, use_thresholds=False, plot=True, b_min_vals=None):
         """
         Perform sensitivity optimization.
 
@@ -1117,13 +1078,6 @@ class Analyser:
             use_thresholds: Use threshold coordinates instead of signal efficiency
             plot: Generate plots
             b_min_vals: List of B_min values to optimize
-            adaptive: Use adaptive multi-stage grid refinement
-            **adaptive_kw: Adaptive optimization kwargs (only used if adaptive=True):
-                - adaptive_stages (int): Number of refinement stages (default: ADAPTIVE_STAGES)
-                - adaptive_top_frac (float): Fraction of best points to consider (default: ADAPTIVE_TOP_FRAC)
-                - adaptive_padding (float): Padding around best points (default: ADAPTIVE_PADDING)
-                - adaptive_refine_gridsize (int): Grid size for refinement (default: None, uses initial)
-                - adaptive_bmin (int): B_min for intermediate stages (default: ADAPTIVE_BMIN)
         """
         if b_min_vals is None:
             b_min_vals = [1, 10] if self.test_mode else DEFAULT_BMIN_VALUES
@@ -1133,37 +1087,20 @@ class Analyser:
             gridsize = 20
         else:
             gridlims = (0.7, 1) if use_thresholds else (0.25, 0.75)
-            gridsize = 50 if not adaptive else 20
+            gridsize = 50
 
         foms = FOMS_TO_OPTIMIZE
 
-        if adaptive:
-            # Extract adaptive kwargs with defaults from module-level constants
-            results = self.adaptive_grid_search_opt(
-                initial_gridsize=gridsize,
-                initial_gridlims=gridlims,
-                B_min_vals=b_min_vals,
-                foms=foms,
-                use_thresholds=use_thresholds,
-                stages=adaptive_kw.get("adaptive_stages", ADAPTIVE_STAGES),
-                refine_gridsize=adaptive_kw.get(
-                    "adaptive_refine_gridsize", ADAPTIVE_REFINE_GRIDSIZE
-                ),
-                top_fraction=adaptive_kw.get("adaptive_top_frac", ADAPTIVE_TOP_FRAC),
-                padding=adaptive_kw.get("adaptive_padding", ADAPTIVE_PADDING),
-                adaptive_bmin=adaptive_kw.get("adaptive_bmin", ADAPTIVE_BMIN),
-            )
-        else:
-            results = self.grid_search_opt(
-                gridsize=gridsize,
-                gridlims=gridlims,
-                B_min_vals=b_min_vals,
-                foms=foms,
-                use_thresholds=use_thresholds,
-            )
+        results = self.grid_search_opt(
+            gridsize=gridsize,
+            gridlims=gridlims,
+            B_min_vals=b_min_vals,
+            foms=foms,
+            use_thresholds=use_thresholds,
+        )
 
+        # Save results to CSV files
         successful_b_min_vals = []
-
         saved_files = []
         for fom in foms:
             bmin_dfs = []
@@ -1181,7 +1118,7 @@ class Analyser:
             # Create DataFrame for this FOM and transpose it
             fom_df = pd.concat(bmin_dfs).set_index("Label").T
             print(f"\nResults for FOM: {fom.name}")
-            print(self.channel.label, "\n", fom_df.to_markdown())
+            print(self.channel.label, "\n", fom_df.round(3).to_markdown())
 
             # Save separate CSV file for each FOM
             output_csv = (
@@ -1199,6 +1136,23 @@ class Analyser:
         print(f"\nSaved {len(saved_files)} CSV files:")
         for file in saved_files:
             print(f"  - {file}")
+
+        # Save passing events to JSON for each B_min value
+        passing_events_json = {}
+        for fom in foms:
+            for B_min in b_min_vals:
+                optimum_result = results.get(fom.name, {}).get(f"Bmin={B_min}")
+                if optimum_result and "passing_events" in optimum_result:
+                    passing_events_json[f"Bmin={B_min}"] = optimum_result["passing_events"]
+
+        if passing_events_json:
+            output_json = (
+                self.plot_dir
+                / f"{'_'.join(self.years)}_passing_events_{foms[0].name}_{'thresh' if use_thresholds else 'sigeff'}.json"
+            )
+            with Path.open(output_json, "w") as f:
+                json.dump(passing_events_json, f, indent=2)
+            print(f"Saved passing events to: {output_json}")
 
         if plot:
             while len(successful_b_min_vals) > 4:
@@ -1363,7 +1317,7 @@ class Analyser:
 
         # Add all evaluated quantities at optimum (they are stored directly, not nested)
         # Skip internal grid arrays and non-scalar values
-        skip_keys = {"BBcut_sig_eff", "TTcut_sig_eff", "fom_map"}
+        skip_keys = {"BBcut_sig_eff", "TTcut_sig_eff", "fom_map", "sel_B_min", "passing_events"}
         # {"BBcut_sig_eff", "TTcut_sig_eff", "fom_map", "TXbb_opt", "TXtt_opt", "sig_eff_cuts"}
         for k, v in optimum.items():
             if k not in skip_keys:
@@ -1390,7 +1344,6 @@ def analyse_channel(
     tt_pres=False,
     use_ParT=False,
     at_inference=False,
-    adaptive=False,
     bdt_dir=None,
     plot_dir=None,
     llsl_weight=1,
@@ -1424,7 +1377,6 @@ def analyse_channel(
         use_ParT=use_ParT,
         at_inference=at_inference,
         llsl_weight=llsl_weight,
-        adaptive=adaptive,
         bdt_dir=bdt_dir,
         plot_dir=plot_dir,
         dataMinusSimABCD=dataMinusSimABCD,
@@ -1444,8 +1396,6 @@ def analyse_channel(
         analyser.prepare_sensitivity()
         return analyser.perform_optimization(
             use_thresholds=False,
-            adaptive=adaptive,
-            **adaptive_kwargs,
         )
     elif "fom_study" in actions:
         analyser.prepare_sensitivity()
@@ -1462,7 +1412,6 @@ def analyse_channel(
 def get_plot_dir(
     test_mode: bool,
     tt_pres: bool,
-    adaptive: bool,
     use_ParT: bool,
     do_vbf: bool,
     use_sm_signals: bool,
@@ -1477,8 +1426,7 @@ def get_plot_dir(
     else:
         test_dir = "full_presel"
 
-    tag = "adaptive/" if adaptive else "grid/"
-    tag += "ParT/" if use_ParT else "BDT/"
+    tag = "ParT/" if use_ParT else "BDT/"
     tag += "do_vbf/" if do_vbf else "ggf_only/"
     tag += "sm_signals/" if use_sm_signals else "ggf_only/"
     tag += "overlapping_channels/" if overlapping_channels else "orthogonal_channels/"
@@ -1494,7 +1442,7 @@ def main(args):
     Processes each channel sequentially, optimizing signal regions in order:
     GGF first, then VBF (if enabled). Later regions veto events selected by earlier ones.
     """
-    # Signal regions to optimize: for now, GGF first, then VBF
+    # Signal regions to optimize: GGF first, then VBF (if enabled)
     signal_regions = SIGNAL_ORDERING if args.do_vbf else ["ggfbbtt"]
 
     # BDT models to load (None if using ParT)
@@ -1502,8 +1450,8 @@ def main(args):
     if not args.use_ParT:
         models = [args.ggf_modelname] + ([args.vbf_modelname] if args.do_vbf else [])
 
-    # Track optimized regions for vetoes
-    optimized_regions: dict[str, SRConfig] = {}  # across all channels (orthogonal mode)
+    # Track optimized regions for vetoes (key = signal_channel, e.g., "ggfbbtthh")
+    optimized_regions: dict[str, SRConfig] = {}
 
     tt_disc_map = TT_DISC_NAMES_PART if args.use_ParT else TT_DISC_NAMES_BDT
 
@@ -1528,28 +1476,27 @@ def main(args):
 
         channel_regions: list[SRConfig] = []  # within current channel (overlapping mode)
 
-        for region_name in signal_regions:
-            print(f"\n  Optimizing: {region_name}")
+        for signal_name in signal_regions:
+            print(f"\n  Optimizing: {signal_name} in {channel_key}")
 
             sr_config = SRConfig(
-                name=region_name,
-                signals=SM_SIGNALS if args.use_sm_signals else [region_name],
+                name=signal_name,
+                signals=SM_SIGNALS if args.use_sm_signals else [signal_name],
                 channel=channel_key,
                 bb_disc_name=args.bb_disc,
-                tt_disc_name=tt_disc_map[region_name],
+                tt_disc_name=tt_disc_map[signal_name],
             )
 
-            # Apply vetoes from previously optimized regions
+            # Add veto regions from previously optimized regions
             regions_to_veto = (
                 optimized_regions.values() if not args.overlapping_channels else channel_regions
             )
             for veto_region in regions_to_veto:
-                sr_config.add_veto_from_optimum(veto_region, bmin=args.bmin_for_veto)
+                sr_config.add_veto_region(veto_region)
 
             plot_dir = get_plot_dir(
                 args.test_mode,
                 args.tt_pres,
-                args.adaptive,
                 args.use_ParT,
                 args.do_vbf,
                 args.use_sm_signals,
@@ -1566,7 +1513,6 @@ def main(args):
                 use_ParT=args.use_ParT,
                 actions=args.actions,
                 at_inference=args.at_inference,
-                adaptive=args.adaptive,
                 bdt_dir=args.bdt_dir,
                 plot_dir=plot_dir,
                 cuts_file=args.cuts_file,
@@ -1576,10 +1522,10 @@ def main(args):
                 showNonDataDrivenPortion=args.showNonDataDrivenPortion,
             )
 
-            # Register for future vetoes
+            # Register for future vetoes (key includes channel to avoid overwrites)
             channel_regions.append(sr_config)
             if not args.overlapping_channels:
-                optimized_regions[sr_config.name] = sr_config
+                optimized_regions[f"{sr_config.name}{sr_config.channel}"] = sr_config
 
 
 if __name__ == "__main__":
@@ -1679,12 +1625,6 @@ Examples:
         "Sensitivity Action", "Arguments for --actions sensitivity (grid search optimization)"
     )
     sens_group.add_argument(
-        "--adaptive",
-        action="store_true",
-        default=False,
-        help="Use adaptive multi-stage grid refinement",
-    )
-    sens_group.add_argument(
         "--use-thresholds",
         action="store_true",
         default=False,
@@ -1725,12 +1665,6 @@ Examples:
         action="store_true",
         default=False,
         help="Allow channels to overlap (no cross-channel vetoes)",
-    )
-    sr_group.add_argument(
-        "--bmin-for-veto",
-        type=int,
-        default=10,
-        help="B_min for cross-region/channel vetoes (default: 10)",
     )
 
     # =========================================================================
@@ -1780,6 +1714,12 @@ Examples:
         default="bbFatJetParTXbbvsQCDTop",
         choices=["bbFatJetParTXbbvsQCD", "bbFatJetParTXbbvsQCDTop", "bbFatJetPNetXbbvsQCDLegacy"],
         help="bb discriminator variable",
+    )
+    disc_group.add_argument(
+        "--compute-ROC-metrics",
+        action="store_true",
+        default=False,
+        help="Compute ROC metrics (default: False)",
     )
 
     # =========================================================================
