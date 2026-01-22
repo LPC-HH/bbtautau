@@ -239,52 +239,131 @@ class SRConfig:
     bb_disc_name: str
     tt_disc_name: str
     optima: dict[str, dict] = None
-    veto_cuts: dict[str, tuple[float, float, str, str]] = (
-        None  # veto_name -> (bb_cut, tt_cut, bb_disc, tt_disc)
-    )
+    # veto_cuts: dict[str, tuple[float, float, str, str]] = (
+    #     None  # veto_name -> (bb_cut, tt_cut, bb_disc, tt_disc)
+    # )
+    veto_regions: list = None  # List of SRConfig objects to veto (used for per-bmin vetoing)
     bmin_for_exclusion: float = 10.0
 
-    def add_veto_from_optimum(self, veto_sr_config: SRConfig, bmin: float = None):
-        """Extract veto cuts from another SRConfig's optima and add to this region's vetoes.
+    def add_veto_region(self, veto_sr_config: SRConfig):
+        """Add a veto region reference for per-bmin veto computation.
 
         Args:
             veto_sr_config: The SRConfig of the veto region (must have optima populated)
-            bmin: B_min value to extract cuts from (uses veto's bmin_for_exclusion if None)
         """
         if veto_sr_config.optima is None:
             raise ValueError(
                 f"Veto region '{veto_sr_config.name}' has no optima to extract cuts from"
             )
 
-        bmin = bmin or veto_sr_config.bmin_for_exclusion
+        if self.veto_regions is None:
+            self.veto_regions = []
+
+        self.veto_regions.append(veto_sr_config)
+
+    def get_veto_cuts_for_bmin(
+        self, bmin: float, fom_name: str = "2sqrtB_S_var"
+    ) -> dict[str, tuple[float, float, str, str]]:
+        """Extract veto cuts from all veto regions for a specific bmin value.
+
+        Args:
+            bmin: B_min value to extract cuts from
+            fom_name: FOM name to extract cuts from (default: "2sqrtB_S_var")
+
+        Returns:
+            dict: veto_key -> (bb_cut, tt_cut, bb_disc, tt_disc)
+        """
+        if not self.veto_regions:
+            return {}
+
+        veto_cuts = {}
         bmin_key = f"Bmin={bmin}"
 
-        # Extract cuts from the default FOM
-        if (
-            "2sqrtB_S_var" not in veto_sr_config.optima
-            or bmin_key not in veto_sr_config.optima["2sqrtB_S_var"]
-        ):
-            raise ValueError(f"Veto region '{veto_sr_config.name}' missing optima for {bmin_key}")
+        for veto_sr_config in self.veto_regions:
+            if veto_sr_config.optima is None:
+                warnings.warn(
+                    f"Veto region '{veto_sr_config.name}' has no optima",
+                    stacklevel=2,
+                )
+                continue
 
-        optimum = veto_sr_config.optima["2sqrtB_S_var"][bmin_key]
-        bb_cut = optimum.get("TXbb_opt")
-        tt_cut = optimum.get("TXtt_opt")
+            if (
+                fom_name not in veto_sr_config.optima
+                or bmin_key not in veto_sr_config.optima[fom_name]
+            ):
+                warnings.warn(
+                    f"Veto region '{veto_sr_config.name}' missing optima for {bmin_key}",
+                    stacklevel=2,
+                )
+                continue
 
-        if bb_cut is None or tt_cut is None:
-            # For now just put out a warning
-            warnings.warn(
-                f"Veto region '{veto_sr_config.name}' missing optimal cuts for {bmin_key}",
-                stacklevel=2,
+            optimum = veto_sr_config.optima[fom_name][bmin_key]
+            bb_cut = optimum.get("TXbb_opt")
+            tt_cut = optimum.get("TXtt_opt")
+
+            if bb_cut is None or tt_cut is None:
+                warnings.warn(
+                    f"Veto region '{veto_sr_config.name}' missing optimal cuts for {bmin_key}",
+                    stacklevel=2,
+                )
+                continue
+
+            veto_key = f"{veto_sr_config.name}{veto_sr_config.channel}"
+            veto_cuts[veto_key] = (
+                bb_cut,
+                tt_cut,
+                veto_sr_config.bb_disc_name,
+                veto_sr_config.tt_disc_name[veto_sr_config.channel],
             )
-            return
 
-        # Initialize veto structures if needed
-        if self.veto_cuts is None:
-            self.veto_cuts = {}
+        return veto_cuts
 
-        self.veto_cuts[veto_sr_config.name] = (
-            bb_cut,
-            tt_cut,
-            veto_sr_config.bb_disc_name,
-            veto_sr_config.tt_disc_name[veto_sr_config.channel],
-        )
+    # def add_veto_from_optimum(self, veto_sr_config: "SRConfig", bmin: float = None):
+    #     """Extract veto cuts from another SRConfig's optima and add to this region's vetoes.
+
+    #     DEPRECATED: Use add_veto_region() + get_veto_cuts_for_bmin() for per-bmin vetoing.
+    #     This method is kept for backward compatibility (e.g., postprocessing.py).
+
+    #     Args:
+    #         veto_sr_config: The SRConfig of the veto region (must have optima populated)
+    #         bmin: B_min value to extract cuts from (uses veto's bmin_for_exclusion if None)
+    #     """
+    #     if veto_sr_config.optima is None:
+    #         raise ValueError(
+    #             f"Veto region '{veto_sr_config.name}' has no optima to extract cuts from"
+    #         )
+
+    #     bmin = bmin or veto_sr_config.bmin_for_exclusion
+    #     bmin_key = f"Bmin={bmin}"
+
+    #     # Extract cuts from the default FOM
+    #     if (
+    #         "2sqrtB_S_var" not in veto_sr_config.optima
+    #         or bmin_key not in veto_sr_config.optima["2sqrtB_S_var"]
+    #     ):
+    #         raise ValueError(f"Veto region '{veto_sr_config.name}' missing optima for {bmin_key}")
+
+    #     optimum = veto_sr_config.optima["2sqrtB_S_var"][bmin_key]
+    #     bb_cut = optimum.get("TXbb_opt")
+    #     tt_cut = optimum.get("TXtt_opt")
+
+    #     if bb_cut is None or tt_cut is None:
+    #         # For now just put out a warning
+    #         warnings.warn(
+    #             f"Veto region '{veto_sr_config.name}' missing optimal cuts for {bmin_key}",
+    #             stacklevel=2,
+    #         )
+    #         return
+
+    #     # Initialize veto structures if needed
+    #     if self.veto_cuts is None:
+    #         self.veto_cuts = {}
+
+    #     # Use unique key including channel to avoid overwrites when vetoing same signal from different channels
+    #     veto_key = f"{veto_sr_config.name}{veto_sr_config.channel}"
+    #     self.veto_cuts[veto_key] = (
+    #         bb_cut,
+    #         tt_cut,
+    #         veto_sr_config.bb_disc_name,
+    #         veto_sr_config.tt_disc_name[veto_sr_config.channel],
+    #     )

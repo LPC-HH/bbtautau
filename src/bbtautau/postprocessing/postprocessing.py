@@ -218,11 +218,11 @@ def main(args: argparse.Namespace):
             template_dir_bmin = (
                 args.template_dir
                 / f"bmin_{bmin}"
-                / (CHANNEL.key if args.template_dir else "")
                 / signal_key
+                / (CHANNEL.key if args.template_dir else "")
             )
             plot_dir_bmin = (
-                args.plot_dir / f"bmin_{bmin}" / (CHANNEL.key if args.plot_dir else "") / signal_key
+                args.plot_dir / f"bmin_{bmin}" / signal_key / (CHANNEL.key if args.plot_dir else "")
             )
 
             if template_dir_bmin:
@@ -242,7 +242,7 @@ def main(args: argparse.Namespace):
                 {},  # TODO: systematics
                 sig_scale_dict={
                     f"ggfbbtt{CHANNEL.key}": 300,
-                    f"vbfbbtt{CHANNEL.key}": 40,
+                    f"vbfbbtt{CHANNEL.key}": 500,
                     f"vbfbbtt-k2v0{CHANNEL.key}": 40,
                 },
                 # prev_cutflow=cutflow, Tried to add this but seems to not work. May want to fix later

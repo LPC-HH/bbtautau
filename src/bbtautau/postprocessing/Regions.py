@@ -71,9 +71,9 @@ def extract_optimal_cuts_from_csv(
     Returns:
         tuple: (txbb_cut, txtt_cut) - The optimal cuts for the given bmin
     """
-    # Construct path to CSV directory based on sensitivity study structure
+    # Construct path to CSV directory; Needs to match `get_plot_dir` in SensitivityStudy.py structure.
     csv_dir = Path(sensitivity_dir).joinpath(
-        f"full_presel/grid/{'ParT' if use_ParT else 'BDT'}/{'do_vbf' if do_vbf else 'ggf_only'}/sm_signals/orthogonal_channels/{signal}/{channel_name}"
+        f"full_presel/{'ParT' if use_ParT else 'BDT'}/{'do_vbf' if do_vbf else 'ggf_only'}/sm_signals/orthogonal_channels/{signal}/{channel_name}"
     )
 
     # Look for any FOM-specific CSV files
