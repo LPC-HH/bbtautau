@@ -201,7 +201,7 @@ class bbtautauSkimmer(SkimmerABC):
             "XbbVsQCD",
             "XteVsQCD",
             "XtmVsQCD",
-            "XthVsQCD",
+            "XttVsQCD",
         ]
         self.skim_vars["FatJet"] = {
             **self.skim_vars["FatJet"],
