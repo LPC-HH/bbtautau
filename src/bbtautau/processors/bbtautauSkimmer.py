@@ -180,7 +180,7 @@ class bbtautauSkimmer(SkimmerABC):
         self.jmsr_vars = ["msoftdrop", "particleNet_mass_legacy", "ParTmassVis", "ParTmassRes"]
 
         # particlenet legacy variables
-        pnet_vars = [
+        pnet_vars_legacy = [
             "Xbb",
             "QCD",
             "QCDb",
@@ -193,12 +193,12 @@ class bbtautauSkimmer(SkimmerABC):
         ]
         self.skim_vars["FatJet"] = {
             **self.skim_vars["FatJet"],
-            **{f"particleNetLegacy_{var}": f"PNet{var}Legacy" for var in pnet_vars},
+            **{f"particleNetLegacy_{var}": f"PNet{var}Legacy" for var in pnet_vars_legacy},
         }
 
         # particlenet NOT legacy variables
         pnet_vars = [
-            "XbbvsQCD",
+            "XbbVsQCD",
             "XteVsQCD",
             "XtmVsQCD",
             "XthVsQCD",
@@ -752,7 +752,7 @@ class bbtautauSkimmer(SkimmerABC):
             cut_bb = (
                 np.sum(
                     # ak8FatJetVars["ak8FatJetParTXbbvsQCDTop"] >= self.preselection["glopart-v2"],
-                    ak8FatJetVars["ak8FatJetPNetXbbvsQCD"] >= self.preselection["pnet-v12"],
+                    ak8FatJetVars["ak8FatJetPNetXbbVsQCD"] >= self.preselection["pnet-v12"],
                     axis=1,
                 )
                 >= 1
