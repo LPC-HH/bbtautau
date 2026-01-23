@@ -196,6 +196,18 @@ class bbtautauSkimmer(SkimmerABC):
             **{f"particleNetLegacy_{var}": f"PNet{var}Legacy" for var in pnet_vars},
         }
 
+        # particlenet NOT legacy variables
+        pnet_vars = [
+            "XbbvsQCD",
+            "XteVsQCD",
+            "XtmVsQCD",
+            "XthVsQCD",
+        ]
+        self.skim_vars["FatJet"] = {
+            **self.skim_vars["FatJet"],
+            **{f"particleNet_{var}": f"PNet{var}" for var in pnet_vars},
+        }
+
         # glopart variables
         glopart_vars = [
             "QCD1HF",
@@ -246,15 +258,12 @@ class bbtautauSkimmer(SkimmerABC):
             "globalParT_massResApplied_merged",
             "particleNet_mass_legacy_merged",
             "Tauflag",
-
             "one_elec_in_fatjet",
             "one_muon_in_fatjet",
             "one_elec",
             "one_muon",
-
             "mass_fatjet_et",
             "mass_fatjet_mt",
-
             "isDauTau",
             "mass",
             "msoftdrop",
@@ -274,7 +283,6 @@ class bbtautauSkimmer(SkimmerABC):
             "mass_boostedtaus",
             "nsubjets_perfatjets",
             "mass_fatjets",
-
             "mass_mt",
             "msoftdrop_mt",
             "globalParT_massVisApplied_mt",
@@ -297,7 +305,6 @@ class bbtautauSkimmer(SkimmerABC):
             "muon_subjet_dr02",
             "mass_subjets_mt_1",
             "mass_subjets_mt_0",
-
             "mass_et",
             "msoftdrop_et",
             "globalParT_massVisApplied_et",
@@ -474,7 +481,6 @@ class bbtautauSkimmer(SkimmerABC):
         #     jmr_values={key: [1.0, 0.9, 1.1] for key in self.jmsr_vars},
         #     isData=isData,
         # )
-
 
         # fatjets = objects.get_CA_MASS(fatjets, boostedtaus, met, subjets, muons, electrons)
         fatjets = objects.get_CA_MASS(fatjets, taus, met, subjets, muons, electrons)
@@ -745,7 +751,8 @@ class bbtautauSkimmer(SkimmerABC):
             # at least 1 jet with ParTXbbvsQCDTop > 0.3
             cut_bb = (
                 np.sum(
-                    ak8FatJetVars["ak8FatJetParTXbbvsQCDTop"] >= self.preselection["glopart-v2"],
+                    # ak8FatJetVars["ak8FatJetParTXbbvsQCDTop"] >= self.preselection["glopart-v2"],
+                    ak8FatJetVars["ak8FatJetPNetXbbvsQCD"] >= self.preselection["pnet-v12"],
                     axis=1,
                 )
                 >= 1
@@ -753,9 +760,7 @@ class bbtautauSkimmer(SkimmerABC):
             add_selection("ak8_bb_preselection", cut_bb, *selection_args)
 
         if self._prescale_factor:
-            cut_prescale = (
-                events.event % self._prescale_factor == 0
-            )
+            cut_prescale = events.event % self._prescale_factor == 0
             add_selection("prescale", cut_prescale, *selection_args)
 
         print("Selection", f"{time.time() - start:.2f}")
