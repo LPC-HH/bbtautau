@@ -240,12 +240,27 @@ class bbtautauSkimmer(SkimmerABC):
 
         # CA variables
         ca_vars = [
+            "mass_merged",
+            "msoftdrop_merged",
+            "globalParT_massVisApplied_merged",
+            "globalParT_massResApplied_merged",
+            "particleNet_mass_legacy_merged",
+            "Tauflag",
+
+            "one_elec_in_fatjet",
+            "one_muon_in_fatjet",
+            "one_elec",
+            "one_muon",
+
+            "mass_fatjet_et",
+            "mass_fatjet_mt",
+
+            "isDauTau",
             "mass",
             "msoftdrop",
             "globalParT_massVisApplied",
             "globalParT_massResApplied",
             "particleNet_mass_legacy",
-            "isDauTau",
             "dau0_pt",
             "dau1_pt",
             "dau0_eta",
@@ -258,6 +273,53 @@ class bbtautauSkimmer(SkimmerABC):
             "mass_subjets",
             "mass_boostedtaus",
             "nsubjets_perfatjets",
+            "mass_fatjets",
+
+            "mass_mt",
+            "msoftdrop_mt",
+            "globalParT_massVisApplied_mt",
+            "globalParT_massResApplied_mt",
+            "particleNet_mass_legacy_mt",
+            "isDauTau_mt",
+            "dau0_pt_mt",
+            "dau1_pt_mt",
+            "dau0_eta_mt",
+            "dau1_eta_mt",
+            "dau0_phi_mt",
+            "dau1_phi_mt",
+            "dau0_mass_mt",
+            "dau1_mass_mt",
+            "ntaus_perfatjets_mt",
+            "mass_subjets_mt",
+            "mass_boostedtaus_mt",
+            "nsubjets_perfatjets_mt",
+            "mass_subjets_mt_01",
+            "muon_subjet_dr02",
+            "mass_subjets_mt_1",
+            "mass_subjets_mt_0",
+
+            "mass_et",
+            "msoftdrop_et",
+            "globalParT_massVisApplied_et",
+            "globalParT_massResApplied_et",
+            "particleNet_mass_legacy_et",
+            "isDauTau_et",
+            "dau0_pt_et",
+            "dau1_pt_et",
+            "dau0_eta_et",
+            "dau1_eta_et",
+            "dau0_phi_et",
+            "dau1_phi_et",
+            "dau0_mass_et",
+            "dau1_mass_et",
+            "ntaus_perfatjets_et",
+            "mass_subjets_et",
+            "mass_boostedtaus_et",
+            "nsubjets_perfatjets_et",
+            "mass_subjets_et_01",
+            "elec_subjet_dr02",
+            "mass_subjets_et_1",
+            "mass_subjets_et_0",
         ]
 
         self.skim_vars["FatJet"] = {
@@ -413,7 +475,9 @@ class bbtautauSkimmer(SkimmerABC):
         #     isData=isData,
         # )
 
-        fatjets = objects.get_CA_MASS(fatjets, boostedtaus, met, subjets)
+
+        # fatjets = objects.get_CA_MASS(fatjets, boostedtaus, met, subjets, muons, electrons)
+        fatjets = objects.get_CA_MASS(fatjets, taus, met, subjets, muons, electrons)
         print("CA mass", f"{time.time() - start:.2f}")
 
         #########################
