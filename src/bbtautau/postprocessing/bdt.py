@@ -8,29 +8,36 @@ import time
 from pathlib import Path
 from typing import ClassVar
 
-import matplotlib.pyplot as plt
+import matplotlib as mpl
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from bdt_config import bdt_config
 from boostedhh import hh_vars, plotting
-from postprocessing import (
+from sklearn.model_selection import train_test_split
+from tabulate import tabulate
+
+from bbtautau.postprocessing.bbtautau_types import LoadedSample
+from bbtautau.postprocessing.bdt_config import bdt_config
+from bbtautau.postprocessing.bdt_utils import _ensure_dir
+from bbtautau.postprocessing.rocUtils import ROCAnalyzer, multiclass_confusion_matrix
+from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES
+from bbtautau.postprocessing.utils import (
     base_filter,
     bbtautau_assignment,
     delete_columns,
+    derive_lepton_variables,
     derive_variables,
     get_columns,
+    label_transform,
     leptons_assignment,
     load_samples,
+    tt_filters,
 )
-from Samples import CHANNELS, SAMPLES
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
-from tabulate import tabulate
+from bbtautau.userConfig import CLASSIFIER_DIR, DATA_PATHS, MODEL_DIR, path_dict
 
-from bbtautau.postprocessing.rocUtils import ROCAnalyzer, multiclass_confusion_matrix
-from bbtautau.postprocessing.utils import LoadedSample
-from bbtautau.userConfig import CLASSIFIER_DIR, DATA_PATHS, MODEL_DIR
+# Use non-interactive backend for containerized/CLI environments
+mpl.use("Agg")
+plt = mpl.pyplot
 
 # TODO
 # - k-fold cross validation
@@ -46,21 +53,17 @@ class Trainer:
     loaded_dmatrix = False
 
     # Default samples for training / evaluation
-    sample_names: ClassVar[list[str]] = [
-        "qcd",
-        "ttbarhad",
-        "ttbarll",
-        "ttbarsl",
-        "dyjets",
-        "bbtt",
-    ]
+    bkg_sample_names: ClassVar[list[str]] = ["dyjets", "qcd", "ttbarhad", "ttbarll", "ttbarsl"]
 
     def __init__(
         self,
         years: list[str],
-        sample_names: list[str] = None,
+        signal_key: str,
+        bkg_sample_names: list[str] = None,
         modelname: str = None,
+        data_path: str = None,
         output_dir: str = None,
+        tt_preselection: bool = False,
     ) -> None:
         if years[0] == "all":
             print("Using all years")
@@ -69,36 +72,48 @@ class Trainer:
             years = list(years)
         self.years = years
 
-        if sample_names is not None:
-            self.sample_names = sample_names
+        self.signal_key = signal_key
+        if bkg_sample_names is not None:
+            self.bkg_sample_names = bkg_sample_names
 
-        self.samples = {name: SAMPLES[name] for name in self.sample_names}
+        # need to load signal before splitting into channels
+        self.samples = {name: SAMPLES[name] for name in [self.signal_key] + self.bkg_sample_names}
 
-        self.data_paths = DATA_PATHS
+        # ensure backwards compatibility. Choice of default data paths is done in userConfig.py
+        self.data_paths = path_dict(data_path) if data_path is not None else DATA_PATHS
 
         self.modelname = modelname
         self.bdt_config = bdt_config
+        self.tt_preselection = tt_preselection
         self.train_vars = self.bdt_config[self.modelname]["train_vars"]
         self.hyperpars = self.bdt_config[self.modelname]["hyperpars"]
+        self.feats = [feat for cat in self.train_vars for feat in self.train_vars[cat]]
 
         self.events_dict = {year: {} for year in self.years}
 
         if output_dir is not None:
-            self.model_dir = CLASSIFIER_DIR / output_dir
+            output_dir_path = Path(output_dir)
+            # If absolute, use as-is; otherwise resolve under CLASSIFIER_DIR
+            self.output_dir = (
+                output_dir_path if output_dir_path.is_absolute() else CLASSIFIER_DIR / output_dir
+            )
         else:
-            self.model_dir = MODEL_DIR / self.modelname
-        self.model_dir.mkdir(parents=True, exist_ok=True)
+            self.output_dir = MODEL_DIR / self.modelname
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def load_data(self, force_reload=False):
         # Check if data buffer file exists
-        if self.model_dir / "dtrain.buffer" in self.model_dir.glob("*.buffer") and not force_reload:
+        if (
+            self.output_dir / "dtrain.buffer" in self.output_dir.glob("*.buffer")
+            and not force_reload
+        ):
             print("Loading data from buffer file")
-            self.dtrain = xgb.DMatrix(self.model_dir / "dtrain.buffer")
-            self.dval = xgb.DMatrix(self.model_dir / "dval.buffer")
+            self.dtrain = xgb.DMatrix(self.output_dir / "dtrain.buffer")
+            self.dval = xgb.DMatrix(self.output_dir / "dval.buffer")
 
-            print(self.model_dir)
-            self.dtrain_rescaled = xgb.DMatrix(self.model_dir / "dtrain_rescaled.buffer")
-            self.dval_rescaled = xgb.DMatrix(self.model_dir / "dval_rescaled.buffer")
+            print(self.output_dir)
+            self.dtrain_rescaled = xgb.DMatrix(self.output_dir / "dtrain_rescaled.buffer")
+            self.dval_rescaled = xgb.DMatrix(self.output_dir / "dval_rescaled.buffer")
 
             self.loaded_dmatrix = True
         else:
@@ -106,55 +121,41 @@ class Trainer:
 
                 filters_dict = base_filter(test_mode=False)
                 # filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3) # not needed, events are already filtered by skimmer
+                if self.tt_preselection:
+                    filters_dict = tt_filters(
+                        channel=None, in_filters=filters_dict, num_fatjets=3, tt_cut=0.3
+                    )
 
                 columns = get_columns(year)
 
                 self.events_dict[year] = load_samples(
                     year=year,
                     paths=self.data_paths[year],
+                    signals=[self.signal_key],
                     channels=list(CHANNELS.values()),
                     samples=self.samples,
                     filters_dict=filters_dict,
                     load_columns=columns,
                     restrict_data_to_channel=False,
-                    load_just_ggf=True,
                     load_bgs=True,
                     loaded_samples=True,
+                    multithread=True,
                 )
                 self.events_dict[year] = delete_columns(
                     self.events_dict[year], year, channels=list(CHANNELS.values())
                 )
 
-                derive_variables(
-                    self.events_dict[year], CHANNELS["hm"]
-                )  # legacy issue, muon branches are misnamed
+                derive_variables(self.events_dict[year])
                 bbtautau_assignment(self.events_dict[year], agnostic=True)
                 leptons_assignment(self.events_dict[year], dR_cut=1.5)
+                derive_lepton_variables(self.events_dict[year])
 
         for ch in CHANNELS:
-            self.samples[f"bbtt{ch}"] = SAMPLES[f"bbtt{ch}"]
-        del self.samples["bbtt"]
+            self.samples[f"{self.signal_key}{ch}"] = SAMPLES[f"{self.signal_key}{ch}"]
+        del self.samples[self.signal_key]
 
-    @staticmethod
-    def shorten_df(df, N, seed=42):
-        if len(df) < N:
-            return df
-        return df.sample(n=N, random_state=seed)
-
-    @staticmethod
-    def record_stats(stats, stage, year, sample_name, weights):
-        stats.append(
-            {
-                "year": year,
-                "sample": sample_name,
-                "stage": stage,
-                "n_events": len(weights),
-                "total_weight": np.sum(weights),
-                "average_weight": np.mean(weights),
-                "std_weight": np.std(weights),
-            }
-        )
-        return stats
+        # define sample list as signals + bkg samples
+        self.sample_names = [f"{self.signal_key}{ch}" for ch in CHANNELS] + self.bkg_sample_names
 
     @staticmethod
     def save_stats(stats, filename):
@@ -203,10 +204,7 @@ class Trainer:
         sample_names_labels = []  # Store sample names for each event
 
         if self.loaded_dmatrix:
-            # Need to do this to keep a mapping of the sample labels
-            self.label_encoder = LabelEncoder()
-            y = self.label_encoder.fit_transform(list(self.samples.keys()))
-            self.classes = self.label_encoder.classes_
+            # legacy way to handle this case, used to have to execute some code.
             return
 
         # Store weight statistics aggregated across all years
@@ -237,11 +235,10 @@ class Trainer:
             )
 
             avg_signal_weight = total_signal_weight / len_signal
-            feats = [feat for cat in self.train_vars for feat in self.train_vars[cat]]
 
             for sample_name, sample in self.events_dict[year].items():
 
-                X_sample = pd.DataFrame({feat: sample.get_var(feat) for feat in feats})
+                X_sample = pd.DataFrame({feat: sample.get_var(feat) for feat in self.feats})
 
                 weights = np.abs(sample.get_var("finalWeight").copy())
                 weights_rescaled = weights.copy()
@@ -422,21 +419,18 @@ class Trainer:
             )
 
         # Save only the aggregated stats
-        self.save_stats(weight_stats, self.model_dir / "weight_stats.csv")
+        self.save_stats(weight_stats, self.output_dir / "weight_stats.csv")
 
         # Combine all samples
         X = pd.concat(X_list, axis=0)
         weights = np.concatenate(weights_list)
         weights_rescaled = np.concatenate(weights_rescaled_list)
 
-        # Use LabelEncoder to convert sample names to numeric labels
-        self.label_encoder = LabelEncoder()
-        y = self.label_encoder.fit_transform(sample_names_labels)
-        self.classes = self.label_encoder.classes_
+        y = label_transform(self.sample_names, sample_names_labels)
 
         # Print class mapping
         print("\nClass mapping:")
-        for i, class_name in enumerate(self.label_encoder.classes_):
+        for i, class_name in enumerate(self.sample_names):
             print(f"Class {i}: {class_name}")
 
         # Split into training and validation sets for training and training evaluation
@@ -471,13 +465,13 @@ class Trainer:
 
         # save buffer for quicker loading
         if save_buffer:
-            self.dtrain.save_binary(self.model_dir / "dtrain.buffer")
-            self.dval.save_binary(self.model_dir / "dval.buffer")
-            self.dtrain_rescaled.save_binary(self.model_dir / "dtrain_rescaled.buffer")
-            self.dval_rescaled.save_binary(self.model_dir / "dval_rescaled.buffer")
+            self.dtrain.save_binary(self.output_dir / "dtrain.buffer")
+            self.dval.save_binary(self.output_dir / "dval.buffer")
+            self.dtrain_rescaled.save_binary(self.output_dir / "dtrain_rescaled.buffer")
+            self.dval_rescaled.save_binary(self.output_dir / "dval_rescaled.buffer")
 
     def train_model(self, save=True, early_stopping_rounds=5):
-        """Trains BDT. ``classifier_params`` are hyperparameters for the classifier"""
+        """Train model using configured hyperparameters and evaluation sets."""
 
         evals_result = {}
 
@@ -491,10 +485,10 @@ class Trainer:
             early_stopping_rounds=early_stopping_rounds,
         )
         if save:
-            self.bst.save_model(self.model_dir / f"{self.modelname}.json")
+            self.bst.save_model(self.output_dir / f"{self.modelname}.json")
 
         # Save evaluation results as JSON
-        with (self.model_dir / "evals_result.json").open("w") as f:
+        with (self.output_dir / "evals_result.json").open("w") as f:
             json.dump(evals_result, f, indent=2)
 
         return
@@ -503,18 +497,19 @@ class Trainer:
         self.bst = xgb.Booster()
         print(f"loading model {self.modelname}")
         try:
-            self.bst.load_model(self.model_dir / f"{self.modelname}.json")
+            self.bst.load_model(self.output_dir / f"{self.modelname}.json")
             print("loading successful")
         except Exception as e:
             print(e)
         return self.bst
 
     def evaluate_training(self, savedir=None):
+        """Plot training curves and feature importances from saved eval results."""
         # Load evaluation results from JSON
-        with (self.model_dir / "evals_result.json").open("r") as f:
+        with (self.output_dir / "evals_result.json").open("r") as f:
             evals_result = json.load(f)
 
-        savedir = self.model_dir if savedir is None else Path(savedir)
+        savedir = self.output_dir if savedir is None else Path(savedir)
         savedir.mkdir(parents=True, exist_ok=True)
 
         plt.figure(figsize=(10, 8))
@@ -554,13 +549,7 @@ class Trainer:
             print(f"Error plotting feature importance: {e}")
 
     def complete_train(self, training_info=True, force_reload=False, **kwargs):
-        """Train a multiclass BDT model.
-
-        Args:
-            year (str): Year of data to use
-            modelname (str): Name of the model configuration to use
-            save_dir (str, optional): Directory to save the model and plots. If None, uses default location.
-        """
+        """End-to-end training workflow including ROCs and optional plots."""
 
         # out-of-the-box for training
         self.load_data(force_reload=force_reload, **kwargs)
@@ -571,16 +560,23 @@ class Trainer:
         self.compute_rocs()
 
     def complete_load(self, force_reload=False, **kwargs):
+        """Load data, build evaluation sets, load model, and compute ROCs."""
         self.load_data(force_reload=force_reload, **kwargs)
         self.prepare_training_set(**kwargs)
         self.load_model(**kwargs)
         self.compute_rocs()
 
     def compute_rocs(self, discs=None, savedir=None):
+        """Compute and plot ROCs and summary metrics for the validation set."""
+
+        time_start = time.time()
 
         y_pred = self.bst.predict(self.dval)
 
-        savedir = self.model_dir if savedir is None else Path(savedir)
+        time_end = time.time()
+        print(f"Time taken to predict: {time_end - time_start} seconds")
+
+        savedir = self.output_dir if savedir is None else Path(savedir)
         savedir.mkdir(parents=True, exist_ok=True)
         (savedir / "rocs").mkdir(parents=True, exist_ok=True)
         (savedir / "outputs").mkdir(parents=True, exist_ok=True)
@@ -594,24 +590,27 @@ class Trainer:
         print("signal_names", signal_names)
         print("background_names", background_names)
 
-        event_filters = {name: self.dval.get_label() == i for i, name in enumerate(self.classes)}
-
-        time_start = time.time()
+        event_filters = {
+            name: self.dval.get_label() == i for i, name in enumerate(self.sample_names)
+        }
+        dval_df = pd.DataFrame(self.dval.get_data().toarray(), columns=self.feats)
 
         preds_dict = {}
-        for class_name in self.classes:
+        for class_name in self.sample_names:
             events = {}
-            for i, pred_class_name in enumerate(self.classes):
+            for i, pred_class_name in enumerate(self.sample_names):
                 events[pred_class_name] = y_pred[event_filters[class_name], i]
             events["finalWeight"] = self.dval.get_weight()[event_filters[class_name]]
             events = pd.DataFrame(events)
 
+            events = pd.concat(
+                [
+                    dval_df[event_filters[class_name]].reset_index(drop=True),
+                    events.reset_index(drop=True),
+                ],
+                axis=1,
+            )
             preds_dict[class_name] = LoadedSample(sample=self.samples[class_name], events=events)
-
-        time_end = time.time()
-        print(
-            f"Time taken to convert predictions to LoadedSamples: {time_end - time_start} seconds"
-        )
 
         multiclass_confusion_matrix(preds_dict, plot_dir=savedir)
 
@@ -625,34 +624,55 @@ class Trainer:
         #########################################################
         # This part configures what background outputs to put in the taggers
 
-        bkg_tagger_groups = (
-            [
-                [bkg] for bkg in background_names if "ttbar" not in bkg
-            ]  # individual backgrounds w/o ttbar
-            + [["ttbarhad", "ttbarll", "ttbarsl"]]  # ttbar backgrounds
-            + [["qcd", "dyjets"]]  # qcd and dy backgrounds
-            + [background_names]  # All backgrounds
-        )
+        # First do ParT taggers
+        parT_bkg_taggers = [["ttFatJetParTQCD", "ttFatJetParTTop"]]  # ["ttFatJetParTQCD"],
 
-        #########################################################
-        #########################################################
+        for sig_tagger in signal_names:
+            taukey = CHANNELS[sig_tagger[-2:]].tagger_label
+            parT_sig = f"ttFatJetParTX{taukey}"
+            for bkg_taggers in parT_bkg_taggers:
+                rocAnalyzer.process_discriminant(
+                    signal_name=sig_tagger,
+                    background_names=background_names,
+                    signal_tagger=parT_sig,
+                    background_taggers=bkg_taggers,
+                    custom_name=f"ParT {sig_tagger[-2:]}vsQCDTop",
+                )
+
+        # Then do BDT taggers
+        bkg_tagger_groups = (
+            # [["qcd"]] +
+            [["qcd", "ttbarhad", "ttbarll", "ttbarsl"]]
+            +
+            # [["qcd", "dyjets"]] + # qcd and dy backgrounds
+            [background_names]  # All backgrounds
+        )
 
         for sig_tagger in signal_names:
             for bkg_taggers in bkg_tagger_groups:
+                name = (
+                    f"BDT {sig_tagger[-2:]}vsAll"
+                    if len(bkg_taggers) == 5
+                    else f"BDT {sig_tagger[-2:]}vsQCDTop"
+                )
                 rocAnalyzer.process_discriminant(
                     signal_name=sig_tagger,
                     background_names=background_names,
                     signal_tagger=sig_tagger,
                     background_taggers=bkg_taggers,
+                    custom_name=name,
                 )
 
-        # Compute ROCs and comprehensive metrics
-        rocAnalyzer.compute_rocs()
+        #########################################################
+        #########################################################
 
+        # Compute ROCs and comprehensive metrics
         discs_by_sig = {
             sig: [disc for disc in rocAnalyzer.discriminants.values() if disc.signal_name == sig]
             for sig in signal_names
         }
+
+        rocAnalyzer.compute_rocs()
 
         # Initialize results structure
         eval_results = {"metrics": {}}
@@ -660,7 +680,7 @@ class Trainer:
         for sig, discs in discs_by_sig.items():
             disc_names = [disc.name for disc in discs]
             print("Plotting ROCs for", disc_names)
-            print(rocAnalyzer.discriminants[disc_names[0]])
+            print(discs)
             rocAnalyzer.plot_rocs(title=f"BDT {sig}", disc_names=disc_names, plot_dir=savedir)
 
             for disc in discs:
@@ -689,14 +709,21 @@ class Trainer:
 
             # Plot BDT output score distributions
             weights_all = self.dval.get_weight()
-            for i, sample in enumerate(self.classes):
+            for i, sample in enumerate(self.sample_names):
                 plotting.plot_hist(
-                    [y_pred[self.dval.get_label() == i, _s] for _s in range(len(self.classes))],
-                    [self.samples[self.classes[_s]].label for _s in range(len(self.classes))],
+                    [
+                        y_pred[self.dval.get_label() == i, _s]
+                        for _s in range(len(self.sample_names))
+                    ],
+                    [
+                        self.samples[self.sample_names[_s]].label
+                        for _s in range(len(self.sample_names))
+                    ],
                     nbins=100,
                     xlim=(0, 1),
                     weights=[
-                        weights_all[self.dval.get_label() == i] for _s in range(len(self.classes))
+                        weights_all[self.dval.get_label() == i]
+                        for _s in range(len(self.sample_names))
                     ],
                     xlabel=f"BDT output score on {sample}",
                     lumi=f"{np.sum([hh_vars.LUMI[year] for year in self.years]) / 1000:.1f}",
@@ -799,7 +826,7 @@ def study_rescaling(output_dir: str = "rescaling_study", importance_only=False) 
     results = {}
 
     # Store the original study directory
-    study_dir = trainer.model_dir
+    study_dir = trainer.output_dir
 
     # Train models with different rescaling rules
     for scale_rule in scale_rules:
@@ -813,8 +840,8 @@ def study_rescaling(output_dir: str = "rescaling_study", importance_only=False) 
                 current_test_dir = study_dir / f"{scale_rule}_{balance_rule}"
                 current_test_dir.mkdir(exist_ok=True)
 
-                # Override model_dir to save in subdirectory
-                trainer.model_dir = current_test_dir
+                # Override output_dir to save in subdirectory
+                trainer.output_dir = current_test_dir
 
                 if importance_only:
                     trainer.load_model()
@@ -842,17 +869,17 @@ def study_rescaling(output_dir: str = "rescaling_study", importance_only=False) 
     return results
 
 
-def _rescaling_comparison(results: dict, model_dir: Path) -> None:
+def _rescaling_comparison(results: dict, output_dir: Path) -> None:
     """Enhanced comparison of different rescaling rules with comprehensive metrics.
 
     Args:
         results: Dictionary containing study results with comprehensive metrics
-        model_dir: Directory to save comparison plots and tables
+        output_dir: Directory to save comparison plots and tables
     """
     # Safety check in debugging
-    if not isinstance(model_dir, Path):
-        print(f"model_dir is not a Path, converting to Path: {model_dir}")
-        model_dir = Path(model_dir)
+    if not isinstance(output_dir, Path):
+        print(f"output_dir is not a Path, converting to Path: {output_dir}")
+        output_dir = Path(output_dir)
 
     # Get unique scale and balance rules
     scale_rules = list(results.keys())
@@ -890,7 +917,7 @@ def _rescaling_comparison(results: dict, model_dir: Path) -> None:
             print(f"\n{metric_name} for {sig} channel:")
             print(tabulate(table_data, headers=["Scale"] + balance_rules, tablefmt="grid"))
 
-            with (model_dir / f"{metric_key}_{sig}.txt").open("w") as f:
+            with (output_dir / f"{metric_key}_{sig}.txt").open("w") as f:
                 f.write(f"{metric_name} for {sig} channel:\n")
                 f.write(tabulate(table_data, headers=["Scale"] + balance_rules, tablefmt="grid"))
 
@@ -935,15 +962,15 @@ def _rescaling_comparison(results: dict, model_dir: Path) -> None:
         print(f"\nComprehensive metrics for {sig} channel:")
         print(tabulate(summary_data, headers=headers, tablefmt="grid"))
 
-        with (model_dir / f"comprehensive_{sig}.txt").open("w") as f:
+        with (output_dir / f"comprehensive_{sig}.txt").open("w") as f:
             f.write(f"Comprehensive metrics for {sig} channel:\n")
             f.write(tabulate(summary_data, headers=headers, tablefmt="grid"))
 
     # Create cross-channel comparison for key metrics
-    _create_cross_channel_comparison(results, scale_rules, balance_rules, model_dir)
+    _create_cross_channel_comparison(results, scale_rules, balance_rules, output_dir)
 
 
-def _create_cross_channel_comparison(results, scale_rules, balance_rules, model_dir):
+def _create_cross_channel_comparison(results, scale_rules, balance_rules, output_dir):
     """Create comparison tables across all channels for key metrics."""
     key_metrics = ["roc_auc", "f1_score", "precision", "recall"]
     channels = ["hh", "he", "hm"]
@@ -968,13 +995,20 @@ def _create_cross_channel_comparison(results, scale_rules, balance_rules, model_
         print(tabulate(table_data, headers=headers, tablefmt="grid"))
 
         # Save to file
-        with (model_dir / f"cross_channel_{metric}.txt").open("w") as f:
+        with (output_dir / f"cross_channel_{metric}.txt").open("w") as f:
             f.write(f"Cross-channel comparison: {metric.upper()}\n")
             f.write(tabulate(table_data, headers=headers, tablefmt="grid"))
 
 
 def eval_bdt_preds(
-    years: list[str], eval_samples: list[str], model: str, save: bool = True, save_dir: str = None
+    years: list[str],
+    samples: list[str],
+    model: str,
+    signal_key: str,
+    save: bool = True,
+    output_dir: str | None = None,
+    data_path: str | None = None,
+    tt_preselection: bool = False,
 ):
     """Evaluate BDT predictions on data.
 
@@ -987,26 +1021,40 @@ def eval_bdt_preds(
 
     years = hh_vars.years if years[0] == "all" else list(years)
 
-    if eval_samples[0] == "all":
-        eval_samples = list(SAMPLES.keys())
+    if samples[0] == "all":
+        samples = list(SAMPLES.keys())
 
     if save:
-        if save_dir is None:
-            save_dir = DATA_DIR
+        if output_dir is None:
+            output_dir = DATA_DIR
 
-        # check if save_dir is writable
-        if not os.access(save_dir, os.W_OK):
-            raise PermissionError(f"Directory {save_dir} is not writable")
+        # check if output_dir is writable
+        if not os.access(output_dir, os.W_OK):
+            raise PermissionError(f"Directory {output_dir} is not writable")
 
     # Load model globally for all years, evaluate by year to reduce memory usage
-    bst = Trainer(years=years, sample_names=eval_samples, modelname=model).load_model()
+    bst = Trainer(
+        years=years,
+        signal_key=signal_key,
+        bkg_sample_names=samples,
+        modelname=model,
+        data_path=data_path,
+        tt_preselection=tt_preselection,
+    ).load_model()
 
-    evals = {year: {sample_name: {} for sample_name in eval_samples} for year in years}
+    evals = {year: {sample_name: {} for sample_name in samples} for year in years}
 
     for year in years:
 
         # To reduce memory usage, load data once for each year
-        trainer = Trainer(years=[year], sample_names=eval_samples, modelname=model)
+        trainer = Trainer(
+            years=[year],
+            signal_key=signal_key,
+            bkg_sample_names=samples,
+            modelname=model,
+            data_path=data_path,
+            tt_preselection=tt_preselection,
+        )
         trainer.load_data(force_reload=True)
 
         feats = [feat for cat in trainer.train_vars for feat in trainer.train_vars[cat]]
@@ -1024,7 +1072,7 @@ def eval_bdt_preds(
             y_pred = bst.predict(dsample)
             evals[year][sample_name] = y_pred
             if save:
-                pred_dir = Path(save_dir) / "BDT_predictions" / year / sample_name
+                pred_dir = Path(output_dir) / "BDT_predictions" / year / sample_name
                 pred_dir.mkdir(parents=True, exist_ok=True)
                 np.save(pred_dir / f"{model}_preds.npy", y_pred)
                 with Path.open(pred_dir / f"{model}_preds_shape.txt", "w") as f:
@@ -1035,6 +1083,183 @@ def eval_bdt_preds(
         del trainer
 
     return evals
+
+
+def compare_models(
+    models: list[str],
+    model_dirs: list[str],
+    years: list[str],
+    signal_key: str,
+    samples: list[str] | None = None,
+    data_path: str | None = None,
+    tt_preselection: bool = False,
+    output_dir: str | None = None,
+) -> dict[str, dict[str, float]]:
+    """Load multiple trained models, evaluate, and produce comparison outputs.
+
+    - Saves per-signal overlay ROC plots across models (when comparable)
+    - Saves a CSV with metrics for each (model, signal)
+
+    Returns a nested dict: metrics_by_model[model][signal] -> metrics_dict
+    """
+
+    if samples is None:
+        samples = ["dyjets", "qcd", "ttbarhad", "ttbarll", "ttbarsl"]
+
+    # Use a top-level comparison directory
+    base_out = Path(output_dir) if output_dir is not None else Path("comparison")
+    _ensure_dir(base_out)
+
+    # Build a base trainer for data loading and getting sample information
+    base_trainer = Trainer(
+        years=list(years),
+        signal_key=signal_key,
+        bkg_sample_names=list(samples),
+        modelname=models[0],
+        output_dir=model_dirs[0],
+        data_path=data_path,
+        tt_preselection=tt_preselection,
+    )
+    # Load data only once
+    base_trainer.load_data(force_reload=True)
+
+    # Load boosters and prepare training sets for all models
+    trainers: dict[str, Trainer] = {}
+    for model, model_dir in zip(models, model_dirs):
+        tr = Trainer(
+            years=list(years),
+            signal_key=signal_key,
+            bkg_sample_names=list(samples),
+            modelname=model,
+            output_dir=model_dir,
+            data_path=data_path,
+            tt_preselection=tt_preselection,
+        )
+        # Share the loaded raw events data from base_trainer instead of reloading
+        tr.events_dict = base_trainer.events_dict
+        tr.samples = base_trainer.samples
+        tr.sample_names = base_trainer.sample_names
+        # Prepare training set for this specific model (will use its own feature set)
+        tr.prepare_training_set(save_buffer=False)
+        tr.load_model()
+        trainers[model] = tr
+
+    # Construct combined preds_dict holding per-class events with per-model scores
+    event_filters = {
+        name: base_trainer.dval.get_label() == i for i, name in enumerate(base_trainer.sample_names)
+    }
+
+    preds_dict: dict[str, LoadedSample] = {}
+
+    # Start with weights only; features are not required for ROCAnalyzer
+    for class_name in base_trainer.sample_names:
+        preds_dict[class_name] = LoadedSample(
+            sample=base_trainer.samples[class_name],
+            events=None,
+        )
+
+    # Fill events DataFrames incrementally with model-specific columns
+    for model, tr in trainers.items():
+        # Use the model-specific prepared dval for predictions
+        y_pred = tr.bst.predict(tr.dval)
+        # Sanity check: classifier outputs must match the class set used by base_trainer
+        if y_pred.ndim != 2 or y_pred.shape[1] != len(base_trainer.sample_names):
+            raise ValueError(
+                f"Model '{model}' produces {y_pred.shape[1] if y_pred.ndim==2 else 'invalid'} classes,"
+                f" but base comparison expects {len(base_trainer.sample_names)}."
+                " Ensure models were trained with the same class set/order (signals per channel + backgrounds)."
+            )
+        for class_index, class_name in enumerate(base_trainer.sample_names):
+            mask = event_filters[class_name]
+            # Initialize events frame if needed
+            if preds_dict[class_name].events is None:
+                preds_dict[class_name].events = {
+                    "finalWeight": base_trainer.dval.get_weight()[mask],
+                }
+            # Add per-model per-class score column
+            y_pred_class = y_pred[mask, class_index]
+            preds_dict[class_name].events[f"{model}::{class_name}"] = y_pred_class
+
+    # Convert dicts to DataFrames
+    for class_name in preds_dict:
+        import pandas as pd
+
+        preds_dict[class_name].events = pd.DataFrame(preds_dict[class_name].events)
+
+    # Prepare ROC analyzer with all signals and backgrounds
+    signal_names = [
+        sig_name for sig_name in base_trainer.samples if base_trainer.samples[sig_name].isSignal
+    ]
+    background_names = [
+        bkg_name for bkg_name in base_trainer.samples if not base_trainer.samples[bkg_name].isSignal
+    ]
+
+    roc_analyzer = ROCAnalyzer(
+        years=base_trainer.years,
+        signals={sig: preds_dict[sig] for sig in signal_names},
+        backgrounds={bkg: preds_dict[bkg] for bkg in background_names},
+    )
+
+    # Register discriminants: for each signal and model, build vsAll background discriminant
+    for sig_name in signal_names:
+        for model in models:
+            sig_tagger = f"{model}::{sig_name}"
+            bkg_taggers = [f"{model}::{bkg}" for bkg in background_names]
+            roc_analyzer.process_discriminant(
+                signal_name=sig_name,
+                background_names=background_names,
+                signal_tagger=sig_tagger,
+                background_taggers=bkg_taggers,
+                custom_name=f"{model} {sig_name[-2:]}vsAll",
+            )
+
+    # Compute and plot overlay ROCs per signal
+    roc_analyzer.compute_rocs()
+
+    metrics_by_model: dict[str, dict[str, dict[str, float]]] = {m: {} for m in models}
+    for sig_name in signal_names:
+        # Collect discriminant names for this signal
+        disc_names = [
+            disc.name
+            for disc in roc_analyzer.discriminants.values()
+            if disc.signal_name == sig_name
+        ]
+        # Plot overlay
+        out_dir = _ensure_dir(base_out / "rocs")
+        roc_analyzer.plot_rocs(title=f"Compare {sig_name}", disc_names=disc_names, plot_dir=out_dir)
+
+        # Extract per-disc metrics and group by model
+        for disc in [d for d in roc_analyzer.discriminants.values() if d.signal_name == sig_name]:
+            model = disc.name.split()[0] if " " in disc.name else disc.name
+            if hasattr(disc, "get_metrics"):
+                metrics_by_model[model][sig_name] = disc.get_metrics(as_dict=True)
+
+    # Save combined metrics CSV
+    csv_path = base_out / "comparison_metrics.csv"
+    with csv_path.open("w") as f:
+        all_metric_keys = [
+            "roc_auc",
+            "pr_auc",
+            "f1_score",
+            "precision",
+            "recall",
+            "f1_score_05",
+            "balanced_accuracy",
+            "matthews_corr",
+            "optimal_threshold",
+        ]
+        header = ["model", "signal"] + all_metric_keys
+        f.write(",".join(header) + "\n")
+        for model, by_signal in metrics_by_model.items():
+            for signal, m in by_signal.items():
+                row = [model, signal] + [f"{m.get(k, 0):.6f}" for k in all_metric_keys]
+                f.write(",".join(row) + "\n")
+
+    # Save a JSON index for easy inspection
+    with (base_out / "comparison_index.json").open("w") as jf:
+        json.dump({"models": models, "years": years, "signals": list(signal_names)}, jf, indent=2)
+
+    return metrics_by_model
 
 
 if __name__ == "__main__":
@@ -1055,10 +1280,28 @@ if __name__ == "__main__":
         help="Name of the model configuration to use",
     )
     parser.add_argument(
-        "--save-dir",
+        "--signal-key",
+        type=str,
+        default="ggfbbtt",
+        help="Key for the signal sample",
+    )
+    parser.add_argument(
+        "--tt-preselection",
+        action="store_true",
+        default=False,
+        help="Apply tt preselection",
+    )
+    parser.add_argument(
+        "--output-dir",
         type=str,
         default=None,
         help="Subdirectory to save model and plots within `/home/users/lumori/bbtautau/src/bbtautau/postprocessing/classifier/` if training/evaluating. Full directory to store predictions if --eval-bdt-preds is specified (checks writing permissions).",
+    )
+    parser.add_argument(
+        "--data-path",
+        type=str,
+        default=None,
+        help="Path to the data directories",
     )
     parser.add_argument(
         "--force-reload", action="store_true", default=False, help="Force reload of data"
@@ -1075,6 +1318,24 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="Evaluate BDT predictions on data if specified",
+    )
+    parser.add_argument(
+        "--compare-models",
+        action="store_true",
+        default=False,
+        help="Compare multiple trained models with ROC overlays and CSV metrics",
+    )
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        default=None,
+        help="List of model names to compare when --compare-models is set",
+    )
+    parser.add_argument(
+        "--model-dirs",
+        nargs="+",
+        default=None,
+        help="List of model directories to compare when --compare-models is set",
     )
     parser.add_argument(
         "--samples", nargs="+", default=None, help="Samples to evaluate BDT predictions on"
@@ -1104,14 +1365,56 @@ if __name__ == "__main__":
             print(args.model)
             eval_bdt_preds(
                 years=args.years,
-                eval_samples=args.samples,
+                samples=args.samples,
                 model=args.model,
-                save_dir=args.save_dir,
+                signal_key=args.signal_key,
+                output_dir=args.output_dir,
+                data_path=args.data_path,
+                tt_preselection=args.tt_preselection,
             )
         exit()
 
+    if args.compare_models:
+        if not args.models or len(args.models) < 2 or len(args.models) != len(args.model_dirs):
+            parser.error("--compare-models requires at least two --models")
+        # Validate that provided model directories and model files exist
+        resolved_model_dirs = []
+        for model, model_dir_str in zip(args.models, args.model_dirs):
+            model_dir_path = Path(model_dir_str)
+            resolved_dir = (
+                model_dir_path if model_dir_path.is_absolute() else CLASSIFIER_DIR / model_dir_str
+            )
+            if not resolved_dir.exists():
+                parser.error(f"Model directory does not exist: {resolved_dir}")
+            if not resolved_dir.is_dir():
+                parser.error(f"Model directory is not a directory: {resolved_dir}")
+            model_file = resolved_dir / f"{model}.json"
+            if not model_file.is_file():
+                parser.error(f"Model file not found for '{model}': {model_file}")
+            resolved_model_dirs.append(str(resolved_dir))
+        # Lazy import to avoid circular import issues
+        from bbtautau.postprocessing import bdt_utils as _bdt_utils
+
+        _bdt_utils.compare_models(
+            models=args.models,
+            model_dirs=resolved_model_dirs,
+            years=args.years,
+            signal_key=args.signal_key,
+            samples=args.samples,
+            data_path=args.data_path,
+            tt_preselection=args.tt_preselection,
+            output_dir=args.output_dir,
+        )
+        exit()
+
     trainer = Trainer(
-        years=args.years, sample_names=args.samples, modelname=args.model, output_dir=args.save_dir
+        years=args.years,
+        bkg_sample_names=args.samples,
+        modelname=args.model,
+        output_dir=args.output_dir,
+        data_path=args.data_path,
+        tt_preselection=args.tt_preselection,
+        signal_key=args.signal_key,
     )
 
     if args.train:

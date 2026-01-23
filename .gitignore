@@ -165,7 +165,6 @@ Thumbs.db
 *.root
 *.buffer
 *.parquet
-*.txt
 test.ipynb
 **/__pycache__
 **/.DS_Store

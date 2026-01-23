@@ -7,12 +7,12 @@ label_maps = {
     "hh": r"\tauhh",
     "hm": r"\tauhm",
     "he": r"\tauhe",
-    "bbtt": r"ggF \HHbbtt",
+    "ggfbbtt": r"ggF \HHbbtt",
     "vbfbbtt": r"VBF \HHbbtt",
     "vbfbbtt-k2v0": r"VBF \HHbbtt $\kapvv=0$",
 }
 
-all_signals = ["bbtt", "vbfbbtt", "vbfbbtt-k2v0"]
+all_signals = ["ggfbbtt", "vbfbbtt", "vbfbbtt-k2v0"]
 
 
 def csv_to_latex_successive_removal_notable(
@@ -32,8 +32,6 @@ def csv_to_latex_successive_removal_notable(
     Returns:
         LaTeX table code as a string
     """
-
-    # [ f"/home/users/lumori/bbtautau/plots/TriggerStudy/25Apr16/{year}/{signal}/progressive_removal_{channel}_.csv" for year in all_years for signal in ["bbtt", "vbfbbtt", "vbfbbtt-k2v0"]]
 
     dfs = {
         signal: {year: pd.read_csv(csv_paths[signal][year]) for year in years} for signal in signals

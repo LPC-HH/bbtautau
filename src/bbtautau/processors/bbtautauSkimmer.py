@@ -82,11 +82,15 @@ class bbtautauSkimmer(SkimmerABC):
             "charge": "charge",
             "idMVAnewDM2017v2": "idMVAnewDM2017v2",
         },
+        "SubJet": {
+            **P4,
+        },
         "FatJet": {
             **P4,
             "msoftdrop": "Msd",
             "t32": "Tau3OverTau2",
             "rawFactor": "rawFactor",
+            "particleNet_massCorr": "particleNet_massCorr",
             # tagger variables added below
         },
         "GenHiggs": P4,
@@ -130,6 +134,11 @@ class bbtautauSkimmer(SkimmerABC):
         "dr_leptons": 0.4,
     }
 
+    vbf_veto_lepton_selection = {  # noqa: RUF012
+        "electron_pt": 5,
+        "muon_pt": 7,
+    }
+
     ak4_bjet_selection = {  # noqa: RUF012
         "pt": 25,
         "eta_max": 2.5,
@@ -151,6 +160,7 @@ class bbtautauSkimmer(SkimmerABC):
         nano_version: str = "v12_private",
         fatjet_pt_cut: float = None,
         fatjet_bb_preselection: bool = False,
+        prescale_factor: int = None,
     ):
         super().__init__()
 
@@ -164,6 +174,7 @@ class bbtautauSkimmer(SkimmerABC):
         self._region = region
         self._accumulator = processor.dict_accumulator({})
         self._fatjet_bb_preselection = fatjet_bb_preselection
+        self._prescale_factor = prescale_factor
 
         # JMSR
         self.jmsr_vars = ["msoftdrop", "particleNet_mass_legacy", "ParTmassVis", "ParTmassRes"]
@@ -227,6 +238,95 @@ class bbtautauSkimmer(SkimmerABC):
             **{f"globalParT_{var}": f"ParT{var}" for var in glopart_vars},
         }
 
+        # CA variables
+        ca_vars = [
+            "mass_merged",
+            "msoftdrop_merged",
+            "globalParT_massVisApplied_merged",
+            "globalParT_massResApplied_merged",
+            "particleNet_mass_legacy_merged",
+            "Tauflag",
+
+            "one_elec_in_fatjet",
+            "one_muon_in_fatjet",
+            "one_elec",
+            "one_muon",
+
+            "mass_fatjet_et",
+            "mass_fatjet_mt",
+
+            "isDauTau",
+            "mass",
+            "msoftdrop",
+            "globalParT_massVisApplied",
+            "globalParT_massResApplied",
+            "particleNet_mass_legacy",
+            "dau0_pt",
+            "dau1_pt",
+            "dau0_eta",
+            "dau1_eta",
+            "dau0_phi",
+            "dau1_phi",
+            "dau0_mass",
+            "dau1_mass",
+            "ntaus_perfatjets",
+            "mass_subjets",
+            "mass_boostedtaus",
+            "nsubjets_perfatjets",
+            "mass_fatjets",
+
+            "mass_mt",
+            "msoftdrop_mt",
+            "globalParT_massVisApplied_mt",
+            "globalParT_massResApplied_mt",
+            "particleNet_mass_legacy_mt",
+            "isDauTau_mt",
+            "dau0_pt_mt",
+            "dau1_pt_mt",
+            "dau0_eta_mt",
+            "dau1_eta_mt",
+            "dau0_phi_mt",
+            "dau1_phi_mt",
+            "dau0_mass_mt",
+            "dau1_mass_mt",
+            "ntaus_perfatjets_mt",
+            "mass_subjets_mt",
+            "mass_boostedtaus_mt",
+            "nsubjets_perfatjets_mt",
+            "mass_subjets_mt_01",
+            "muon_subjet_dr02",
+            "mass_subjets_mt_1",
+            "mass_subjets_mt_0",
+
+            "mass_et",
+            "msoftdrop_et",
+            "globalParT_massVisApplied_et",
+            "globalParT_massResApplied_et",
+            "particleNet_mass_legacy_et",
+            "isDauTau_et",
+            "dau0_pt_et",
+            "dau1_pt_et",
+            "dau0_eta_et",
+            "dau1_eta_et",
+            "dau0_phi_et",
+            "dau1_phi_et",
+            "dau0_mass_et",
+            "dau1_mass_et",
+            "ntaus_perfatjets_et",
+            "mass_subjets_et",
+            "mass_boostedtaus_et",
+            "nsubjets_perfatjets_et",
+            "mass_subjets_et_01",
+            "elec_subjet_dr02",
+            "mass_subjets_et_1",
+            "mass_subjets_et_0",
+        ]
+
+        self.skim_vars["FatJet"] = {
+            **self.skim_vars["FatJet"],
+            **{f"CA_{var}": f"CA{var}" for var in ca_vars},
+        }
+
         # update fatjet pT cut
         if fatjet_pt_cut is not None:
             self.fatjet_selection["pt"] = fatjet_pt_cut
@@ -287,6 +387,10 @@ class bbtautauSkimmer(SkimmerABC):
         taus, ttrigvars = objects.good_taus(events, events.Tau, year)
         boostedtaus = objects.good_boostedtaus(events, events.boostedTau)
 
+        # SubJets
+        num_subjets = 3
+        subjets = events.SubJet
+
         # These are bools saying if the lepton is matched to a trigger object or not
         trigMatchVars = {**etrigvars, **mtrigvars, **ttrigvars}
         for key, val in trigMatchVars.items():
@@ -341,24 +445,24 @@ class bbtautauSkimmer(SkimmerABC):
             fatjets, **self.fatjet_selection, nano_version=self._nano_version
         )
 
-        # # TODO: VBF objects
-        # vbf_jets = objects.vbf_jets(
-        #     jets,
-        #     fatjets_xbb[:, :2],
-        #     events,
-        #     **self.vbf_jet_selection,
-        #     **self.vbf_veto_lepton_selection,
-        # )
+        # VBF objects
+        vbf_jets = objects.vbf_jets(
+            jets,
+            fatjets[:, :2],
+            events,
+            **self.vbf_jet_selection,
+            **self.vbf_veto_lepton_selection,
+        )
 
         # # AK4 objects away from first two fatjets
-        # ak4_jets_awayfromak8 = objects.ak4_jets_awayfromak8(
-        #     jets,
-        #     fatjets_xbb[:, :2],
-        #     events,
-        #     **self.ak4_bjet_selection,
-        #     **self.ak4_bjet_lepton_selection,
-        #     sort_by="nearest",
-        # )
+        ak4_jets_awayfromak8 = objects.ak4_jets_awayfromak8(
+            jets,
+            fatjets[:, :2],
+            events,
+            **self.ak4_bjet_selection,
+            **self.ak4_bjet_lepton_selection,
+            sort_by="nearest",
+        )
 
         # # JMSR
         # # TODO: add variations per variable
@@ -370,6 +474,11 @@ class bbtautauSkimmer(SkimmerABC):
         #     jmr_values={key: [1.0, 0.9, 1.1] for key in self.jmsr_vars},
         #     isData=isData,
         # )
+
+
+        # fatjets = objects.get_CA_MASS(fatjets, boostedtaus, met, subjets, muons, electrons)
+        fatjets = objects.get_CA_MASS(fatjets, taus, met, subjets, muons, electrons)
+        print("CA mass", f"{time.time() - start:.2f}")
 
         #########################
         # Save / derive variables
@@ -409,6 +518,12 @@ class bbtautauSkimmer(SkimmerABC):
         }
         leptonVars = {**electronVars, **muonVars, **tauVars, **boostedtauVars}
 
+        # Subjets
+        subjetVars = {
+            f"SubJet{key}": pad_val(subjets[var], num_subjets, axis=1)
+            for (var, key) in self.skim_vars["SubJet"].items()
+        }
+
         # AK4 Jet variables
         jet_skimvars = self.skim_vars["Jet"]
         if not isData:
@@ -422,22 +537,22 @@ class bbtautauSkimmer(SkimmerABC):
             for (var, key) in jet_skimvars.items()
         }
 
-        # if len(ak4_jets_awayfromak8) == 2:
-        #     ak4JetAwayVars = {
-        #         f"AK4JetAway{key}": pad_val(
-        #             ak.concatenate(
-        #                 [ak4_jets_awayfromak8[0][var], ak4_jets_awayfromak8[1][var]], axis=1
-        #             ),
-        #             2,
-        #             axis=1,
-        #         )
-        #         for (var, key) in jet_skimvars.items()
-        #     }
-        # else:
-        #     ak4JetAwayVars = {
-        #         f"AK4JetAway{key}": pad_val(ak4_jets_awayfromak8[var], 2, axis=1)
-        #         for (var, key) in jet_skimvars.items()
-        #     }
+        if len(ak4_jets_awayfromak8) == 2:
+            ak4JetAwayVars = {
+                f"AK4JetAway{key}": pad_val(
+                    ak.concatenate(
+                        [ak4_jets_awayfromak8[0][var], ak4_jets_awayfromak8[1][var]], axis=1
+                    ),
+                    2,
+                    axis=1,
+                )
+                for (var, key) in jet_skimvars.items()
+            }
+        else:
+            ak4JetAwayVars = {
+                f"AK4JetAway{key}": pad_val(ak4_jets_awayfromak8[var], 2, axis=1)
+                for (var, key) in jet_skimvars.items()
+            }
 
         # AK8 Jet variables
         fatjet_skimvars = self.skim_vars["FatJet"]
@@ -494,6 +609,14 @@ class bbtautauSkimmer(SkimmerABC):
         eventVars["nBoostedTaus"] = ak.num(boostedtaus).to_numpy()
         eventVars["nJets"] = ak.num(jets).to_numpy()
         eventVars["nFatJets"] = ak.num(fatjets).to_numpy()
+        eventVars["nSubJets"] = ak.num(subjets).to_numpy()
+
+        # jin for CA
+        # eventVars["CA_matched_tau_pt_sum"] = ca_tau_pt_sum.to_numpy()
+        # eventVars["CA_tau_idx_0"] = ca_tau_indices[:, 0].to_numpy()
+        # eventVars["CA_tau_idx_1"] = ca_tau_indices[:, 1].to_numpy()
+        # eventVars["CA_best_fatjet_idx"] = ca_best_fatjet_idx.to_numpy()
+
         if isData:
             pileupVars = {key: np.ones(len(events)) * PAD_VAL for key in self.skim_vars["Pileup"]}
         else:
@@ -501,7 +624,6 @@ class bbtautauSkimmer(SkimmerABC):
         pileupVars = {**pileupVars, "nPV": events.PV["npvs"].to_numpy()}
 
         # Trigger variables
-
         HLTVars = {}
         zeros = np.zeros(len(events), dtype="int")
         for trigger in self.HLTs[year]:
@@ -513,11 +635,11 @@ class bbtautauSkimmer(SkimmerABC):
 
         print("HLT vars", f"{time.time() - start:.2f}")
 
-        # # vbfJets
-        # vbfJetVars = {
-        #     f"VBFJet{key}": pad_val(vbf_jets[var], 2, axis=1)
-        #     for (var, key) in self.skim_vars["Jet"].items()
-        # }
+        # vbfJets
+        vbfJetVars = {
+            f"VBFJet{key}": pad_val(vbf_jets[var], 2, axis=1)
+            for (var, key) in self.skim_vars["Jet"].items()
+        }
 
         # # JEC variations for VBF Jets
         # if self._region == "signal" and isJECs:
@@ -536,14 +658,15 @@ class bbtautauSkimmer(SkimmerABC):
             **pileupVars,
             **trigMatchVars,
             **HLTVars,
-            # **ak4JetAwayVars,
+            **ak4JetAwayVars,
             **leptonVars,
             **ak4JetVars,
             **ak8FatJetVars,
             **metVars,
+            **subjetVars,
             # **bbFatJetVars,
             # **trigObjFatJetVars,
-            # **vbfJetVars,
+            **vbfJetVars,
         }
 
         # if self._region == "signal":
@@ -619,15 +742,21 @@ class bbtautauSkimmer(SkimmerABC):
         # add_selection("vbf_veto", ~(cut_vbf), *selection_args)
 
         if self._fatjet_bb_preselection:
-            # at least 1 jet with ParTXbbvsQCD > 0.8
+            # at least 1 jet with ParTXbbvsQCDTop > 0.3
             cut_bb = (
                 np.sum(
-                    ak8FatJetVars["ak8FatJetParTXbbvsQCD"] >= self.preselection["glopart-v2"],
+                    ak8FatJetVars["ak8FatJetParTXbbvsQCDTop"] >= self.preselection["glopart-v2"],
                     axis=1,
                 )
                 >= 1
             )
             add_selection("ak8_bb_preselection", cut_bb, *selection_args)
+
+        if self._prescale_factor:
+            cut_prescale = (
+                events.event % self._prescale_factor == 0
+            )
+            add_selection("prescale", cut_prescale, *selection_args)
 
         print("Selection", f"{time.time() - start:.2f}")
 
