@@ -94,31 +94,31 @@ def gen_selection_HHbbtautau(
     GenTauVars["GenTauhm"] = ((tauh == 1) & (taumu == 1)).to_numpy()
     GenTauVars["GenTauhe"] = ((tauh == 1) & (taue == 1)).to_numpy()
 
-    # fatjet gen matching
-    # Hbb = higgs[ak.sum(is_bb, axis=2) == 2]
-    # Hbb = ak.pad_none(Hbb, 1, axis=1, clip=True)[:, 0]
+    #fatjet gen matching
+    Hbb = higgs[ak.sum(is_bb, axis=2) == 2]
+    Hbb = ak.pad_none(Hbb, 1, axis=1, clip=True)[:, 0]
 
-    # Htt = higgs[ak.sum(is_tt, axis=2) == 2]
-    # Htt = ak.pad_none(Htt, 1, axis=1, clip=True)[:, 0]
+    Htt = higgs[ak.sum(is_tt, axis=2) == 2]
+    Htt = ak.pad_none(Htt, 1, axis=1, clip=True)[:, 0]
 
-    # TODO: check more than just the leading two fatjets!
-    # bbdr = fatjets[:, :2].delta_r(Hbb)
-    # ttdr = fatjets[:, :2].delta_r(Htt)
+    #TODO: check more than just the leading two fatjets!
+    bbdr = fatjets.delta_r(Hbb)
+    ttdr = fatjets.delta_r(Htt)
 
-    # match_dR = 0.8
-    # Hbb_match = bbdr <= match_dR
-    # Htt_match = ttdr <= match_dR
+    match_dR = 0.8
+    Hbb_match = bbdr <= match_dR
+    Htt_match = ttdr <= match_dR
 
-    # # overlap removal - in the case where fatjet is matched to both, match it only to the closest Higgs
-    # Hbb_match = (Hbb_match * ~Htt_match) + (bbdr <= ttdr) * (Hbb_match * Htt_match)
-    # Htt_match = (Htt_match * ~Hbb_match) + (bbdr > ttdr) * (Hbb_match * Htt_match)
+    # overlap removal - in the case where fatjet is matched to both, match it only to the closest Higgs
+    Hbb_match = (Hbb_match * ~Htt_match) + (bbdr <= ttdr) * (Hbb_match * Htt_match)
+    Htt_match = (Htt_match * ~Hbb_match) + (bbdr > ttdr) * (Hbb_match * Htt_match)
 
-    # GenMatchingVars = {
-    #     "ak8FatJetHbb": pad_val(Hbb_match, 2, axis=1),
-    #     "ak8FatJetHtt": pad_val(Htt_match, 2, axis=1),
-    # }
+    GenMatchingVars = {
+        "ak8FatJetHbb": pad_val(Hbb_match, 3, axis=1),
+        "ak8FatJetHtt": pad_val(Htt_match, 3, axis=1),
+    }
 
-    return {**GenHiggsVars, **GenbbVars, **GenTauVars}  # , **GenMatchingVars}
+    return {**GenHiggsVars, **GenbbVars, **GenTauVars, **GenMatchingVars}
 
 
 def gen_selection_HH4b(
