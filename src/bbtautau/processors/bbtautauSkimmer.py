@@ -751,8 +751,8 @@ class bbtautauSkimmer(SkimmerABC):
             # at least 1 jet with ParTXbbvsQCDTop > 0.3
             cut_bb = (
                 np.sum(
-                    # ak8FatJetVars["ak8FatJetParTXbbvsQCDTop"] >= self.preselection["glopart-v2"],
-                    ak8FatJetVars["ak8FatJetPNetXbbVsQCD"] >= self.preselection["pnet-v12"],
+                    ak8FatJetVars["ak8FatJetParTXbbvsQCDTop"] >= self.preselection["glopart-v2"],
+                    # ak8FatJetVars["ak8FatJetPNetXbbVsQCD"] >= self.preselection["pnet-v12"],
                     axis=1,
                 )
                 >= 1
