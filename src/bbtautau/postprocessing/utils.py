@@ -1027,13 +1027,11 @@ def load_data_channel(
                         events_dict=events_dict,
                         modelname=model,
                         model_dir=model_dir,
-                        signal_objective=sig,
                         channel=channel,
                         bdt_preds_dir=bdt_eval_dir,
                         tt_pres=tt_pres,
                         test_mode=test_mode,
                         at_inference=at_inference,
-                        all_outs=True,
                     )
 
     if cutflow:

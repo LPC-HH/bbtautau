@@ -1086,8 +1086,8 @@ class Analyser:
             gridlims = (0.3, 1) if use_thresholds else (0.2, 0.9)
             gridsize = 20
         else:
-            gridlims = (0.7, 1) if use_thresholds else (0.25, 0.75)
-            gridsize = 50
+            gridlims = (0.7, 1) if use_thresholds else (0.15, 0.85)
+            gridsize = 80
 
         foms = FOMS_TO_OPTIMIZE
 
@@ -1428,7 +1428,7 @@ def get_plot_dir(
 
     tag = "ParT/" if use_ParT else "BDT/"
     tag += "do_vbf/" if do_vbf else "ggf_only/"
-    tag += "sm_signals/" if use_sm_signals else "ggf_only/"
+    tag += "sm_signals/" if use_sm_signals else "separate_signals/"
     tag += "overlapping_channels/" if overlapping_channels else "orthogonal_channels/"
     tag += f"{sr_config.name}/{sr_config.channel}"
 
@@ -1630,9 +1630,10 @@ Examples:
         default=False,
         help="Optimize in threshold space (default: signal efficiency space)",
     )
-    sens_group.add_argument(
+    sens_group.add_argument(  # TODO: fix true default
         "--dataMinusSimABCD",
         action="store_true",
+        default=True,
         help="Use enhanced ABCD: subtract simulated non-QCD from data",
     )
     sens_group.add_argument(  # TODO: make sense of this (right now can never be false)
@@ -1648,7 +1649,7 @@ Examples:
     sr_group = parser.add_argument_group(
         "Signal Region Configuration", "Configure signal regions and cross-region vetoes"
     )
-    sr_group.add_argument(
+    sr_group.add_argument(  # TODO: for now only works if --do-vbf is set
         "--use-sm-signals",
         action="store_true",
         default=False,
