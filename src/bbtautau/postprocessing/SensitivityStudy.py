@@ -1536,7 +1536,7 @@ if __name__ == "__main__":
         epilog="""
 Examples:
   # Run sensitivity optimization with BDT
-  python SensitivityStudy.py --actions sensitivity --channels he hmu
+  python SensitivityStudy.py --actions sensitivity --channels he hm
 
   # Evaluate at specific cuts from a CSV file
   python SensitivityStudy.py --actions evaluate --cuts-file results.csv --eval-bmin 10 --outfile eval.csv
