@@ -50,6 +50,7 @@ def extract_optimal_cuts_from_csv(
     sensitivity_dir: Path,
     signal: str,
     channel_name: str,
+    combined_signals: str,
     bmin: int,
     use_ParT: bool,
     do_vbf: bool,
@@ -73,7 +74,7 @@ def extract_optimal_cuts_from_csv(
     """
     # Construct path to CSV directory; Needs to match `get_plot_dir` in SensitivityStudy.py structure.
     csv_dir = Path(sensitivity_dir).joinpath(
-        f"full_presel/{'ParT' if use_ParT else 'BDT'}/{'do_vbf' if do_vbf else 'ggf_only'}/sm_signals/orthogonal_channels/{signal}/{channel_name}"
+        f"full_presel/{'ParT' if use_ParT else 'BDT'}/{'do_vbf' if do_vbf else 'ggf_only'}/{combined_signals}/orthogonal_channels/{signal}/{channel_name}"
     )
 
     # Look for any FOM-specific CSV files
@@ -103,6 +104,7 @@ def get_selection_regions(
     use_ParT: bool = False,
     do_vbf: bool = False,
     bb_disc: str = "ak8FatJetParTXbbvsQCDTop",
+    combined_signals: str = "sm_signals",
 ):
     """
     Get the selection regions for a given signal and channel.
@@ -117,7 +119,7 @@ def get_selection_regions(
     # Load cuts first, then build pass_cuts with the correct txbb_cut
     if sensitivity_dir is not None:
         txbb_cut, txtt_cut = extract_optimal_cuts_from_csv(
-            Path(sensitivity_dir), signal, channel.key, bmin, use_ParT, do_vbf
+            Path(sensitivity_dir), signal, channel.key, combined_signals, bmin, use_ParT, do_vbf
         )
     else:
         txbb_cut = channel.txbb_cut
