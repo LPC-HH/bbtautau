@@ -104,7 +104,7 @@ def get_selection_regions(
     use_ParT: bool = False,
     do_vbf: bool = False,
     bb_disc: str = "ak8FatJetParTXbbvsQCDTop",
-    combined_signals: str = "sm_signals",
+    combined_signals: str = "separated_signals",
 ):
     """
     Get the selection regions for a given signal and channel.

@@ -19,15 +19,11 @@ from boostedhh.utils import PAD_VAL
 from joblib import Parallel, delayed
 from scipy.interpolate import UnivariateSpline
 from sklearn.metrics import (
-    accuracy_score,
     auc,
     average_precision_score,
-    balanced_accuracy_score,
     f1_score,
-    matthews_corrcoef,
     precision_score,
     recall_score,
-    roc_auc_score,
     roc_curve,
 )
 
@@ -47,28 +43,21 @@ class ROC:
 
 @dataclass
 class Metrics:
-    """Container for comprehensive performance metrics."""
+    """Container for performance metrics at fixed background efficiency."""
 
     # AUC-based metrics
     roc_auc: float
     pr_auc: float
 
-    # Threshold-dependent metrics at optimal point
-    optimal_threshold: float
-    f1_score: float
+    # Threshold at target background efficiency
+    threshold: float
+
+    # Metrics at target background efficiency
+    signal_eff: float  # recall = TPR = signal efficiency
     precision: float
-    recall: float
-    accuracy: float
-    balanced_accuracy: float
-    matthews_corr: float
+    f1_score: float
 
-    # Threshold-dependent metrics at 0.5 threshold
-    f1_score_05: float
-    precision_05: float
-    recall_05: float
-    accuracy_05: float
-
-    # Additional info
+    # Sample statistics
     n_signal: int
     n_background: int
     signal_weight: float
@@ -197,52 +186,29 @@ class Discriminant:
         self.roc = roc
         return roc
 
-    def compute_metrics(self):
+    def compute_metrics(self, bkg_eff=1e-4):
         """
-        Compute comprehensive performance metrics for the discriminant.
+        Compute performance metrics for the discriminant at fixed background efficiency.
+
+        Args:
+            bkg_eff: Target background efficiency (FPR) for threshold selection.
         """
+        # Ensure ROC is computed (reuse if already computed)
+        if not hasattr(self, "roc") or self.roc is None:
+            self.compute_roc()
+
         y_true = self.get_binary_labels()
         y_scores = self.get_discriminant_score()
         weights = self.get_weights()
 
-        # AUC-based metrics
-        roc_auc = roc_auc_score(y_true, y_scores, sample_weight=weights)
+        # Reuse ROC curve data (already computed in compute_roc)
+        fpr = self.roc.fpr
+        tpr = self.roc.tpr
+        thresholds_roc = self.roc.thresholds
+        roc_auc = self.roc.auc  # Reuse AUC from ROC computation
+
+        # PR AUC (still need to compute separately)
         pr_auc = average_precision_score(y_true, y_scores, sample_weight=weights)
-
-        # Find optimal threshold using F1-score
-        thresholds = np.linspace(0, 1, 100)
-        f1_scores = []
-        for thresh in thresholds:
-            y_pred = (y_scores >= thresh).astype(int)
-            try:
-                f1 = f1_score(y_true, y_pred, sample_weight=weights, zero_division=0)
-                f1_scores.append(f1)
-            except:
-                f1_scores.append(0.0)
-
-        optimal_threshold = thresholds[np.argmax(f1_scores)]
-        y_pred_optimal = (y_scores >= optimal_threshold).astype(int)
-        y_pred_05 = (y_scores >= 0.5).astype(int)
-
-        # Compute metrics at optimal threshold
-        f1_optimal = f1_score(y_true, y_pred_optimal, sample_weight=weights, zero_division=0)
-        precision_optimal = precision_score(
-            y_true, y_pred_optimal, sample_weight=weights, zero_division=0
-        )
-        recall_optimal = recall_score(
-            y_true, y_pred_optimal, sample_weight=weights, zero_division=0
-        )
-        accuracy_optimal = accuracy_score(y_true, y_pred_optimal, sample_weight=weights)
-        balanced_acc_optimal = balanced_accuracy_score(
-            y_true, y_pred_optimal, sample_weight=weights
-        )
-        matthews_optimal = matthews_corrcoef(y_true, y_pred_optimal, sample_weight=weights)
-
-        # Compute metrics at 0.5 threshold
-        f1_05 = f1_score(y_true, y_pred_05, sample_weight=weights, zero_division=0)
-        precision_05 = precision_score(y_true, y_pred_05, sample_weight=weights, zero_division=0)
-        recall_05 = recall_score(y_true, y_pred_05, sample_weight=weights, zero_division=0)
-        accuracy_05 = accuracy_score(y_true, y_pred_05, sample_weight=weights)
 
         # Sample statistics
         signal_mask = y_true == 1
@@ -251,26 +217,38 @@ class Discriminant:
         signal_weight = np.sum(weights[signal_mask])
         background_weight = np.sum(weights[~signal_mask])
 
+        # Find threshold at target background efficiency using ROC curve
+        # Find threshold where FPR is closest to (but not exceeding) target bkg_eff
+        valid_idx = np.where(fpr <= bkg_eff)[0]
+        idx_at_bkg_eff = valid_idx[-1] if len(valid_idx) > 0 else 0
+        threshold_at_bkg_eff = thresholds_roc[idx_at_bkg_eff]
+        tpr_at_bkg_eff = tpr[idx_at_bkg_eff]  # Signal efficiency at this working point
+        fpr_at_bkg_eff = fpr[idx_at_bkg_eff]  # Actual background efficiency
+
+        # Metrics at fixed background efficiency threshold
+        y_pred = (y_scores >= threshold_at_bkg_eff).astype(int)
+        f1 = f1_score(y_true, y_pred, sample_weight=weights, zero_division=0)
+        precision = precision_score(y_true, y_pred, sample_weight=weights, zero_division=0)
+        recall = recall_score(y_true, y_pred, sample_weight=weights, zero_division=0)
+
         metrics = Metrics(
             roc_auc=roc_auc,
             pr_auc=pr_auc,
-            optimal_threshold=optimal_threshold,
-            f1_score=f1_optimal,
-            precision=precision_optimal,
-            recall=recall_optimal,
-            accuracy=accuracy_optimal,
-            balanced_accuracy=balanced_acc_optimal,
-            matthews_corr=matthews_optimal,
-            f1_score_05=f1_05,
-            precision_05=precision_05,
-            recall_05=recall_05,
-            accuracy_05=accuracy_05,
+            threshold=threshold_at_bkg_eff,
+            signal_eff=recall,  # Signal efficiency at bkg_eff
+            precision=precision,
+            f1_score=f1,
             n_signal=n_signal,
             n_background=n_background,
             signal_weight=signal_weight,
             background_weight=background_weight,
         )
+
         self.metrics = metrics
+        # Store additional info for reference
+        self.threshold_at_bkg_eff = threshold_at_bkg_eff
+        self.signal_eff_at_bkg_eff = tpr_at_bkg_eff
+        self.actual_bkg_eff = fpr_at_bkg_eff
         return metrics
 
     def get_discriminant_score(self):
@@ -310,7 +288,7 @@ class Discriminant:
             return self.roc
 
     def get_metrics(self, as_dict=False):
-        """Get comprehensive metrics for the discriminant."""
+        """Get metrics for the discriminant at fixed background efficiency."""
         if not hasattr(self, "metrics"):
             print(f"Warning: Metrics not computed for discriminant {self.get_name()}")
             return None
@@ -319,17 +297,10 @@ class Discriminant:
             return {
                 "roc_auc": self.metrics.roc_auc,
                 "pr_auc": self.metrics.pr_auc,
-                "optimal_threshold": self.metrics.optimal_threshold,
-                "f1_score": self.metrics.f1_score,
+                "threshold": self.metrics.threshold,
+                "signal_eff": self.metrics.signal_eff,
                 "precision": self.metrics.precision,
-                "recall": self.metrics.recall,
-                "accuracy": self.metrics.accuracy,
-                "balanced_accuracy": self.metrics.balanced_accuracy,
-                "matthews_corr": self.metrics.matthews_corr,
-                "f1_score_05": self.metrics.f1_score_05,
-                "precision_05": self.metrics.precision_05,
-                "recall_05": self.metrics.recall_05,
-                "accuracy_05": self.metrics.accuracy_05,
+                "f1_score": self.metrics.f1_score,
                 "n_signal": self.metrics.n_signal,
                 "n_background": self.metrics.n_background,
                 "signal_weight": self.metrics.signal_weight,
@@ -676,9 +647,38 @@ class ROCAnalyzer:
             background_names,
         )
 
+    def _get_discriminant_key(self, disc_name: str, signal_name: str = None) -> str:
+        """
+        Get the storage key for a discriminant.
+
+        Args:
+            disc_name: Base discriminant name (may already be a composite key)
+            signal_name: Signal name (optional, will try to infer if not provided)
+
+        Returns:
+            Storage key (composite key if signal_name provided, otherwise tries to find matching key)
+        """
+        # First, check if disc_name already exists as-is (handles both simple and composite keys)
+        if disc_name in self.discriminants:
+            return disc_name
+
+        # If signal_name is provided, try constructing composite key
+        if signal_name is not None:
+            composite_key = f"{disc_name}_{signal_name}"
+            if composite_key in self.discriminants:
+                return composite_key
+
+        # Search for a key that starts with disc_name (handles composite keys when signal_name not provided)
+        for key in self.discriminants:
+            if key.startswith(f"{disc_name}_"):
+                return key
+
+        # If no match found, return disc_name (will raise KeyError if doesn't exist)
+        return disc_name
+
     def fill_discriminants(
         self,
-        discriminant_names: list[str],  # name of the discriminants to fill
+        discriminant_names: list[str],  # name of the discriminants to fill (column names in events)
         signal_name: str,  # name of the signal sample
         background_names: list[str],  # names of the background samples
     ):
@@ -686,11 +686,17 @@ class ROCAnalyzer:
         Fill an existing discriminant in the discriminants dict using precomputed scores.
 
         Args:
-            discriminant_names (list[str]): Names of the discriminants to fill.
+            discriminant_names (list[str]): Names of the discriminants to fill (column names).
             signal_name (str): Name of the signal sample.
             background_names (list[str]): Names of the background samples.
+
+        Note:
+            Discriminants are stored with composite key f"{disc_name}_{signal_name}"
+            to ensure uniqueness when the same column is used for multiple signals.
         """
         for disc_name in discriminant_names:
+            # Use composite key to avoid collisions when same column is used for multiple signals
+            storage_key = f"{disc_name}_{signal_name}"
             # Compute and store signal and background scores for the signal samples
             try:
                 disc_sig = self.signals[signal_name].get_var(disc_name, pad_nan=True)
@@ -700,10 +706,10 @@ class ROCAnalyzer:
                         for bg in background_names
                     ]
                 )
-            except:
-                # TODO could do fallback on process_discriminant but needs string interpretation, which could be ambiguous. save for later.
+            except Exception as e:
                 print(
-                    f"\n WARNING: discriminant {disc_name} not found for signal {signal_name} and backgrounds {background_names}\n"
+                    f"\n WARNING: discriminant {disc_name} not found for signal {signal_name} and backgrounds {background_names}"
+                    f"\n  Error: {type(e).__name__}: {e}\n"
                 )
                 continue
 
@@ -725,9 +731,9 @@ class ROCAnalyzer:
                 f"Fraction of background that is padded: {np.sum(disc_bkg==PAD_VAL) / len(disc_bkg)}"
             )
 
-            # Store the new discriminant object
-            self.discriminants[disc_name] = Discriminant.from_disc_scores(
-                disc_name,
+            # Store the new discriminant object with composite key to avoid collisions
+            self.discriminants[storage_key] = Discriminant.from_disc_scores(
+                storage_key,  # Use composite name for unique identification in plots
                 disc_sig,
                 disc_bkg,
                 weights_sig,
@@ -737,14 +743,14 @@ class ROCAnalyzer:
                 background_names,
             )
 
-    def compute_rocs(self, verbose=True, compute_metrics=False, parallel=False):
+    def compute_rocs(self, verbose=True, compute_metrics=False, bkg_eff=1e-4, parallel=False):
         """
         Compute ROC curves for all discriminants (and optionally metrics).
 
         Args:
             verbose (bool): Whether to print timing info.
-            compute_metrics (bool): If True, also compute metrics; metrics are slower and
-                often unnecessary when only ROC curves are needed.
+            compute_metrics (bool): If True, also compute metrics at fixed bkg_eff.
+            bkg_eff (float): Target background efficiency for threshold evaluation of metrics.
             parallel (bool): If True, use joblib to parallelize over discriminants.
         """
         if verbose:
@@ -755,7 +761,7 @@ class ROCAnalyzer:
         if compute_metrics:
 
             def _run(disc):
-                return disc.compute_roc(), disc.compute_metrics()
+                return disc.compute_roc(), disc.compute_metrics(bkg_eff=bkg_eff)
 
         else:
 
@@ -838,6 +844,7 @@ class ROCAnalyzer:
         background_names_groups: list[list[str]],
         plot_dir: Path | str,
         nbins: int = 100,
+        signal_name: str = None,
     ):
         """
         Plot discriminant score distributions for signal and grouped background samples.
@@ -845,18 +852,24 @@ class ROCAnalyzer:
         This method creates a histogram showing the distribution of discriminant scores for signal events and background events grouped according to the provided background_names_groups.
 
         Args:
-            disc (discriminant): discriminant object containing scores, labels, weights, and metadata.
+            disc_name (str): Name of the discriminant to plot.
             background_names_groups (list[list[str]]): List of background sample groups to plot together.
                 Each inner list contains background sample names that will be combined into one histogram.
                 Example: [["qcd", "ttbar"], ["wjets", "zjets"]] creates two background histograms.
             plot_dir (Path): Directory where the plot will be saved. Creates a "scores" subdirectory.
             nbins (int, optional): Number of bins for the histogram. Defaults to 100.
+            signal_name (str, optional): Signal name used to construct composite keys. If None, will try to infer.
 
         Returns:
             None: The plot is saved to plot_dir/scores/ with an automatically generated filename.
         """
 
-        disc = self.discriminants[disc_name]
+        disc_key = self._get_discriminant_key(disc_name, signal_name)
+        if disc_key not in self.discriminants:
+            raise KeyError(
+                f"Discriminant '{disc_name}' (key: '{disc_key}') not found. Available keys: {list(self.discriminants.keys())}"
+            )
+        disc = self.discriminants[disc_key]
 
         # if background_names_groups is a list of strings, convert it to a list of lists
         if isinstance(background_names_groups, list) and not isinstance(
@@ -900,12 +913,6 @@ class ROCAnalyzer:
             for background_group in background_names_groups
         ]
 
-        # print("discs",([sig_disc] + bkg_disc_groups))
-        # print("names",[disc.get_signal_name()] + bkg_names_groups)
-        # print("weights",[disc.get_weights()[disc.get_binary_labels() == 1]]
-        #                 + bkg_weights_groups)
-        # print("\n\n")
-
         plotting.plot_hist(
             [sig_disc] + bkg_disc_groups,
             [disc.get_signal_name()] + bkg_names_groups,
@@ -920,14 +927,16 @@ class ROCAnalyzer:
             name=f"{disc_name}_{'_'.join(''.join(background_group) for background_group in background_names_groups)}",
         )
 
-    def plot_rocs(self, title, disc_names, plot_dir, thresholds=None):
+    def plot_rocs(self, title, disc_names, plot_dir, thresholds=None, signal_name=None):
         """
         Plot the ROC curves for a set of discriminants using the plotting utilities.
 
         Args:
             title (str): Title of the plot.
-            discs (list[Discriminant]): Names of the discriminants to plot. Assumes that the signal name is the same for all discriminants.
+            disc_names (list[str]): Names of the discriminants to plot. Assumes that the signal name is the same for all discriminants.
             plot_dir (Path): Directory to save the plot.
+            thresholds (list[float], optional): Threshold values to mark on ROC curves.
+            signal_name (str, optional): Signal name used to construct composite keys. If None, will try to infer.
         """
         # Check that the folder exists
         (plot_dir / "rocs").mkdir(parents=True, exist_ok=True)
@@ -935,20 +944,30 @@ class ROCAnalyzer:
         if thresholds is None:
             thresholds = [0.7, 0.9, 0.95]
 
+        # Get discriminant keys (with composite keys if needed)
+        disc_keys = [self._get_discriminant_key(disc_name, signal_name) for disc_name in disc_names]
+
+        # Check that all keys exist
+        missing_keys = [key for key in disc_keys if key not in self.discriminants]
+        if missing_keys:
+            raise KeyError(
+                f"Discriminants not found: {missing_keys}. Available keys: {list(self.discriminants.keys())}"
+            )
+
         # check that all discriminants have the same signal name
-        signal_name = self.discriminants[disc_names[0]].get_signal_name()
-        for disc_name in disc_names:
-            if self.discriminants[disc_name].get_signal_name() != signal_name:
+        disc_signal_name = self.discriminants[disc_keys[0]].get_signal_name()
+        for disc_key in disc_keys:
+            if self.discriminants[disc_key].get_signal_name() != disc_signal_name:
                 print(
-                    f"Warning: Discriminant {disc_name} has a different signal name than {signal_name}. Aborting."
+                    f"Warning: Discriminant {disc_key} has a different signal name than {disc_signal_name}. Aborting."
                 )
                 return
 
         plotting.multiROCCurve(
             {
                 "": {
-                    disc_name: self.discriminants[disc_name].get_roc(unpacked=True)
-                    for disc_name in disc_names
+                    disc_name: self.discriminants[disc_key].get_roc(unpacked=True)
+                    for disc_name, disc_key in zip(disc_names, disc_keys)
                 }
             },
             title=title,
@@ -961,9 +980,14 @@ class ROCAnalyzer:
         )
 
     def compute_confusion_matrix(
-        self, discriminant_name, threshold=0.5, plot_dir=None, normalize=True
+        self, discriminant_name, threshold=0.5, plot_dir=None, normalize=True, signal_name=None
     ):
-        disc = self.discriminants[discriminant_name]
+        disc_key = self._get_discriminant_key(discriminant_name, signal_name)
+        if disc_key not in self.discriminants:
+            raise KeyError(
+                f"Discriminant '{discriminant_name}' (key: '{disc_key}') not found. Available keys: {list(self.discriminants.keys())}"
+            )
+        disc = self.discriminants[disc_key]
         disc_scores = disc.disc_scores
         extended_labels = disc.extended_labels
         bkg_names = list(disc.bkg_names)

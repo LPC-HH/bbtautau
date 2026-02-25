@@ -5,7 +5,7 @@
 # Usage: ./meta_run_blinded.sh [combined|individual|both] [--cmds <commands>]
 
 # Configuration
-CARDS_BASE_DIR="/home/users/lumori/bbtautau/src/bbtautau/cards/26Jan6-vbf"
+CARDS_BASE_DIR="/home/users/lumori/bbtautau/src/bbtautau/cards/26Feb17-11febBdt"
 SCRIPT_PATH="/home/users/lumori/bbtautau/src/bbtautau/combine/run_blinded_bbtt.sh"
 CHANNELS=("hh" "hm" "he")
 

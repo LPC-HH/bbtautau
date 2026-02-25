@@ -65,6 +65,7 @@ class bbtautauSkimmer(SkimmerABC):
         "MET": {
             "pt": "Pt",
             "phi": "Phi",
+            "significance": "significance",
         },
         "Lepton": {
             **P4,

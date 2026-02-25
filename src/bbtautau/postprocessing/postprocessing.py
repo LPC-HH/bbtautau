@@ -252,6 +252,7 @@ def main(args: argparse.Namespace):
                 selection_region_kwargs={
                     "sensitivity_dir": args.sensitivity_dir,
                     "bmin": bmin,  # Use loop variable, not args.bmin
+                    "combined_signals": args.combined_signals,
                     "use_ParT": args.use_ParT,
                     "do_vbf": args.do_vbf,
                     "bb_disc": args.bb_disc,
@@ -819,6 +820,14 @@ def parse_args(parser=None):
         "--templates-name",
         help="If saving templates, optional name for folder (comes under cuts directory if scanning).",
         default="",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--combined-signals",
+        help="Name of the combined signals to use",
+        default="separate_signals",
+        choices=["sm_signals", "separate_signals"],
         type=str,
     )
 
