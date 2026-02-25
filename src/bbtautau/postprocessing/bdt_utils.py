@@ -1060,6 +1060,17 @@ def get_sample_fold_assignments(
     return fold_assignments
 
 
+def _predict_with_best_iteration(bst: xgb.Booster, dmatrix: xgb.DMatrix) -> np.ndarray:
+    """Predict with early-stopped best iteration when available."""
+    # Preferred path for models trained with early stopping in xgb.train.
+    best_iteration = getattr(bst, "best_iteration", None)
+    if best_iteration is not None:
+        return bst.predict(dmatrix, iteration_range=(0, best_iteration + 1))
+
+    # No early-stopping metadata available: use full model.
+    return bst.predict(dmatrix)
+
+
 def predict_bdt(
     features: np.ndarray,
     boosters: list[xgb.Booster],
@@ -1098,12 +1109,12 @@ def predict_bdt(
 
     if n_folds == 1:
         # Single model: standard prediction
-        return boosters[0].predict(dmatrix)
+        return _predict_with_best_iteration(boosters[0], dmatrix)
 
     # K-fold model
     if is_data or fold_assignments is None:
         # DATA or MC not in training: average all models
-        all_preds = np.array([bst.predict(dmatrix) for bst in boosters])
+        all_preds = np.array([_predict_with_best_iteration(bst, dmatrix) for bst in boosters])
         return np.mean(all_preds, axis=0)
     else:
         # MC: use out-of-fold predictions for events in training, averaged for others
@@ -1115,7 +1126,7 @@ def predict_bdt(
             )
 
         # Get predictions from all models
-        all_preds = [bst.predict(dmatrix) for bst in boosters]
+        all_preds = [_predict_with_best_iteration(bst, dmatrix) for bst in boosters]
         n_classes = all_preds[0].shape[1]
         avg_preds = np.mean(all_preds, axis=0)
 
