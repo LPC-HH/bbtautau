@@ -151,6 +151,7 @@ class Trainer:
                 f"bkg_samples={self.bkg_sample_names}"
             )
 
+        self.cap_weights = False
         self.events_dict = {year: {} for year in self.years}
 
     def load_data(self, force_reload=False):
@@ -327,6 +328,24 @@ class Trainer:
                 if key not in weight_stats_by_stage_sample:
                     weight_stats_by_stage_sample[key] = []
                 weight_stats_by_stage_sample[key].append(weights_rescaled.copy())
+
+                if self.cap_weights:
+                    median_w = np.median(weights_rescaled)
+                    cap = 10.0 * max(median_w, 1e-12)
+                    n_capped = np.sum(weights_rescaled > cap)
+                    if n_capped > 0:
+                        weight_before = np.sum(weights_rescaled)
+                        weights_rescaled = np.minimum(weights_rescaled, cap)
+                        print(
+                            f"  {sample.sample.label}: capped {n_capped}/{len(weights_rescaled)} "
+                            f"events at {cap:.4g} (total weight {weight_before:.1f} -> "
+                            f"{np.sum(weights_rescaled):.1f})"
+                        )
+
+                    key = ("Weight capping", sample.sample.label)
+                    if key not in weight_stats_by_stage_sample:
+                        weight_stats_by_stage_sample[key] = []
+                    weight_stats_by_stage_sample[key].append(weights_rescaled.copy())
 
                 X_list.append(X_sample)
                 weights_list.append(weights)
@@ -1759,6 +1778,12 @@ if __name__ == "__main__":
         default=False,
         help="Apply feature binning to gloParT tautauvsQCDTop scores (discretize to 0.05 steps)",
     )
+    parser.add_argument(
+        "--cap-weights",
+        action="store_true",
+        default=False,
+        help="Cap per-event training weights at 10x the sample median after balance rescaling",
+    )
 
     # Add mutually exclusive group for train/load
     group = parser.add_mutually_exclusive_group()
@@ -1834,6 +1859,10 @@ if __name__ == "__main__":
         trainer.bdt_config[args.model]["bin_features"] = WPS_TTPART.keys()
         print(f"Feature binning enabled for features: {WPS_TTPART.keys()}")
         print("  Note: Features will only be binned if WP bin edges are provided in WPS_TTPART")
+
+    if args.cap_weights:
+        trainer.cap_weights = True
+        print("Weight capping enabled: per-event weights will be capped at 10x sample median")
 
     if args.train:
         print("Running in training mode")
