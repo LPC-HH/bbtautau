@@ -171,7 +171,7 @@ class Trainer:
         else:
             for year in self.years:
 
-                filters_dict = base_filter(test_mode=False)
+                filters_dict = base_filter(test_mode=True)
                 # filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3) # not needed, events are already filtered by skimmer
                 if self.tt_preselection:
                     filters_dict = tt_filters(
@@ -596,11 +596,7 @@ class Trainer:
 
         # Save fold indices (useful for k-fold inference on MC)
         if self.n_folds > 1:
-            fold_indices_path = self.output_dir / "fold_indices.json"
-            # fold_indices_serializable = [
-            #     {"train": train_idx.tolist(), "val": val_idx.tolist()}
-            #     for train_idx, val_idx in self.fold_data["fold_indices"]
-            # ]
+            fold_indices_path = self.output_dir / "fold_indices.npz"
 
             # Create event-to-fold mapping using (luminosityBlock, event) tuples
             event_fold_assignment = np.full(len(y), -1, dtype=int)
@@ -609,23 +605,19 @@ class Trainer:
 
             print("Cross check: ", np.sum(event_fold_assignment == -1)), "has to be zero "
 
-            # Create mapping from (luminosityBlock, event) tuple to fold index
-            event_to_fold = {}
-            for idx, (lumi, event) in enumerate(event_ids_list):
-                event_key = f"({lumi},{event})"
-                event_to_fold[event_key] = int(event_fold_assignment[idx])
-
-            with fold_indices_path.open("w") as f:
-                json.dump(
-                    {
-                        "n_folds": self.n_folds,
-                        "random_seed": self.bdt_config[self.modelname]["random_seed"],
-                        "event_to_fold": event_to_fold,  # Primary: mapping from (lumi, event) to fold
-                        # "fold_indices": fold_indices_serializable,  # For debugging/analysis only
-                    },
-                    f,
-                    indent=2,
-                )
+            # Persist compact numeric arrays instead of a large JSON dict with string keys.
+            lumi_values = np.asarray([lumi for lumi, _ in event_ids_list], dtype=np.int32)
+            event_values = np.asarray([event for _, event in event_ids_list], dtype=np.int64)
+            np.savez_compressed(
+                fold_indices_path,
+                n_folds=np.array([self.n_folds], dtype=np.int16),
+                random_seed=np.array(
+                    [self.bdt_config[self.modelname]["random_seed"]], dtype=np.int32
+                ),
+                luminosityBlock=lumi_values,
+                event=event_values,
+                fold=event_fold_assignment.astype(np.int16),
+            )
             print(f"Fold indices saved to {fold_indices_path}")
 
         # Save WPS bin edges used for feature binning (if any)
@@ -939,16 +931,15 @@ class Trainer:
             y_pred = self.boosters[0].predict(self.dval)
             y_labels = self.dval.get_label()
             weights = self.dval.get_weight()
-            X = self.fold_data["X"]
             val_idx = self.fold_data["fold_indices"][0][1]  # validation indices
-            X_val = X.iloc[val_idx].reset_index(drop=True)
+            X_eval = self.fold_data["X"].iloc[val_idx]
             # Filter masks to validation indices
             masks_val = {k: v[val_idx] if v is not None else None for k, v in masks.items()}
             title_suffix = ""
         else:
             # Multi-fold: use out-of-fold predictions
             y_pred, weights, y_labels = self.get_oof_predictions()
-            X_val = self.fold_data["X"].reset_index(drop=True)
+            X_eval = self.fold_data["X"]
             masks_val = masks  # Use all masks for OOF
             title_suffix = f" ({self.n_folds}-fold OOF)"
             print(f"\nComputing ROCs with {self.n_folds}-fold out-of-fold predictions...")
@@ -966,28 +957,38 @@ class Trainer:
         print("signal_names", signal_names)
         print("background_names", background_names)
 
+        # Keep only the non-BDT columns needed downstream by fill_discriminants.
+        comparison_tagger_cols = []
+        for sig_tagger in signal_names:
+            taukey = CHANNELS[sig_tagger[-2:]].tagger_label
+            disc_name = f"ttFatJetParTX{taukey}vsQCDTop"
+            if disc_name in X_eval.columns:
+                comparison_tagger_cols.append(disc_name)
+            else:
+                print(f"Warning: required discriminant column '{disc_name}' not found in X")
+        comparison_tagger_cols = sorted(set(comparison_tagger_cols))
+
         # Create event filters based on labels
         event_filters = {name: y_labels == i for i, name in enumerate(self.sample_names)}
 
         # Build preds_dict for ROCAnalyzer
         preds_dict = {}
         for class_name in self.sample_names:
-            events = {}
-            for i, pred_class_name in enumerate(self.sample_names):
-                events[pred_class_name] = y_pred[event_filters[class_name], i]
-            events["finalWeight"] = weights[event_filters[class_name]]
-            events = pd.DataFrame(events)
+            class_filter = event_filters[class_name]
+            class_indices = np.flatnonzero(class_filter)
 
-            events = pd.concat(
-                [
-                    X_val[event_filters[class_name]].reset_index(drop=True),
-                    events.reset_index(drop=True),
-                ],
-                axis=1,
-            )
+            # Start from model outputs + event weights (always needed).
+            events = pd.DataFrame(y_pred[class_filter], columns=self.sample_names)
+            events["finalWeight"] = weights[class_filter]
+
+            # Add only required non-BDT discriminant columns (instead of all training features).
+            if comparison_tagger_cols:
+                feature_subset = X_eval.iloc[class_indices][comparison_tagger_cols].reset_index(
+                    drop=True
+                )
+                events = pd.concat([feature_subset, events], axis=1)
 
             # Filter masks for this class
-            class_filter = event_filters[class_name]
             class_masks = {
                 k: v[class_filter] if v is not None else None for k, v in masks_val.items()
             }
