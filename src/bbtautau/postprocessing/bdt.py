@@ -1780,3 +1780,10 @@ if __name__ == "__main__":
         trainer.bdt_config[args.model]["bin_features"] = WPS_TTPART.keys()
         print(f"Feature binning enabled for features: {WPS_TTPART.keys()}")
         print("  Note: Features will only be binned if WP bin edges are provided in WPS_TTPART")
+
+    if args.train:
+        print("Running in training mode")
+        trainer.complete_train(force_reload=args.force_reload)
+    else:
+        print("Running in load/evaluate mode")
+        trainer.complete_load(force_reload=args.force_reload)

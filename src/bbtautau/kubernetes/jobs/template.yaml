@@ -14,7 +14,7 @@ spec:
           - "/bin/bash"
           - "-c"
           - >
-            git clone --single-branch --recurse-submodules --branch kube https://github.com/LPC-HH/bbtautau.git /opt/repo/bbtautau &&
+            git clone --single-branch --recurse-submodules --branch dev-bdt https://github.com/LPC-HH/bbtautau.git /opt/repo/bbtautau &&
             mkdir -p $output_dir/ &&
             pip install -e /opt/repo/bbtautau &&
             pip install -e /opt/repo/bbtautau/boostedhh &&
@@ -27,7 +27,7 @@ spec:
         resources:
           limits:
             memory: 32Gi
-            cpu: "8"
+            cpu: "7.2"
             nvidia.com/gpu: "1"
           requests:
             memory: 32Gi
