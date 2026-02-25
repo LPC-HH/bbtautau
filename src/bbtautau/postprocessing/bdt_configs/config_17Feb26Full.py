@@ -18,6 +18,7 @@ CONFIG = {
         "alpha": 1.0,
         "gamma": 1.0,
         "lambda": 1.0,
+        "min_child_weight": 20,
         "colsample_bytree": 0.6,
         "num_parallel_tree": 100,
         "eval_metric": "mlogloss",
