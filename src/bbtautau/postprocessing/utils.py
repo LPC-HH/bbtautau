@@ -638,10 +638,6 @@ def bbtautau_assignment(
 ):
     """Assign bb and tautau jets per each event."""
 
-    # if channel is none but agnostic is false raise an error
-    if channel is None and not agnostic:
-        raise ValueError("Channel is required if agnostic is False")
-
     if not isinstance(next(iter(events_dict.values())), LoadedSample):
         if agnostic:
             raise ValueError("Need to work with LoadedSample if agnostic is True")
