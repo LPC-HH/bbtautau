@@ -28,7 +28,6 @@ from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES, SM_SIGNALS
 from bbtautau.postprocessing.utils import load_data_channel
 from bbtautau.userConfig import (
     CHANNEL_ORDERING,
-    CLASSIFIER_DIR,
     PLOT_DIR,
     PT_CUTS,
     SHAPE_VAR,
@@ -128,7 +127,6 @@ class Analyser:
         use_ParT: bool | None = None,
         at_inference=False,
         tt_pres=False,
-        bdt_dir=None,
         plot_dir: Path | None = None,
         llsl_weight=1,
         dataMinusSimABCD=False,
@@ -143,7 +141,6 @@ class Analyser:
         self.tt_pres = tt_pres
         self.at_inference = at_inference
         self.use_ParT = use_ParT
-        self.bdt_dir = bdt_dir
 
         self.llsl_weight = llsl_weight
         self.dataMinusSimABCD = dataMinusSimABCD
@@ -260,18 +257,35 @@ class Analyser:
         self.rocAnalyzer.compute_rocs(compute_metrics=self.compute_ROC_metrics)
 
         # Plot bb discriminants
-        self.rocAnalyzer.plot_rocs(title="bbFatJet", disc_names=discs_bb, plot_dir=self.plot_dir)
+        self.rocAnalyzer.plot_rocs(
+            title="bbFatJet",
+            disc_names=discs_bb,
+            plot_dir=self.plot_dir,
+            signal_name=signal_name_for_fill,
+        )
 
         # Plot tt discriminants
-        self.rocAnalyzer.plot_rocs(title="ttFatJet", disc_names=discs_tt, plot_dir=self.plot_dir)
+        self.rocAnalyzer.plot_rocs(
+            title="ttFatJet",
+            disc_names=discs_tt,
+            plot_dir=self.plot_dir,
+            signal_name=signal_name_for_fill,
+        )
 
         # Plot discriminant scores and confusion matrices
         for disc in discs_all:
-            self.rocAnalyzer.plot_disc_scores(disc, background_names, self.plot_dir)
             self.rocAnalyzer.plot_disc_scores(
-                disc, [[bkg] for bkg in background_names], self.plot_dir
+                disc, background_names, self.plot_dir, signal_name=signal_name_for_fill
             )
-            self.rocAnalyzer.compute_confusion_matrix(disc, plot_dir=self.plot_dir)
+            self.rocAnalyzer.plot_disc_scores(
+                disc,
+                [[bkg] for bkg in background_names],
+                self.plot_dir,
+                signal_name=signal_name_for_fill,
+            )
+            self.rocAnalyzer.compute_confusion_matrix(
+                disc, plot_dir=self.plot_dir, signal_name=signal_name_for_fill
+            )
 
         print(f"ROCs computed and plotted for {signal_name_for_fill} vs backgrounds.")
 
@@ -999,14 +1013,16 @@ class Analyser:
                 self.compute_and_plot_rocs()
                 print("ROC analyzer computed and plotted. Continuing with grid search...")
 
-            # Check discriminants exist
-            if self.bb_disc_name not in self.rocAnalyzer.discriminants:
+            # Check discriminants exist (using helper to handle composite keys)
+            bb_disc_key = self.rocAnalyzer._get_discriminant_key(self.bb_disc_name)
+            if bb_disc_key not in self.rocAnalyzer.discriminants:
                 raise ValueError(
-                    f"BB discriminant '{self.bb_disc_name}' not found in ROC analyzer. Available: {list(self.rocAnalyzer.discriminants.keys())}"
+                    f"BB discriminant '{self.bb_disc_name}' (key: '{bb_disc_key}') not found in ROC analyzer. Available: {list(self.rocAnalyzer.discriminants.keys())}"
                 )
-            if self.tt_disc_name_channel not in self.rocAnalyzer.discriminants:
+            tt_disc_key = self.rocAnalyzer._get_discriminant_key(self.tt_disc_name_channel)
+            if tt_disc_key not in self.rocAnalyzer.discriminants:
                 raise ValueError(
-                    f"TT discriminant '{self.tt_disc_name_channel}' not found in ROC analyzer. Available: {list(self.rocAnalyzer.discriminants.keys())}"
+                    f"TT discriminant '{self.tt_disc_name_channel}' (key: '{tt_disc_key}') not found in ROC analyzer. Available: {list(self.rocAnalyzer.discriminants.keys())}"
                 )
 
             # Create signal efficiency grid with separate limits for each axis
@@ -1014,9 +1030,9 @@ class Analyser:
             ttcutSigEff = np.linspace(*gridlims_y, gridsize)
             BBcutSigEff, TTcutSigEff = np.meshgrid(bbcutSigEff, ttcutSigEff)
 
-            # Get discriminant objects for threshold lookup
-            bb_discriminant = self.rocAnalyzer.discriminants[self.bb_disc_name]
-            tt_discriminant = self.rocAnalyzer.discriminants[self.tt_disc_name_channel]
+            # Get discriminant objects for threshold lookup (using keys from previous check)
+            bb_discriminant = self.rocAnalyzer.discriminants[bb_disc_key]
+            tt_discriminant = self.rocAnalyzer.discriminants[tt_disc_key]
 
             # VECTORIZED threshold computation
             bbcut_thresholds = bb_discriminant.get_cut_from_sig_eff(bbcutSigEff)
@@ -1344,7 +1360,6 @@ def analyse_channel(
     tt_pres=False,
     use_ParT=False,
     at_inference=False,
-    bdt_dir=None,
     plot_dir=None,
     llsl_weight=1,
     cuts_file=None,
@@ -1377,7 +1392,6 @@ def analyse_channel(
         use_ParT=use_ParT,
         at_inference=at_inference,
         llsl_weight=llsl_weight,
-        bdt_dir=bdt_dir,
         plot_dir=plot_dir,
         dataMinusSimABCD=dataMinusSimABCD,
         showNonDataDrivenPortion=showNonDataDrivenPortion,
@@ -1448,7 +1462,13 @@ def main(args):
     # BDT models to load (None if using ParT)
     models = None
     if not args.use_ParT:
+        # Backward compatible:
+        # - Old mode: separate ggf and vbf models -> pass both
+        # - New mode: "extended"/unified model that outputs both ggf+vbf -> user can pass same name for both;
+        #   de-duplicate so we only run it once (model config signals drives which outputs are produced).
         models = [args.ggf_modelname] + ([args.vbf_modelname] if args.do_vbf else [])
+        # preserve order but drop duplicates
+        models = list(dict.fromkeys(models))
 
     # Track optimized regions for vetoes (key = signal_channel, e.g., "ggfbbtthh")
     optimized_regions: dict[str, SRConfig] = {}
@@ -1513,7 +1533,6 @@ def main(args):
                 use_ParT=args.use_ParT,
                 actions=args.actions,
                 at_inference=args.at_inference,
-                bdt_dir=args.bdt_dir,
                 plot_dir=plot_dir,
                 cuts_file=args.cuts_file,
                 eval_bmin=args.eval_bmin,
@@ -1630,13 +1649,13 @@ Examples:
         default=False,
         help="Optimize in threshold space (default: signal efficiency space)",
     )
-    sens_group.add_argument(  # TODO: fix true default
+    sens_group.add_argument(  # Legacy, never really used but logic kept
         "--dataMinusSimABCD",
         action="store_true",
         default=True,
         help="Use enhanced ABCD: subtract simulated non-QCD from data",
     )
-    sens_group.add_argument(  # TODO: make sense of this (right now can never be false)
+    sens_group.add_argument(  # See above
         "--showNonDataDrivenPortion",
         action="store_true",
         default=True,
@@ -1682,20 +1701,14 @@ Examples:
     )
     disc_group.add_argument(
         "--ggf-modelname",
-        default="19oct25_ak4away_ggfbbtt",
-        help="BDT model name for ggF (default: 19oct25_ak4away_ggfbbtt)",
+        default="11Feb26Full",
+        help="BDT model name for ggF (default: 6Feb26test)",
     )
     disc_group.add_argument(
         "--vbf-modelname",
         type=str,
-        default="19oct25_ak4away_vbfbbtt",
-        help="BDT model name for VBF (default: 19oct25_ak4away_vbfbbtt)",
-    )
-    disc_group.add_argument(
-        "--bdt-dir",
-        type=str,
-        default=CLASSIFIER_DIR,
-        help="Directory containing BDT model files",
+        default="11Feb26Full",
+        help="BDT model name for VBF (default: 6Feb26test)",
     )
     disc_group.add_argument(
         "--at-inference",

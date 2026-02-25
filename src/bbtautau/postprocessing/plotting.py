@@ -328,7 +328,7 @@ def plot_optimization_thresholds(
                 bb_cut_opt,
                 tt_cut_opt,
                 color=c,
-                label=f"Optimum $B\\geq {B_min}$",
+                label="Optimum $\\tilde{B}\\geq$" + f"{B_min}$",
                 marker=m,
                 s=80,
                 zorder=10,
