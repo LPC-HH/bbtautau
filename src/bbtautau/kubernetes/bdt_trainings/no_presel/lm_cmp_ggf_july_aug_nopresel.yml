@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: bbtautau-bdt-$job_name
+  name: bbtautau-bdt-lm-cmp-ggf-july-aug-nopresel
   labels:
     type: bbtautau
 spec:
@@ -15,12 +15,12 @@ spec:
           - "-c"
           - >
             git clone --single-branch --recurse-submodules --branch kube https://github.com/LPC-HH/bbtautau.git /opt/repo/bbtautau &&
-            mkdir -p $output_dir/ &&
+            mkdir -p /bbtautauvol/bdt/no_presel/compare_20aug25_loweta_lowreg-29July25_loweta_lowreg_ggfbbtt &&
             pip install -e /opt/repo/bbtautau &&
             pip install -e /opt/repo/bbtautau/boostedhh &&
-            python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --train --model $name
-            --output-dir $output_dir --data-path $datapath/ --bin-features $args
-            | tee $output_dir/log.txt
+            python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --compare-models
+            --models 20aug25_loweta_lowreg 29July25_loweta_lowreg --years all --signal-key ggfbbtt --model-dirs /bbtautauvol/bdt/no_presel/20aug25_loweta_lowreg_ggfbbtt /bbtautauvol/bdt/no_presel/29July25_loweta_lowreg_ggfbbtt
+            --output-dir /bbtautauvol/bdt/no_presel/compare_20aug25_loweta_lowreg-29July25_loweta_lowreg_ggfbbtt --data-path /bbtautauvol/25Sep23AddVars_v12_private_signal/  | tee /bbtautauvol/bdt/no_presel/compare_20aug25_loweta_lowreg-29July25_loweta_lowreg_ggfbbtt/log.txt
         volumeMounts:
         - mountPath: /bbtautauvol
           name: bbtautauvol
@@ -28,11 +28,9 @@ spec:
           limits:
             memory: 32Gi
             cpu: "8"
-            nvidia.com/gpu: "1"
           requests:
             memory: 32Gi
             cpu: "6"
-            nvidia.com/gpu: "1"
       volumes:
       - name: bbtautauvol
         persistentVolumeClaim:

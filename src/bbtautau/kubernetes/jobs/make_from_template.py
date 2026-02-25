@@ -49,9 +49,9 @@ def main(args):
         if args.job_name == "":
             if args.compare_models:
                 models_key = "-".join(args.models) if args.models else "models"
-                args.job_name = "cmp_" + args.tag + "_" + models_key + "_" + args.signal_key
+                args.job_name = "cmp_" + args.tag + "_" + models_key
             else:
-                args.job_name = "lm_" + args.tag + "_" + args.name + "_" + args.signal_key
+                args.job_name = "lm_" + args.tag + "_" + args.name
 
     args.job_name = "_".join(args.job_name.split("-")).lower()  # hyphens to underscores, lowercase
 
@@ -102,12 +102,9 @@ def main(args):
         years_str = " ".join(args.years)
         models_str = " ".join(args.models)
         model_dirs = " ".join([str(BDT_DIR / model_dir) for model_dir in args.model_dirs])
-        output_dir = (
-            str(BDT_DIR / args.tag / "compare_") + "-".join(args.models) + "_" + args.signal_key
-        )
+        output_dir = str(BDT_DIR / args.tag / "compare_") + "-".join(args.models)
         args_dict = {
             "job_name": "-".join(args.job_name.split("_")),  # change underscores to hyphens
-            "signal_key": args.signal_key,
             "output_dir": output_dir,
             "args": extra_args,
             "datapath": str(PVC / args.datapath),
@@ -116,12 +113,11 @@ def main(args):
             "model_dirs": model_dirs,
         }
     else:
-        # Training mode arguments (backward compatible)
+        # Training mode arguments
         args_dict = {
             "job_name": "-".join(args.job_name.split("_")),  # change underscores to hyphens
             "name": args.name,
-            "signal_key": args.signal_key,
-            "output_dir": str(BDT_DIR / args.tag / args.name) + "_" + args.signal_key,
+            "output_dir": str(BDT_DIR / args.tag / args.name),
             "args": extra_args,
             "datapath": str(PVC / args.datapath),
         }
@@ -169,12 +165,6 @@ if __name__ == "__main__":
     parser.add_argument("--tag", default="no_presel", help="tag for job / bdt", type=str)
     parser.add_argument(
         "--datapath", default="25Sep23AddVars_v12_private_signal", help="", type=str
-    )
-    parser.add_argument(
-        "--signal-key",
-        default="ggfbbtt",
-        help="signal key",
-        type=str,
     )
     parser.add_argument(
         "--samples",
