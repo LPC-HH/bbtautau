@@ -378,6 +378,7 @@ class Trainer:
         # Apply feature binning if configured
         bin_feats = self.bdt_config[self.modelname].get("bin_features", None)
         self._wps_used = {}
+        self._unbinned_glopart = None
         if bin_feats:
             # Resolve WPS: config 'wps_ttpart' overrides runtime userConfig.WPS_TTPART
             config_wps = self.bdt_config[self.modelname].get("wps_ttpart", None)
@@ -392,6 +393,9 @@ class Trainer:
 
             if bin_edges:
                 print(f"  Binning features: {list(bin_edges.keys())}")
+                cols_to_save = [f for f in bin_edges if f in X.columns]
+                if cols_to_save:
+                    self._unbinned_glopart = X[cols_to_save].copy()
                 skipped = [f for f in bin_feats if f not in bin_edges]
                 if skipped:
                     print(f"  Skipping {len(skipped)} features (no bin edges found): {skipped}")
@@ -533,6 +537,7 @@ class Trainer:
             "weights": weights,
             "weights_rescaled": weights_rescaled,
             "masks": masks,  # Dict of mask arrays (tt_mask, bb_mask, m_mask, e_mask)
+            "X_unbinned_glopart": self._unbinned_glopart,
             "fold_indices": [],  # List of (train_idx, val_idx) tuples
             "dtrain_rescaled": [],  # DMatrix for training (rescaled weights)
             "dval_rescaled": [],  # DMatrix for validation (rescaled weights)
@@ -926,6 +931,7 @@ class Trainer:
 
         # Get predictions and labels based on n_folds
         masks = self.fold_data.get("masks", {})
+        X_unbinned_full = self.fold_data.get("X_unbinned_glopart", None)
         if self.n_folds == 1:
             # Single fold: predict on validation set
             y_pred = self.boosters[0].predict(self.dval)
@@ -933,6 +939,7 @@ class Trainer:
             weights = self.dval.get_weight()
             val_idx = self.fold_data["fold_indices"][0][1]  # validation indices
             X_eval = self.fold_data["X"].iloc[val_idx]
+            X_unbinned_eval = X_unbinned_full.iloc[val_idx] if X_unbinned_full is not None else None
             # Filter masks to validation indices
             masks_val = {k: v[val_idx] if v is not None else None for k, v in masks.items()}
             title_suffix = ""
@@ -940,6 +947,7 @@ class Trainer:
             # Multi-fold: use out-of-fold predictions
             y_pred, weights, y_labels = self.get_oof_predictions()
             X_eval = self.fold_data["X"]
+            X_unbinned_eval = X_unbinned_full
             masks_val = masks  # Use all masks for OOF
             title_suffix = f" ({self.n_folds}-fold OOF)"
             print(f"\nComputing ROCs with {self.n_folds}-fold out-of-fold predictions...")
@@ -968,6 +976,13 @@ class Trainer:
                 print(f"Warning: required discriminant column '{disc_name}' not found in X")
         comparison_tagger_cols = sorted(set(comparison_tagger_cols))
 
+        # Map binned column names -> unbinned column names (only when binning was applied)
+        unbinned_col_map = {}
+        if X_unbinned_eval is not None:
+            for col in comparison_tagger_cols:
+                if col in X_unbinned_eval.columns:
+                    unbinned_col_map[col] = f"{col}_unbinned"
+
         # Create event filters based on labels
         event_filters = {name: y_labels == i for i, name in enumerate(self.sample_names)}
 
@@ -987,6 +1002,12 @@ class Trainer:
                     drop=True
                 )
                 events = pd.concat([feature_subset, events], axis=1)
+
+            # Add unbinned GloParT columns for fair ROC comparison
+            if unbinned_col_map and X_unbinned_eval is not None:
+                for orig_col, unbinned_col in unbinned_col_map.items():
+                    unbinned_vals = X_unbinned_eval.iloc[class_indices][orig_col]
+                    events[unbinned_col] = unbinned_vals.reset_index(drop=True).to_numpy()
 
             # Filter masks for this class
             class_masks = {
@@ -1014,12 +1035,18 @@ class Trainer:
         #########################################################
         # This part configures what background outputs to put in the taggers
 
-        # First do GloParT discriminants (use unbinned values for ROC analysis)
+        # GloParT discriminants: fill unbinned version when available (fair
+        # comparison against continuous BDT output), otherwise fall back to
+        # the (possibly binned) original column.
         for sig_tagger in signal_names:
             taukey = CHANNELS[sig_tagger[-2:]].tagger_label
-            disc_name = f"ttFatJetParTX{taukey}vsQCDTop"  # _unbinned"
+            disc_name = f"ttFatJetParTX{taukey}vsQCDTop"
+            disc_names_to_fill = [disc_name]
+            unbinned_name = unbinned_col_map.get(disc_name)
+            if unbinned_name:
+                disc_names_to_fill.append(unbinned_name)
             rocAnalyzer.fill_discriminants(
-                discriminant_names=[disc_name],
+                discriminant_names=disc_names_to_fill,
                 signal_name=sig_tagger,
                 background_names=background_names,
             )
@@ -1171,24 +1198,46 @@ class Trainer:
         print("=" * 70)
 
 
-def study_rescaling(output_dir: str = "rescaling_study", importance_only=False) -> dict:
+def study_rescaling(
+    years: list[str] = None,
+    modelname: str = "24feb26_weak_base",
+    output_dir: str | None = None,
+    data_path: str | None = None,
+    tt_preselection: bool = False,
+    importance_only: bool = False,
+) -> dict:
     """Study the impact of different rescaling rules on BDT performance.
-    For now give little flexibility, but is not meant to be customized too much.
+
+    Trains the same model architecture with every combination of signal scaling
+    and sample-balancing rules, then produces comparison tables.
 
     Args:
-        output_dir: Directory to save study results
+        years: Year(s) of data to use (defaults to all years)
+        modelname: Model config name (must exist in BDT_CONFIG)
+        output_dir: Root directory for the study; each (scale, balance)
+            combination gets its own subdirectory.
+        data_path: Path to input data directories
+        tt_preselection: Apply tt preselection
+        importance_only: Only load existing models and compute feature importance
 
     Returns:
         Dictionary containing study results for each rescaling rule
     """
-    # Create output directory
-    trainer = Trainer(years=["2022"], modelname="29July25_loweta_lowreg", output_dir=output_dir)
+    if years is None:
+        years = ["all"]
+
+    trainer = Trainer(
+        years=years,
+        modelname=modelname,
+        output_dir=output_dir,
+        data_path=data_path,
+        tt_preselection=tt_preselection,
+    )
 
     print(f"importance_only: {importance_only}")
     if not importance_only:
         trainer.load_data(force_reload=True)
 
-    # Define rescaling rules to study
     scale_rules = ["signal", "signal_3e-1", "signal_3"]
     balance_rules = [
         "bysample",
@@ -1200,11 +1249,8 @@ def study_rescaling(output_dir: str = "rescaling_study", importance_only=False) 
     ]
 
     results = {}
-
-    # Store the original study directory
     study_dir = trainer.output_dir
 
-    # Train models with different rescaling rules
     for scale_rule in scale_rules:
         if scale_rule not in results:
             results[scale_rule] = {}
@@ -1212,17 +1258,14 @@ def study_rescaling(output_dir: str = "rescaling_study", importance_only=False) 
             try:
                 print(f"\nTraining with scale_rule={scale_rule}, balance_rule={balance_rule}")
 
-                # Create subdirectory for this configuration
                 current_test_dir = study_dir / f"{scale_rule}_{balance_rule}"
-                current_test_dir.mkdir(exist_ok=True)
+                current_test_dir.mkdir(parents=True, exist_ok=True)
 
-                # Override output_dir to save in subdirectory
                 trainer.output_dir = current_test_dir
 
                 if importance_only:
                     trainer.load_model()
                 else:
-                    # Force reload data and train new model
                     trainer.prepare_training_set(
                         save_buffer=False, scale_rule=scale_rule, balance=balance_rule
                     )
@@ -1237,6 +1280,9 @@ def study_rescaling(output_dir: str = "rescaling_study", importance_only=False) 
                 print(
                     f"Error training with scale_rule={scale_rule}, balance_rule={balance_rule}: {e}"
                 )
+                import traceback
+
+                traceback.print_exc()
                 continue
 
     if not importance_only:
@@ -1722,7 +1768,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.study_rescaling:
-        study_rescaling(importance_only=args.importance_only)
+        study_rescaling(
+            years=args.years,
+            modelname=args.model,
+            output_dir=args.output_dir,
+            data_path=args.data_path,
+            tt_preselection=args.tt_preselection,
+            importance_only=args.importance_only,
+        )
         exit()
 
     if args.eval_bdt_preds:
