@@ -451,16 +451,18 @@ def load_samples(
         if n_jobs is None:
             n_jobs = min(max(1, 2 * len(samples)), os.cpu_count() or 1)
 
-        data_ = Parallel(n_jobs=n_jobs, backend="threading", prefer="threads")(
-            delayed(LoadedSample)(
-                sample=sample,
-                events=utils.load_sample(
-                    sample,
-                    year,
-                    paths,
-                    filters_dict[sample.get_type()] if filters_dict is not None else None,
-                ),
+        def _load_loaded_sample(sample: Sample) -> LoadedSample:
+            filters = filters_dict[sample.get_type()] if filters_dict is not None else None
+            events = utils.load_sample(
+                sample,
+                year,
+                paths,
+                filters,
             )
+            return LoadedSample(sample=sample, events=events)
+
+        data_ = Parallel(n_jobs=n_jobs, backend="threading", prefer="threads")(
+            delayed(_load_loaded_sample)(sample)
             for sample in samples.values()
             if sample.selector is not None  # this line is key to only load bbtt once
         )
