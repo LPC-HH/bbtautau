@@ -83,8 +83,11 @@ target/
 profile_default/
 ipython_config.py
 
-#BDT files
-# src/bbtautau/postprocessing/classifier/
+# BDT files
+src/bbtautau/postprocessing/classifier/
+
+# templates
+src/bbtautau/postprocessing/templates/
 
 # pyenv
 #   For a library or package, you might want to ignore these files since the code is
