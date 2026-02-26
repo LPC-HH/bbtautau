@@ -10,6 +10,7 @@ from string import Template
 kubernetes_dir = Path("/home/users/lumori/bbtautau/src/bbtautau/kubernetes")
 templ_file = kubernetes_dir / "jobs" / "template.yaml"
 templ_compare_file = kubernetes_dir / "jobs" / "template_compare.yaml"
+templ_rescaling_file = kubernetes_dir / "jobs" / "template_rescaling.yaml"
 
 PVC = Path("/bbtautauvol")
 BDT_DIR = PVC / "bdt"
@@ -48,8 +49,17 @@ def main(args):
     else:
         if args.job_name == "":
             if args.compare_models:
-                models_key = "-".join(args.models) if args.models else "models"
+                if args.compare_tag:
+                    models_key = args.compare_tag
+                elif args.models:
+                    models_key = "-".join(args.models)
+                elif args.model_folders:
+                    models_key = "-".join(Path(f).name for f in args.model_folders)
+                else:
+                    models_key = "models"
                 args.job_name = "cmp_" + args.tag + "_" + models_key
+            elif args.study_rescaling:
+                args.job_name = "lm_" + args.tag + "_rescaling_" + args.name
             else:
                 args.job_name = "lm_" + args.tag + "_" + args.name
 
@@ -74,7 +84,12 @@ def main(args):
                 sys.exit()
 
     # Choose appropriate template based on mode
-    template_path = templ_compare_file if args.compare_models else templ_file
+    if args.compare_models:
+        template_path = templ_compare_file
+    elif args.study_rescaling:
+        template_path = templ_rescaling_file
+    else:
+        template_path = templ_file
 
     with Path.open(template_path) as f:
         lines = Template(f.read())
@@ -88,29 +103,51 @@ def main(args):
         extra_args += (" " if extra_args else "") + "--tt-preselection"
 
     if args.compare_models:
-        # Validation for comparison mode
-        if not args.models or not args.model_dirs:
-            raise ValueError(
-                "--compare-models requires both --models and --model-dirs to be specified"
-            )
-        if len(args.models) != len(args.model_dirs):
-            raise ValueError("--models and --model-dirs must have the same number of arguments")
-        if len(args.models) < 2:
-            raise ValueError("--compare-models requires at least two models to compare")
+        has_explicit = args.models and args.model_dirs
+        has_folders = args.model_folders
 
-        # Comparison mode arguments
+        if not has_explicit and not has_folders:
+            raise ValueError(
+                "--compare-models requires --models/--model-dirs or --model-folders (or both)"
+            )
+        if has_explicit and len(args.models) != len(args.model_dirs):
+            raise ValueError("--models and --model-dirs must have the same number of arguments")
+
+        # Build the compare_args string for the template
+        compare_parts: list[str] = []
+        if has_explicit:
+            models_str = " ".join(args.models)
+            model_dirs_str = " ".join([str(BDT_DIR / d) for d in args.model_dirs])
+            compare_parts.append(f"--models {models_str} --model-dirs {model_dirs_str}")
+        if has_folders:
+            folders_str = " ".join([str(BDT_DIR / f) for f in args.model_folders])
+            compare_parts.append(f"--model-folders {folders_str}")
+
+        compare_tag = args.compare_tag
+        if not compare_tag:
+            if has_explicit:
+                compare_tag = "-".join(args.models)
+            else:
+                compare_tag = "-".join(Path(f).name for f in args.model_folders)
+        output_dir = str(BDT_DIR / args.tag / f"compare_{compare_tag}")
+
         years_str = " ".join(args.years)
-        models_str = " ".join(args.models)
-        model_dirs = " ".join([str(BDT_DIR / model_dir) for model_dir in args.model_dirs])
-        output_dir = str(BDT_DIR / args.tag / "compare_") + "-".join(args.models)
         args_dict = {
-            "job_name": "-".join(args.job_name.split("_")),  # change underscores to hyphens
+            "job_name": "-".join(args.job_name.split("_")),
             "output_dir": output_dir,
             "args": extra_args,
             "datapath": str(PVC / args.datapath),
             "years": years_str,
-            "models": models_str,
-            "model_dirs": model_dirs,
+            "compare_args": " ".join(compare_parts),
+        }
+    elif args.study_rescaling:
+        # Rescaling study mode: same template vars as training
+        args_dict = {
+            "job_name": "-".join(args.job_name.split("_")),
+            "name": args.name,
+            "output_dir": str(BDT_DIR / args.tag / f"rescaling_{args.name}"),
+            "args": extra_args,
+            "datapath": str(PVC / args.datapath),
         }
     else:
         # Training mode arguments
@@ -142,6 +179,13 @@ if __name__ == "__main__":
         action=BooleanOptionalAction,
     )
     parser.add_argument(
+        "--study-rescaling",
+        default=False,
+        help="use rescaling study mode to sweep scale/balance rules",
+        type=bool,
+        action=BooleanOptionalAction,
+    )
+    parser.add_argument(
         "--models",
         nargs="+",
         default=None,
@@ -153,6 +197,19 @@ if __name__ == "__main__":
         nargs="+",
         default=None,
         help="list of model directories to compare when --compare-models is set",
+        type=str,
+    )
+    parser.add_argument(
+        "--model-folders",
+        nargs="+",
+        default=None,
+        help="parent directories to scan for trained models (alternative to --models/--model-dirs)",
+        type=str,
+    )
+    parser.add_argument(
+        "--compare-tag",
+        default=None,
+        help="tag for the comparison output directory (defaults to model/folder names)",
         type=str,
     )
     parser.add_argument(

@@ -19,7 +19,7 @@ spec:
             pip install -e /opt/repo/bbtautau &&
             pip install -e /opt/repo/bbtautau/boostedhh &&
             python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --compare-models
-            --models $models --years $years --model-dirs $model_dirs
+            $compare_args --years $years
             --output-dir $output_dir --data-path $datapath/ $args | tee $output_dir/log.txt
         volumeMounts:
         - mountPath: /bbtautauvol
