@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 import os
 import re
@@ -524,7 +525,11 @@ class Trainer:
         return weights_rescaled
 
     def prepare_training_set(
-        self, save_buffer=False, scale_rule="signal", balance="bysample_clip_1to10"
+        self,
+        save_buffer=False,
+        scale_rule="signal",
+        balance="bysample_clip_1to10",
+        prediction_only=False,
     ):
         """Prepare features and labels for training with k-fold cross-validation.
 
@@ -538,6 +543,8 @@ class Trainer:
             save_buffer: Whether to save DMatrix buffer files for quicker loading
             scale_rule: Rule for global scaling weights ('signal', 'signal_3e-1', 'signal_3')
             balance: Rule for balancing samples
+            prediction_only: If True, only create validation DMatrices (dval) and skip
+                training DMatrices to save memory. Used by compare_models.
         """
         if self.loaded_dmatrix:
             return
@@ -592,32 +599,48 @@ class Trainer:
         for train_idx, val_idx in fold_splits:
             self.fold_data["fold_indices"].append((train_idx, val_idx))
 
-            # DMatrix with rescaled weights (for training)
-            dtrain_rescaled = xgb.DMatrix(
-                X.iloc[train_idx], label=y[train_idx], weight=weights_rescaled[train_idx], nthread=8
-            )
-            dval_rescaled = xgb.DMatrix(
-                X.iloc[val_idx], label=y[val_idx], weight=weights_rescaled[val_idx], nthread=8
-            )
-            self.fold_data["dtrain_rescaled"].append(dtrain_rescaled)
-            self.fold_data["dval_rescaled"].append(dval_rescaled)
+            if not prediction_only:
+                # DMatrix with rescaled weights (for training)
+                dtrain_rescaled = xgb.DMatrix(
+                    X.iloc[train_idx],
+                    label=y[train_idx],
+                    weight=weights_rescaled[train_idx],
+                    nthread=8,
+                )
+                dval_rescaled = xgb.DMatrix(
+                    X.iloc[val_idx], label=y[val_idx], weight=weights_rescaled[val_idx], nthread=8
+                )
+                self.fold_data["dtrain_rescaled"].append(dtrain_rescaled)
+                self.fold_data["dval_rescaled"].append(dval_rescaled)
 
-            # DMatrix with original weights (for ROC computation)
-            dtrain = xgb.DMatrix(
-                X.iloc[train_idx], label=y[train_idx], weight=weights[train_idx], nthread=8
-            )
+                # DMatrix with original weights (for training-side ROC)
+                dtrain = xgb.DMatrix(
+                    X.iloc[train_idx], label=y[train_idx], weight=weights[train_idx], nthread=8
+                )
+                self.fold_data["dtrain"].append(dtrain)
+
+            # Validation DMatrix (always needed)
             dval = xgb.DMatrix(
                 X.iloc[val_idx], label=y[val_idx], weight=weights[val_idx], nthread=8
             )
-            self.fold_data["dtrain"].append(dtrain)
             self.fold_data["dval"].append(dval)
 
         # For backward compatibility, also set single-fold attributes
         if self.n_folds == 1:
-            self.dtrain_rescaled = self.fold_data["dtrain_rescaled"][0]
-            self.dval_rescaled = self.fold_data["dval_rescaled"][0]
-            self.dtrain = self.fold_data["dtrain"][0]
+            if not prediction_only:
+                self.dtrain_rescaled = self.fold_data["dtrain_rescaled"][0]
+                self.dval_rescaled = self.fold_data["dval_rescaled"][0]
+                self.dtrain = self.fold_data["dtrain"][0]
             self.dval = self.fold_data["dval"][0]
+
+        if prediction_only:
+            # Free arrays that DMatrix has already internalized
+            self.fold_data["X"] = None
+            self.fold_data["weights_rescaled"] = None
+            self.fold_data["masks"] = None
+            self.fold_data["X_unbinned_glopart"] = None
+            del X, weights_rescaled, masks
+            return
 
         # Save fold indices (useful for k-fold inference on MC)
         if self.n_folds > 1:
@@ -1513,7 +1536,11 @@ def eval_bdt_preds(
     return evals
 
 
-_NON_MODEL_JSON = {"evals_result", "evals_results", "comparison_index", "comparison_metrics"}
+_NON_MODEL_JSON = {
+    "evals_result",
+    "wps_ttpars",
+    "fold_indices",
+}
 
 
 def _discover_models_in_folder(folder: str | Path) -> list[tuple[str, str]]:
@@ -1602,65 +1629,67 @@ def compare_models(
     base_out = Path(output_dir) if output_dir else Path("comparison")
     _ensure_dir(base_out)
 
-    # Load data once, share across all trainers
-    base_trainer = Trainer(
+    # Load data once into a reference trainer; share events_dict with others
+    ref_trainer = Trainer(
         years=list(years),
         modelname=models[0],
         output_dir=model_dirs[0],
         data_path=data_path,
         tt_preselection=tt_preselection,
     )
-    base_trainer.load_data(force_reload=True)
+    ref_trainer.load_data(force_reload=True)
+    shared_events_dict = ref_trainer.events_dict
+    shared_samples = ref_trainer.samples
+    ref_sample_names = ref_trainer.sample_names
+    ref_years = ref_trainer.years
 
-    # Build all trainers, sharing loaded data
-    trainers: dict[str, Trainer] = {}
+    # Process models one at a time to keep memory bounded.
+    labels: np.ndarray | None = None
+    weights: np.ndarray | None = None
+    preds_dict: dict[str, LoadedSample] = {}
+    kfold_models: list[str] = []
+
     for model, model_dir in zip(models, model_dirs):
-        if model == models[0]:
-            tr = base_trainer
-        else:
-            tr = Trainer(
-                years=list(years),
-                modelname=model,
-                output_dir=model_dir,
-                data_path=data_path,
-                tt_preselection=tt_preselection,
-            )
-            tr.events_dict = base_trainer.events_dict
-            tr.samples = base_trainer.samples
-
-        tr.prepare_training_set(save_buffer=False)
+        print(f"\n{'='*60}\nProcessing model: {model}\n{'='*60}")
+        tr = Trainer(
+            years=list(years),
+            modelname=model,
+            output_dir=model_dir,
+            data_path=data_path,
+            tt_preselection=tt_preselection,
+        )
+        tr.events_dict = shared_events_dict
+        tr.samples = shared_samples
+        tr.prepare_training_set(save_buffer=False, prediction_only=True)
         tr.load_model()
-        trainers[model] = tr
 
-    # Validate all models have the same samples
-    ref_sample_names = base_trainer.sample_names
-    for model, tr in trainers.items():
         if tr.sample_names != ref_sample_names:
             raise ValueError(
                 f"Model '{model}' has sample order {tr.sample_names}, "
                 f"expected {ref_sample_names}"
             )
 
-    # Get labels and weights from reference (same for all since data is shared)
-    labels = base_trainer.dval.get_label()
-    weights = base_trainer.dval.get_weight()
+        if tr.use_kfold:
+            kfold_models.append(model)
 
-    # Initialize prediction storage with weights
-    preds_dict: dict[str, LoadedSample] = {}
-    for class_idx, class_name in enumerate(ref_sample_names):
-        cls_mask = labels == class_idx
-        preds_dict[class_name] = LoadedSample(
-            sample=base_trainer.samples[class_name],
-            events={"finalWeight": weights[cls_mask]},
-        )
+        dval = tr.dval if hasattr(tr, "dval") else tr.fold_data["dval"][0]
 
-    # Collect predictions from each model
-    # Note: We predict directly on tr.dval (already a DMatrix from prepare_training_set).
-    for model, tr in trainers.items():
+        # Extract labels/weights from the first model (same data, same split seed)
+        if labels is None:
+            labels = dval.get_label()
+            weights = dval.get_weight()
+            for class_idx, class_name in enumerate(ref_sample_names):
+                cls_mask = labels == class_idx
+                preds_dict[class_name] = LoadedSample(
+                    sample=shared_samples[class_name],
+                    events={"finalWeight": weights[cls_mask]},
+                )
+
+        # Predict
         if len(tr.boosters) > 1:
-            y_pred = np.mean([bst.predict(tr.dval) for bst in tr.boosters], axis=0)
+            y_pred = np.mean([bst.predict(dval) for bst in tr.boosters], axis=0)
         else:
-            y_pred = tr.boosters[0].predict(tr.dval)
+            y_pred = tr.boosters[0].predict(dval)
 
         if y_pred.ndim != 2 or y_pred.shape[1] != len(ref_sample_names):
             raise ValueError(
@@ -1668,22 +1697,30 @@ def compare_models(
                 f"{len(ref_sample_names)} classes"
             )
 
-        # Store predictions for each class
         for class_idx, class_name in enumerate(ref_sample_names):
             mask = labels == class_idx
             preds_dict[class_name].events[f"{model}::{class_name}"] = y_pred[mask, class_idx]
+
+        # Free this trainer's DMatrices, boosters, and fold_data before the next model
+        del tr
+        gc.collect()
+
+    # events_dict no longer needed — predictions are stored in preds_dict
+    ref_trainer.events_dict = {y: {} for y in ref_years}
+    del shared_events_dict
+    gc.collect()
 
     # Convert to DataFrames
     for class_name in preds_dict:
         preds_dict[class_name].events = pd.DataFrame(preds_dict[class_name].events)
 
     # Separate signals and backgrounds
-    signal_names = [n for n in ref_sample_names if base_trainer.samples[n].isSignal]
-    background_names = [n for n in ref_sample_names if not base_trainer.samples[n].isSignal]
+    signal_names = [n for n in ref_sample_names if shared_samples[n].isSignal]
+    background_names = [n for n in ref_sample_names if not shared_samples[n].isSignal]
 
     # Set up ROC analyzer
     roc_analyzer = ROCAnalyzer(
-        years=base_trainer.years,
+        years=ref_years,
         signals={s: preds_dict[s] for s in signal_names},
         backgrounds={b: preds_dict[b] for b in background_names},
     )
@@ -1719,7 +1756,6 @@ def compare_models(
         for disc in roc_analyzer.discriminants.values():
             if disc.signal_name != sig_name:
                 continue
-            # Extract model name from discriminant name (format: "{model}_{signal}")
             model_name = disc.name.rsplit("_", 1)[0]
             if model_name in models and hasattr(disc, "get_metrics"):
                 metrics_by_model[model_name][sig_name] = disc.get_metrics(as_dict=True)
@@ -1739,11 +1775,11 @@ def compare_models(
         json.dump(
             {
                 "models": models,
-                "model_dirs": model_dirs,
-                "years": years,
+                "model_dirs": [str(d) for d in model_dirs],
+                "years": list(years),
                 "signals": signal_names,
                 "backgrounds": background_names,
-                "kfold_models": [m for m, tr in trainers.items() if tr.use_kfold],
+                "kfold_models": kfold_models,
             },
             f,
             indent=2,
