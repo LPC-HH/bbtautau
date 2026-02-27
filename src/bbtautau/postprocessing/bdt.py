@@ -1660,6 +1660,7 @@ def compare_models(
         )
         tr.events_dict = shared_events_dict
         tr.samples = shared_samples
+        tr.sample_names = ref_sample_names
         tr.prepare_training_set(save_buffer=False, prediction_only=True)
         tr.load_model()
 
