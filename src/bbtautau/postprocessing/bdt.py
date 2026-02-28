@@ -1538,7 +1538,7 @@ def eval_bdt_preds(
 
 _NON_MODEL_JSON = {
     "evals_result",
-    "wps_ttpars",
+    "wps_ttpart",
     "fold_indices",
 }
 
@@ -1573,10 +1573,64 @@ def _discover_models_in_folder(folder: str | Path) -> list[tuple[str, str]]:
     return discovered
 
 
+def _resolve_model_inputs(inputs: list[str | Path]) -> list[tuple[str, str]]:
+    """Resolve a mixed list of paths into ``(model_name, model_dir)`` pairs.
+
+    Each input can be:
+
+    - A path to a ``.json`` model file (absolute or relative): the model name
+      is derived from the file stem (``_fold{i}`` suffixes are stripped) and
+      the parent directory is used as *model_dir*.
+    - A directory path: scanned for model JSON files via
+      :func:`_discover_models_in_folder`.
+
+    Duplicate ``(model_name, model_dir)`` pairs are silently dropped.
+    Each discovered model name is validated against :data:`BDT_CONFIG`; a
+    ``ValueError`` is raised if no matching config file exists.
+
+    Returns:
+        Deduplicated list of ``(model_name, model_dir)`` tuples.
+    """
+    result: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(model_name: str, model_dir: str, source: str) -> None:
+        key = (model_name, model_dir)
+        if key in seen:
+            return
+        if model_name not in BDT_CONFIG:
+            raise ValueError(
+                f"Model '{model_name}' (found via {source}) has no BDT config. "
+                f"Expected: bdt_configs/config_{model_name}.py"
+            )
+        seen.add(key)
+        result.append(key)
+
+    for item in inputs:
+        p = Path(item)
+        if p.suffix == ".json":
+            if not p.is_file():
+                raise ValueError(f"Model file not found: {p}")
+            model_name = re.sub(r"_fold\d+$", "", p.stem)
+            _add(model_name, str(p.parent), str(p))
+        elif p.is_dir():
+            discovered = _discover_models_in_folder(p)
+            if not discovered:
+                raise ValueError(f"No models found in directory: {p}")
+            print(
+                f"Discovered {len(discovered)} model(s) in {p}: "
+                + ", ".join(n for n, _ in discovered)
+            )
+            for name, mdir in discovered:
+                _add(name, mdir, str(p))
+        else:
+            raise ValueError(f"Input '{item}' is neither a .json file nor a directory")
+
+    return result
+
+
 def compare_models(
-    models: list[str] | None = None,
-    model_dirs: list[str] | None = None,
-    model_folders: list[str] | None = None,
+    inputs: list[str | Path],
     years: list[str] = ("all",),
     data_path: str | None = None,
     tt_preselection: bool = False,
@@ -1586,15 +1640,16 @@ def compare_models(
 
     For k-fold models, uses averaged predictions across all folds.
 
-    Models can be specified explicitly via *models*/*model_dirs*, discovered
-    automatically from *model_folders*, or both (results are merged).
+    Each entry in *inputs* can be:
+
+    - An absolute or relative path to a ``.json`` model file.
+    - A directory path, which is scanned for model JSON files.
+
+    Mixed lists are supported. All discovered model names are validated against
+    :data:`BDT_CONFIG` before any data is loaded.
 
     Args:
-        models: List of model names (configs are read from bdt_config).
-        model_dirs: List of output directories corresponding to each model.
-        model_folders: List of parent directories to scan for trained models.
-            Each folder (and its immediate subdirectories) is searched for
-            XGBoost model JSON files.
+        inputs: Model JSON files and/or directories to scan.
         years: Years to include in the comparison.
         data_path: Optional path to data directory.
         tt_preselection: Whether to apply tt preselection.
@@ -1603,26 +1658,10 @@ def compare_models(
     Returns:
         Nested dict: metrics_by_model[model][signal] -> metrics_dict
     """
-    all_models: list[str] = list(models) if models else []
-    all_model_dirs: list[str] = list(model_dirs) if model_dirs else []
+    resolved = _resolve_model_inputs(inputs)
+    models = [m for m, _ in resolved]
+    model_dirs = [d for _, d in resolved]
 
-    if model_folders:
-        for folder in model_folders:
-            discovered = _discover_models_in_folder(folder)
-            if not discovered:
-                raise ValueError(f"No models found in folder: {folder}")
-            for name, mdir in discovered:
-                all_models.append(name)
-                all_model_dirs.append(mdir)
-            print(
-                f"Discovered {len(discovered)} model(s) in {folder}: "
-                + ", ".join(n for n, _ in discovered)
-            )
-
-    models, model_dirs = all_models, all_model_dirs
-
-    if len(models) != len(model_dirs):
-        raise ValueError(f"models ({len(models)}) and model_dirs ({len(model_dirs)}) must match")
     if len(models) < 2:
         raise ValueError("Need at least 2 models to compare")
 
@@ -1848,22 +1887,14 @@ if __name__ == "__main__":
         help="Compare multiple trained models with ROC overlays and CSV metrics",
     )
     parser.add_argument(
-        "--models",
+        "--inputs",
         nargs="+",
         default=None,
-        help="List of model names to compare when --compare-models is set",
-    )
-    parser.add_argument(
-        "--model-dirs",
-        nargs="+",
-        default=None,
-        help="List of model directories to compare when --compare-models is set",
-    )
-    parser.add_argument(
-        "--model-folders",
-        nargs="+",
-        default=None,
-        help="Parent directories to scan for trained models (alternative to --models/--model-dirs)",
+        help=(
+            "Model JSON files and/or directories to compare. "
+            "Each entry can be a path to a .json model file or a directory "
+            "that will be scanned for model files."
+        ),
     )
     parser.add_argument(
         "--samples", nargs="+", default=None, help="Samples to evaluate BDT predictions on"
@@ -1921,56 +1952,19 @@ if __name__ == "__main__":
         exit()
 
     if args.compare_models:
-        has_explicit = args.models and args.model_dirs
-        has_folders = args.model_folders
+        if not args.inputs:
+            parser.error("--compare-models requires --inputs")
 
-        if not has_explicit and not has_folders:
-            parser.error(
-                "--compare-models requires --models/--model-dirs or --model-folders (or both)"
-            )
-
-        # Validate and resolve explicitly listed models
-        resolved_models: list[str] | None = None
-        resolved_model_dirs: list[str] | None = None
-        if has_explicit:
-            if len(args.models) != len(args.model_dirs):
-                parser.error("--models and --model-dirs must have the same length")
-            resolved_models = []
-            resolved_model_dirs = []
-            for model, model_dir_str in zip(args.models, args.model_dirs):
-                model_dir_path = Path(model_dir_str)
-                resolved_dir = (
-                    model_dir_path
-                    if model_dir_path.is_absolute()
-                    else MODEL_DIR.parent / model_dir_str
-                )
-                if not resolved_dir.exists():
-                    parser.error(f"Model directory does not exist: {resolved_dir}")
-                if not resolved_dir.is_dir():
-                    parser.error(f"Model directory is not a directory: {resolved_dir}")
-                model_file = resolved_dir / f"{model}.json"
-                if not model_file.is_file():
-                    parser.error(f"Model file not found for '{model}': {model_file}")
-                resolved_models.append(model)
-                resolved_model_dirs.append(str(resolved_dir))
-
-        # Resolve model-folder paths
-        resolved_folders: list[str] | None = None
-        if has_folders:
-            resolved_folders = []
-            for folder_str in args.model_folders:
-                folder_path = Path(folder_str)
-                resolved = (
-                    folder_path if folder_path.is_absolute() else MODEL_DIR.parent / folder_str
-                )
-                if not resolved.is_dir():
-                    parser.error(f"Model folder does not exist: {resolved}")
-                resolved_folders.append(str(resolved))
+        # Resolve relative paths against MODEL_DIR.parent
+        resolved_inputs = []
+        for item in args.inputs:
+            p = Path(item)
+            if not p.is_absolute():
+                p = MODEL_DIR.parent / p
+            resolved_inputs.append(str(p))
 
         compare_models(
-            models=resolved_models,
-            model_dirs=resolved_model_dirs,
-            model_folders=resolved_folders,
+            inputs=resolved_inputs,
             years=args.years,
             data_path=args.data_path,
             tt_preselection=args.tt_preselection,
