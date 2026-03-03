@@ -1659,11 +1659,21 @@ def compare_models(
         Nested dict: metrics_by_model[model][signal] -> metrics_dict
     """
     resolved = _resolve_model_inputs(inputs)
-    models = [m for m, _ in resolved]
+    model_names = [m for m, _ in resolved]
     model_dirs = [d for _, d in resolved]
 
-    if len(models) < 2:
+    labels: list[str] = []
+    for name, mdir in resolved:
+        tag = Path(mdir).name
+        labels.append(f"{tag}::{name}")
+
+    if len(labels) < 2:
         raise ValueError("Need at least 2 models to compare")
+    if len(set(labels)) != len(labels):
+        raise ValueError(
+            f"Could not derive unique labels for models: {labels}. "
+            "Ensure model directories have distinct names."
+        )
 
     base_out = Path(output_dir) if output_dir else Path("comparison")
     _ensure_dir(base_out)
@@ -1671,7 +1681,7 @@ def compare_models(
     # Load data once into a reference trainer; share events_dict with others
     ref_trainer = Trainer(
         years=list(years),
-        modelname=models[0],
+        modelname=model_names[0],
         output_dir=model_dirs[0],
         data_path=data_path,
         tt_preselection=tt_preselection,
@@ -1683,16 +1693,15 @@ def compare_models(
     ref_years = ref_trainer.years
 
     # Process models one at a time to keep memory bounded.
-    labels: np.ndarray | None = None
     weights: np.ndarray | None = None
     preds_dict: dict[str, LoadedSample] = {}
     kfold_models: list[str] = []
-
-    for model, model_dir in zip(models, model_dirs):
-        print(f"\n{'='*60}\nProcessing model: {model}\n{'='*60}")
+    y_labels: np.ndarray | None = None
+    for label, model_name, model_dir in zip(labels, model_names, model_dirs):
+        print(f"\n{'='*60}\nProcessing model: {label}\n{'='*60}")
         tr = Trainer(
             years=list(years),
-            modelname=model,
+            modelname=model_name,
             output_dir=model_dir,
             data_path=data_path,
             tt_preselection=tt_preselection,
@@ -1705,21 +1714,21 @@ def compare_models(
 
         if tr.sample_names != ref_sample_names:
             raise ValueError(
-                f"Model '{model}' has sample order {tr.sample_names}, "
+                f"Model '{label}' has sample order {tr.sample_names}, "
                 f"expected {ref_sample_names}"
             )
 
         if tr.use_kfold:
-            kfold_models.append(model)
+            kfold_models.append(label)
 
         dval = tr.dval if hasattr(tr, "dval") else tr.fold_data["dval"][0]
 
         # Extract labels/weights from the first model (same data, same split seed)
-        if labels is None:
-            labels = dval.get_label()
+        if y_labels is None:
+            y_labels = dval.get_label()
             weights = dval.get_weight()
             for class_idx, class_name in enumerate(ref_sample_names):
-                cls_mask = labels == class_idx
+                cls_mask = y_labels == class_idx
                 preds_dict[class_name] = LoadedSample(
                     sample=shared_samples[class_name],
                     events={"finalWeight": weights[cls_mask]},
@@ -1733,14 +1742,14 @@ def compare_models(
 
         if y_pred.ndim != 2 or y_pred.shape[1] != len(ref_sample_names):
             raise ValueError(
-                f"Model '{model}' output shape {y_pred.shape} incompatible with "
+                f"Model '{label}' output shape {y_pred.shape} incompatible with "
                 f"{len(ref_sample_names)} classes"
             )
 
         for class_idx, class_name in enumerate(ref_sample_names):
-            mask = labels == class_idx
+            mask = y_labels == class_idx
             for pred_idx, pred_name in enumerate(ref_sample_names):
-                preds_dict[class_name].events[f"{model}::{pred_name}"] = y_pred[mask, pred_idx]
+                preds_dict[class_name].events[f"{label}::{pred_name}"] = y_pred[mask, pred_idx]
 
         # Free this trainer's DMatrices, boosters, and fold_data before the next model
         del tr
@@ -1766,21 +1775,22 @@ def compare_models(
         backgrounds={b: preds_dict[b] for b in background_names},
     )
 
-    # Register discriminants for each (model, signal) pair
+    # Register discriminants for each (label, signal) pair
     for sig_name in signal_names:
-        for model in models:
+        for label in labels:
             roc_analyzer.process_discriminant(
                 signal_name=sig_name,
                 background_names=background_names,
-                signal_tagger=f"{model}::{sig_name}",
-                background_taggers=[f"{model}::{bkg}" for bkg in background_names],
-                custom_name=f"{model}_{sig_name}",
+                signal_tagger=f"{label}::{sig_name}",
+                background_taggers=[f"{label}::{bkg}" for bkg in background_names],
+                custom_name=f"{label}_{sig_name}",
             )
 
     roc_analyzer.compute_rocs(compute_metrics=True)
 
     # Plot ROCs and extract metrics
-    metrics_by_model: dict[str, dict[str, dict[str, float]]] = {m: {} for m in models}
+    label_set = set(labels)
+    metrics_by_model: dict[str, dict[str, dict[str, float]]] = {lab: {} for lab in labels}
     roc_dir = _ensure_dir(base_out / "rocs")
 
     for sig_name in signal_names:
@@ -1797,9 +1807,9 @@ def compare_models(
         for disc in roc_analyzer.discriminants.values():
             if disc.signal_name != sig_name:
                 continue
-            model_name = disc.name.rsplit("_", 1)[0]
-            if model_name in models and hasattr(disc, "get_metrics"):
-                metrics_by_model[model_name][sig_name] = disc.get_metrics(as_dict=True)
+            disc_label = disc.name.rsplit("_", 1)[0]
+            if disc_label in label_set and hasattr(disc, "get_metrics"):
+                metrics_by_model[disc_label][sig_name] = disc.get_metrics(as_dict=True)
 
     # Save metrics CSV
     metric_keys = ["roc_auc", "pr_auc", "signal_eff", "precision", "f1_score", "threshold"]
@@ -1815,7 +1825,8 @@ def compare_models(
     with (base_out / "comparison_index.json").open("w") as f:
         json.dump(
             {
-                "models": models,
+                "labels": labels,
+                "model_names": model_names,
                 "model_dirs": [str(d) for d in model_dirs],
                 "years": list(years),
                 "signals": signal_names,
