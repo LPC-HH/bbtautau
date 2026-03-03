@@ -1573,8 +1573,8 @@ def _discover_models_in_folder(folder: str | Path) -> list[tuple[str, str]]:
     return discovered
 
 
-def _resolve_model_inputs(inputs: list[str | Path]) -> list[tuple[str, str]]:
-    """Resolve a mixed list of paths into ``(model_name, model_dir)`` pairs.
+def _resolve_model_inputs(inputs: list[str | Path]) -> list[tuple[str, str, str]]:
+    """Resolve a mixed list of paths into ``(model_name, model_dir, tag)`` triples.
 
     Each input can be:
 
@@ -1589,12 +1589,12 @@ def _resolve_model_inputs(inputs: list[str | Path]) -> list[tuple[str, str]]:
     ``ValueError`` is raised if no matching config file exists.
 
     Returns:
-        Deduplicated list of ``(model_name, model_dir)`` tuples.
+        Deduplicated list of ``(model_name, model_dir, tag)`` tuples.
     """
-    result: list[tuple[str, str]] = []
+    result: list[tuple[str, str, str]] = []
     seen: set[tuple[str, str]] = set()
 
-    def _add(model_name: str, model_dir: str, source: str) -> None:
+    def _add(model_name: str, model_dir: str, tag: str, source: str) -> None:
         key = (model_name, model_dir)
         if key in seen:
             return
@@ -1604,7 +1604,7 @@ def _resolve_model_inputs(inputs: list[str | Path]) -> list[tuple[str, str]]:
                 f"Expected: bdt_configs/config_{model_name}.py"
             )
         seen.add(key)
-        result.append(key)
+        result.append((model_name, model_dir, tag))
 
     for item in inputs:
         p = Path(item)
@@ -1612,8 +1612,12 @@ def _resolve_model_inputs(inputs: list[str | Path]) -> list[tuple[str, str]]:
             if not p.is_file():
                 raise ValueError(f"Model file not found: {p}")
             model_name = re.sub(r"_fold\d+$", "", p.stem)
-            _add(model_name, str(p.parent), str(p))
+            tag = p.parent.name
+            if tag == model_name:
+                tag = p.parent.parent.name
+            _add(model_name, str(p.parent), tag, str(p))
         elif p.is_dir():
+            tag = p.name
             discovered = _discover_models_in_folder(p)
             if not discovered:
                 raise ValueError(f"No models found in directory: {p}")
@@ -1622,7 +1626,7 @@ def _resolve_model_inputs(inputs: list[str | Path]) -> list[tuple[str, str]]:
                 + ", ".join(n for n, _ in discovered)
             )
             for name, mdir in discovered:
-                _add(name, mdir, str(p))
+                _add(name, mdir, tag, str(p))
         else:
             raise ValueError(f"Input '{item}' is neither a .json file nor a directory")
 
@@ -1659,13 +1663,9 @@ def compare_models(
         Nested dict: metrics_by_model[model][signal] -> metrics_dict
     """
     resolved = _resolve_model_inputs(inputs)
-    model_names = [m for m, _ in resolved]
-    model_dirs = [d for _, d in resolved]
-
-    labels: list[str] = []
-    for name, mdir in resolved:
-        tag = Path(mdir).name
-        labels.append(f"{tag}::{name}")
+    model_names = [m for m, _, _ in resolved]
+    model_dirs = [d for _, d, _ in resolved]
+    labels = [f"{tag}::{name}" for name, _, tag in resolved]
 
     if len(labels) < 2:
         raise ValueError("Need at least 2 models to compare")
