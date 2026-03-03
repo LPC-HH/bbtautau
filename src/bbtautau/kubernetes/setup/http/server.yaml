@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bbtautauserverdep
+  labels:
+    run: bbtautauserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      run: bbtautauserver
+  template:
+    metadata:
+      labels:
+        run: bbtautauserver
+    spec:
+      initContainers:
+      - name: init-get-theme
+        image: alpine:3.19
+        workingDir: /bbtautauvol
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -e
+            apk add --no-cache curl unzip
+            if [ ! -d Nginx-Fancyindex-Theme-dark ]; then
+              curl -L -o master.zip https://github.com/Naereen/Nginx-Fancyindex-Theme/archive/refs/heads/master.zip
+              unzip master.zip
+              mv Nginx-Fancyindex-Theme-master/Nginx-Fancyindex-Theme-dark ./
+              rm -rf Nginx-Fancyindex-Theme-master master.zip
+            fi
+        volumeMounts:
+          - mountPath: /bbtautauvol
+            name: bbtautauvol
+      containers:
+      - name: bbtautauserverdep
+        image: ondh/nginx-fancyindex
+        resources:
+           limits:
+             memory: 200Mi
+             cpu: "1"
+           requests:
+             memory: 50Mi
+             cpu: 50m
+        workingDir: /bbtautauvol
+        volumeMounts:
+        - mountPath: /bbtautauvol
+          name: bbtautauvol
+        - name: bbtautau-nginx-conf
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+          readOnly: true
+      volumes:
+      - name: bbtautauvol
+        persistentVolumeClaim:
+          claimName: bbtautauvol
+      - name: bbtautau-nginx-conf
+        configMap:
+          name: bbtautau-nginx-conf
+          items:
+            - key: nginx.conf
+              path: nginx.conf
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: topology.kubernetes.io/region
+                operator: In
+                values:
+                - us-west
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                  - suncave-17
