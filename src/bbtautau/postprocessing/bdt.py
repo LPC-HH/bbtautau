@@ -1739,7 +1739,8 @@ def compare_models(
 
         for class_idx, class_name in enumerate(ref_sample_names):
             mask = labels == class_idx
-            preds_dict[class_name].events[f"{model}::{class_name}"] = y_pred[mask, class_idx]
+            for pred_idx, pred_name in enumerate(ref_sample_names):
+                preds_dict[class_name].events[f"{model}::{pred_name}"] = y_pred[mask, pred_idx]
 
         # Free this trainer's DMatrices, boosters, and fold_data before the next model
         del tr
