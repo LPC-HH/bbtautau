@@ -963,7 +963,7 @@ class Trainer:
         For n_folds=1: Uses validation set predictions.
         For n_folds>1: Uses out-of-fold predictions for unbiased evaluation.
 
-        Metrics are computed at fixed background efficiency (bkg_eff=1e-4 by default)
+        Metrics are computed at fixed background efficiency (bkg_eff=1e-3 by default)
         """
         time_start = time.time()
 
@@ -1234,10 +1234,10 @@ class Trainer:
             rows.append(row)
 
         print("\n" + "=" * 70)
-        print("METRICS SUMMARY (at bkg_eff=1e-4)")
+        print("METRICS SUMMARY (at bkg_eff=1e-3)")
         print("=" * 70)
         print(tabulate(rows, headers=headers, tablefmt="grid"))
-        print("\nSignal Eff = signal efficiency at 0.01% background efficiency")
+        print("\nSignal Eff = signal efficiency at 0.1% background efficiency")
         print("=" * 70)
 
 
@@ -1415,11 +1415,11 @@ def _rescaling_comparison(results: dict, output_dir: Path) -> None:
             "F1",
             "Threshold",
         ]
-        print(f"\nMetrics for {sig} channel (at bkg_eff=1e-4):")
+        print(f"\nMetrics for {sig} channel (at bkg_eff=1e-3):")
         print(tabulate(summary_data, headers=headers, tablefmt="grid"))
 
         with (output_dir / f"comprehensive_{sig}.txt").open("w") as f:
-            f.write(f"Metrics for {sig} channel (at bkg_eff=1e-4):\n")
+            f.write(f"Metrics for {sig} channel (at bkg_eff=1e-3):\n")
             f.write(tabulate(summary_data, headers=headers, tablefmt="grid"))
 
     # Create cross-channel comparison for key metrics
