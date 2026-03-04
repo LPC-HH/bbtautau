@@ -1633,6 +1633,137 @@ def _resolve_model_inputs(inputs: list[str | Path]) -> list[tuple[str, str, str]
     return result
 
 
+def compare_models_light(
+    inputs: list[str | Path],
+    output_dir: str | None = None,
+    discriminant_filter: str | None = "vsAll",
+) -> pd.DataFrame:
+    """Light comparison of trained models using only metrics_summary.csv files.
+
+    Reads pre-computed metrics from each model's output directory without
+    reloading data or recomputing predictions.  Produces summary tables and
+    grouped bar-chart visualizations of key performance metrics.
+
+    Each entry in *inputs* can be a directory that either directly contains a
+    ``metrics_summary.csv`` file or has subdirectories that do.  The folder
+    name is used as the model tag.
+
+    Args:
+        inputs: Directories containing trained models with metrics_summary.csv.
+        output_dir: Where to save comparison outputs (default: ``comparison_light``).
+        discriminant_filter: Only include discriminants whose name contains this
+            substring.  Default ``"vsAll"`` keeps the BDT-vs-all-backgrounds
+            discriminants.  Set to ``None`` to include everything.
+
+    Returns:
+        Combined ``DataFrame`` with metrics from all input models.
+    """
+    base_out = Path(output_dir) if output_dir else Path("comparison_light")
+    _ensure_dir(base_out)
+
+    # -- collect metrics_summary.csv files --------------------------------
+    csv_frames: list[pd.DataFrame] = []
+    for item in inputs:
+        p = Path(item)
+        if not p.is_dir():
+            raise ValueError(f"Input '{item}' is not a directory")
+
+        csvs = list(p.rglob("metrics_summary.csv"))
+        if not csvs:
+            raise FileNotFoundError(f"No metrics_summary.csv found under {p}")
+
+        for csv_path in sorted(csvs):
+            tag = csv_path.parent.name
+            summary = pd.read_csv(csv_path)
+            summary.insert(0, "model", tag)
+            csv_frames.append(summary)
+
+    combined = pd.concat(csv_frames, ignore_index=True)
+
+    if discriminant_filter:
+        combined = combined[
+            combined["discriminant"].str.contains(discriminant_filter, na=False)
+        ].reset_index(drop=True)
+
+    if combined.empty:
+        print("No metrics matched the discriminant filter — nothing to compare.")
+        return combined
+
+    # -- print summary table per signal ------------------------------------
+    key_metrics = ["roc_auc", "pr_auc", "signal_eff", "precision", "f1_score", "threshold"]
+    signals = combined["signal"].unique()
+    models = combined["model"].unique()
+
+    for sig in sorted(signals):
+        rows = []
+        for model_tag in models:
+            sub = combined[(combined["signal"] == sig) & (combined["model"] == model_tag)]
+            if sub.empty:
+                continue
+            for _, r in sub.iterrows():
+                rows.append(
+                    [model_tag, r["discriminant"]] + [f"{r.get(m, 0):.4f}" for m in key_metrics]
+                )
+
+        headers = ["Model", "Discriminant"] + [m.replace("_", " ").title() for m in key_metrics]
+        print(f"\n{'='*80}")
+        print(f"  Signal: {sig}")
+        print(f"{'='*80}")
+        print(tabulate(rows, headers=headers, tablefmt="grid"))
+
+    # -- bar-chart visualizations -----------------------------------------
+    plot_metrics = ["roc_auc", "signal_eff", "f1_score"]
+    plot_labels = {"roc_auc": "ROC AUC", "signal_eff": "Signal Efficiency", "f1_score": "F1 Score"}
+
+    for metric in plot_metrics:
+        import mplhep as hep
+
+        hep.style.use(hep.style.CMS)
+        fig, axes = plt.subplots(
+            1,
+            len(signals),
+            figsize=(5 * len(signals), 5),
+            squeeze=False,
+            sharey=True,
+        )
+        for ax, sig in zip(axes[0], sorted(signals)):
+            sub = combined[combined["signal"] == sig]
+            if sub.empty:
+                continue
+
+            bar_labels = [f"{r['model']}\n{r['discriminant']}" for _, r in sub.iterrows()]
+            values = sub[metric].astype(float).to_numpy()
+            colors = plt.cm.Set2(np.linspace(0, 1, len(values)))
+
+            bars = ax.barh(range(len(values)), values, color=colors)
+            ax.set_yticks(range(len(values)))
+            ax.set_yticklabels(bar_labels, fontsize=7)
+            ax.set_xlabel(plot_labels[metric])
+            ax.set_title(sig, fontsize=10)
+
+            for bar, val in zip(bars, values):
+                ax.text(
+                    bar.get_width() + 0.002,
+                    bar.get_y() + bar.get_height() / 2,
+                    f"{val:.4f}",
+                    va="center",
+                    fontsize=7,
+                )
+
+        fig.suptitle(plot_labels[metric], fontsize=13, fontweight="bold")
+        fig.tight_layout()
+        fig.savefig(base_out / f"compare_{metric}.pdf")
+        fig.savefig(base_out / f"compare_{metric}.png", dpi=150)
+        plt.close(fig)
+
+    # -- save combined csv ------------------------------------------------
+    combined.to_csv(base_out / "combined_metrics.csv", index=False)
+    print(f"\nCombined metrics saved to {base_out / 'combined_metrics.csv'}")
+    print(f"Plots saved to {base_out}")
+
+    return combined
+
+
 def compare_models(
     inputs: list[str | Path],
     years: list[str] = ("all",),
@@ -1899,6 +2030,25 @@ if __name__ == "__main__":
         help="Compare multiple trained models with ROC overlays and CSV metrics",
     )
     parser.add_argument(
+        "--compare-light",
+        action="store_true",
+        default=False,
+        help=(
+            "Light comparison using only metrics_summary.csv files already "
+            "produced during training. No data loading or prediction needed."
+        ),
+    )
+    parser.add_argument(
+        "--disc-filter",
+        type=str,
+        default="vsAll",
+        help=(
+            "Substring filter for discriminant names in --compare-light. "
+            "Default 'vsAll' keeps BDT-vs-all-backgrounds discriminants. "
+            "Use '' to include everything."
+        ),
+    )
+    parser.add_argument(
         "--inputs",
         nargs="+",
         default=None,
@@ -1981,6 +2131,25 @@ if __name__ == "__main__":
             data_path=args.data_path,
             tt_preselection=args.tt_preselection,
             output_dir=args.output_dir,
+        )
+        exit()
+
+    if args.compare_light:
+        if not args.inputs:
+            parser.error("--compare-light requires --inputs")
+
+        resolved_inputs = []
+        for item in args.inputs:
+            p = Path(item)
+            if not p.is_absolute():
+                p = MODEL_DIR.parent / p
+            resolved_inputs.append(str(p))
+
+        disc_filter = args.disc_filter if args.disc_filter else None
+        compare_models_light(
+            inputs=resolved_inputs,
+            output_dir=args.output_dir,
+            discriminant_filter=disc_filter,
         )
         exit()
 

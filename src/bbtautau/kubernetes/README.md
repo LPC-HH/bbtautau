@@ -136,21 +136,17 @@ kubectl create -f setup/http/expose.yaml -n cms-ml
 kubectl create -f setup/http/ingress.yaml -n cms-ml
 ```
 
-### Hyperparameter Exploration (to be checked)
+### Hyperparameter Exploration
+
+Configs are written directly into `postprocessing/bdt_configs/<group>/`, so there is no manual copying step. The config loader (`bdt_config.py`) scans subfolders automatically.
 
 #### `generate_hp_configs.py`
-Intelligent hyperparameter exploration script that generates BDT configuration files using Latin Hypercube Sampling (LHS) for efficient parameter space coverage.
-
-**Features:**
-- Systematic exploration of hyperparameter space
-- LHS ensures good coverage with fewer samples than random search
-- Generates Python config files compatible with existing BDT training system
-- Focuses on most impactful parameters by default (max_depth, eta, subsample, colsample_bytree, num_parallel_tree)
+Generates BDT configuration files by systematically exploring the hyperparameter space using Latin Hypercube Sampling (LHS) for efficient coverage.
 
 **Key Arguments:**
-- `--base-config`: Path to base configuration file (e.g., `config_11Feb26Full.py`)
+- `--base-config`: Base configuration file (absolute path, relative path, or bare filename — searched recursively in `bdt_configs/`)
+- `--group` *(required)*: Subfolder name inside `postprocessing/bdt_configs/` (e.g. `key_pars_k2v0`). Created if it doesn't exist.
 - `--n-configs`: Number of configurations to generate (default: 20)
-- `--output-dir`: Directory to save generated config files (default: `bdt_configs`)
 - `--prefix`: Prefix for generated model names (default: `hp`)
 - `--strategy`: Search strategy - `lhs` (default), `grid`, or `random`
 - `--explore-all`: Explore all hyperparameters (not just key ones)
@@ -158,19 +154,20 @@ Intelligent hyperparameter exploration script that generates BDT configuration f
 
 **Example Usage:**
 ```bash
-# Generate 20 configurations using LHS
+# Generate 20 configs in a new group, using a base config found by filename
 python generate_hp_configs.py \
-    --base-config config_11Feb26Full.py \
-    --n-configs 20 \
-    --prefix hp_explore \
-    --output-dir bdt_configs
+    --base-config config_24Feb26_weak_deeper.py \
+    --group my_scan \
+    --prefix my_scan \
+    --n-configs 20
 
-# Generate configs exploring all hyperparameters
+# Explore all hyperparameters
 python generate_hp_configs.py \
-    --base-config config_11Feb26Full.py \
+    --base-config config_24Feb26_weak_deeper.py \
+    --group my_full_scan \
+    --prefix full \
     --n-configs 30 \
-    --explore-all \
-    --prefix hp_full
+    --explore-all
 ```
 
 **Hyperparameters Explored:**
@@ -178,28 +175,50 @@ python generate_hp_configs.py \
 - **All parameters** (with `--explore-all`): Above plus `alpha`, `gamma`, `lambda`
 
 #### `generate_hp_jobs.py`
-Generates Kubernetes jobs for all configurations created by `generate_hp_configs.py`.
+Generates Kubernetes jobs for all models created by `generate_hp_configs.py`.
 
 **Key Arguments:**
-- `--summary-file`: Path to hyperparameter exploration summary JSON (default: `bdt_configs/hp_exploration_summary.json`)
+- `--summary` *(required)*: Path to `hp_exploration_summary.json`, **or** just the group name (e.g. `my_scan`) to look it up under `bdt_configs/<group>/`
 - `--tag`: Tag for organizing jobs (default: `hp_explore`)
 - `--datapath`: Data path within PVC
 - `--submit`: Submit jobs to Kubernetes after generation
 - `--overwrite`: Overwrite existing job files
+- `--dry-run`: Print commands without executing
 
 **Example Usage:**
 ```bash
-# Generate and submit jobs for all HP configs
+# Generate jobs by group name
 python generate_hp_jobs.py \
-    --summary-file bdt_configs/hp_exploration_summary.json \
-    --tag hp_explore \
+    --summary my_scan \
+    --tag my_scan \
     --submit
+
+# Dry-run to preview
+python generate_hp_jobs.py \
+    --summary my_scan \
+    --tag my_scan \
+    --dry-run
 ```
 
-**Workflow:**
-1. Generate config files: `python generate_hp_configs.py --base-config config_11Feb26Full.py --n-configs 20`
-2. Copy configs to `bdt_configs/` directory (or use `generate_hp_jobs.py` which does this automatically)
-3. Generate Kubernetes jobs: `python generate_hp_jobs.py --summary-file bdt_configs/hp_exploration_summary.json --submit`
+**End-to-end workflow:**
+```bash
+# 1. Generate configs (written directly to postprocessing/bdt_configs/my_scan/)
+python generate_hp_configs.py \
+    --base-config config_24Feb26_weak_deeper.py \
+    --group my_scan \
+    --prefix my_scan \
+    --n-configs 20
+
+# 2. Generate and submit Kubernetes jobs (no copying needed)
+python generate_hp_jobs.py \
+    --summary my_scan \
+    --tag my_scan \
+    --submit
+
+# 3. Configs are immediately usable in analysis code:
+#    from bbtautau.postprocessing.bdt_config import BDT_CONFIG
+#    config = BDT_CONFIG["my_scan_001"]
+```
 
 ### Job Cleanup (`cleanup.ipynb`)
 
@@ -232,7 +251,7 @@ Run cells sequentially to review and clean up jobs.
        --submit
    ```
 
-   Note: The model name must correspond to a config file in `bdt_configs/` (e.g., `config_my_model.py`).
+   Note: The model name must correspond to a config file under `postprocessing/bdt_configs/` (e.g., `bdt_configs/standard/config_my_model.py`). The loader searches subfolders automatically.
 
 3. **Monitor Jobs**:
    ```bash

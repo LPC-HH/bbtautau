@@ -71,6 +71,11 @@ def main():
         help="Overwrite existing job files",
     )
     parser.add_argument(
+        "--tt-preselection",
+        action="store_true",
+        help="Apply tt preselection in training jobs",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print commands without executing",
@@ -87,35 +92,30 @@ def main():
     print(f"Tag: {args.tag}\n")
 
     generated_jobs = []
+
+    from make_from_template import build_parser
+    from make_from_template import main as generate_job_main
+
+    mft_parser = build_parser()
+
+    passthrough_flags = ["--tag", args.tag, "--datapath", args.datapath]
+    if args.overwrite:
+        passthrough_flags.append("--overwrite")
+    if args.submit:
+        passthrough_flags.append("--submit")
+    if args.tt_preselection:
+        passthrough_flags.append("--tt-preselection")
+
     for modelname in modelnames:
+        job_argv = ["--name", modelname, *passthrough_flags]
+
         if args.dry_run:
-            print(
-                f"[dry-run] make_from_template.py --name {modelname} "
-                f"--tag {args.tag} --datapath {args.datapath}"
-            )
+            print(f"[dry-run] make_from_template.py {' '.join(job_argv)}")
             continue
 
-        from make_from_template import main as generate_job_main
-
-        class _Args:
-            def __init__(self, _mn=modelname):
-                self.from_json = ""
-                self.name = _mn
-                self.job_name = ""
-                self.compare_models = False
-                self.models = None
-                self.model_dirs = None
-                self.years = ["all"]
-                self.tag = args.tag
-                self.datapath = args.datapath
-                self.samples = None
-                self.train_args = ""
-                self.tt_preselection = False
-                self.overwrite = args.overwrite
-                self.submit = args.submit
-
         try:
-            generate_job_main(_Args())
+            job_args = mft_parser.parse_args(job_argv)
+            generate_job_main(job_args)
             generated_jobs.append(modelname)
             print(f"  + {modelname}")
         except Exception as e:

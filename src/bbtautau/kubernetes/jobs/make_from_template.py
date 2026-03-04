@@ -148,7 +148,7 @@ def main(args):
         os.system(f"kubectl create -f {file_name} -n cms-ml")
 
 
-if __name__ == "__main__":
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--from-json", default="", help="json file to load args from", type=str)
     parser.add_argument("--name", default="", help="", type=str)
@@ -227,7 +227,9 @@ if __name__ == "__main__":
         type=bool,
         action=BooleanOptionalAction,
     )
+    return parser
 
-    args = parser.parse_args()
 
+if __name__ == "__main__":
+    args = build_parser().parse_args()
     main(args)
