@@ -14,7 +14,7 @@ spec:
           - "/bin/bash"
           - "-c"
           - >
-            git clone --single-branch --recurse-submodules --branch kube https://github.com/LPC-HH/bbtautau.git /opt/repo/bbtautau &&
+            git clone --single-branch --recurse-submodules --branch dev-bdt https://github.com/LPC-HH/bbtautau.git /opt/repo/bbtautau &&
             mkdir -p $output_dir &&
             pip install -e /opt/repo/bbtautau &&
             pip install -e /opt/repo/bbtautau/boostedhh &&
@@ -26,11 +26,11 @@ spec:
           name: bbtautauvol
         resources:
           limits:
-            memory: 32Gi
-            cpu: "8"
+            memory: 80Gi
+            cpu: "12"
           requests:
-            memory: 32Gi
-            cpu: "6"
+            memory: 80Gi
+            cpu: "10"
       volumes:
       - name: bbtautauvol
         persistentVolumeClaim:

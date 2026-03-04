@@ -132,6 +132,27 @@ CONFIG = {config_repr}
     return config_file
 
 
+_BDT_CONFIGS_DIR = Path(__file__).parent.parent / "postprocessing" / "bdt_configs"
+
+
+def _resolve_base_config(raw_path: str) -> Path:
+    """Resolve a base config path: accept absolute, relative, or bare filename.
+
+    Search order:
+      1. As given (absolute or relative to cwd)
+      2. Under bdt_configs/ (recursive)
+    """
+    p = Path(raw_path)
+    if p.exists():
+        return p.resolve()
+    # Bare filename or relative — search bdt_configs tree
+    for candidate in _BDT_CONFIGS_DIR.rglob(p.name):
+        return candidate.resolve()
+    raise FileNotFoundError(
+        f"Base config not found: tried '{raw_path}' and searched {_BDT_CONFIGS_DIR}"
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate BDT configuration files for hyperparameter exploration"
@@ -140,19 +161,21 @@ def main():
         "--base-config",
         type=str,
         required=True,
-        help="Path to base configuration file (e.g., config_11Feb26Full.py)",
+        help="Path to base configuration file (e.g., config_11Feb26Full.py). "
+        "Can be absolute, relative, or a bare filename (searched in bdt_configs/).",
+    )
+    parser.add_argument(
+        "--group",
+        type=str,
+        required=True,
+        help="Subfolder name inside postprocessing/bdt_configs/ to write configs into "
+        "(e.g. 'key_pars_k2v0'). Created if it doesn't exist.",
     )
     parser.add_argument(
         "--n-configs",
         type=int,
         default=20,
         help="Number of configurations to generate (default: 20)",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="bdt_configs",
-        help="Directory to save generated config files (default: bdt_configs)",
     )
     parser.add_argument(
         "--prefix",
@@ -181,20 +204,15 @@ def main():
 
     args = parser.parse_args()
 
-    # Load base configuration
-    base_config_path = Path(args.base_config)
-    if not base_config_path.exists():
-        # Try relative to bdt_configs directory
-        bdt_configs_dir = Path(__file__).parent.parent.parent / "postprocessing" / "bdt_configs"
-        base_config_path = bdt_configs_dir / args.base_config
-        if not base_config_path.exists():
-            raise FileNotFoundError(f"Base config not found: {args.base_config}")
-
+    # Resolve base configuration
+    base_config_path = _resolve_base_config(args.base_config)
     base_config = load_reference_config(base_config_path)
-    print(f"Loaded base config: {base_config['modelname']}")
+    print(f"Loaded base config: {base_config['modelname']} ({base_config_path})")
+
+    # Output goes directly into postprocessing/bdt_configs/<group>/
+    output_dir = _BDT_CONFIGS_DIR / args.group
 
     # Define hyperparameter search ranges
-    # Based on XGBoost best practices and typical ranges
     if args.explore_all:
         param_ranges = {
             "max_depth": (6, 14),
@@ -208,13 +226,12 @@ def main():
         }
         int_params = ["max_depth", "num_parallel_tree"]
     else:
-        # Focus on most impactful parameters
         param_ranges = {
-            "max_depth": (8, 12),
+            "max_depth": (6, 10),
             "eta": (0.05, 0.1),
             "subsample": (0.2, 0.6),
             "colsample_bytree": (0.5, 0.8),
-            "num_parallel_tree": (40, 60),
+            "num_parallel_tree": (1, 30),
         }
         int_params = ["max_depth", "num_parallel_tree"]
 
@@ -222,8 +239,6 @@ def main():
     if args.strategy == "lhs":
         configs = generate_lhs_samples(args.n_configs, param_ranges, seed=args.seed)
     elif args.strategy == "grid":
-        # Simple grid search (limited to avoid explosion)
-        # For full grid, use smaller n_configs or explore-all=False
         raise NotImplementedError("Grid search not yet implemented. Use --strategy lhs")
     else:  # random
         rng = np.random.default_rng(args.seed)
@@ -234,38 +249,39 @@ def main():
                 config[param] = rng.uniform(min_val, max_val)
             configs.append(config)
 
-    # Round integer parameters
     for i, config in enumerate(configs):
         configs[i] = round_integer_params(config, int_params)
 
-    # Generate config files
-    output_dir = Path(args.output_dir)
+    # Generate config files directly in postprocessing/bdt_configs/<group>/
     generated_files = []
+    modelnames = []
 
-    print(f"\nGenerating {len(configs)} configuration files...")
+    print(
+        f"\nGenerating {len(configs)} configs in {output_dir.relative_to(_BDT_CONFIGS_DIR.parent.parent)}"
+    )
     print(f"Strategy: {args.strategy}")
     print(f"Parameters explored: {list(param_ranges.keys())}\n")
 
     for i, config in enumerate(configs):
-        # Create model name
         modelname = f"{args.prefix}_{i+1:03d}"
-
-        # Generate config file
         config_file = generate_config_file(config, modelname, base_config, output_dir)
         generated_files.append(config_file)
+        modelnames.append(modelname)
 
-        # Print summary
-        print(f"Generated: {config_file.name}")
+        print(f"  {config_file.name}")
         print(
-            f"  Parameters: {', '.join(f'{k}={v:.3f}' if isinstance(v, float) else f'{k}={v}' for k, v in config.items())}"
+            f"    {', '.join(f'{k}={v:.3f}' if isinstance(v, float) else f'{k}={v}' for k, v in config.items())}"
         )
 
-    # Save summary
+    # Save summary (used by generate_hp_jobs.py)
     summary = {
         "base_config": str(base_config_path),
+        "group": args.group,
         "n_configs": len(configs),
         "strategy": args.strategy,
+        "seed": args.seed,
         "param_ranges": {k: list(v) for k, v in param_ranges.items()},
+        "modelnames": modelnames,
         "generated_files": [str(f) for f in generated_files],
     }
 
@@ -275,8 +291,7 @@ def main():
 
     print(f"\nSummary saved to: {summary_file}")
     print(f"Total configurations generated: {len(generated_files)}")
-    print("\nTo use these configs, copy them to:")
-    print(f"  {Path(__file__).parent.parent.parent / 'postprocessing' / 'bdt_configs'}")
+    print("Configs are ready to use — no manual copying needed.")
 
 
 if __name__ == "__main__":

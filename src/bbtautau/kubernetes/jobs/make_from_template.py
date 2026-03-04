@@ -51,10 +51,8 @@ def main(args):
             if args.compare_models:
                 if args.compare_tag:
                     models_key = args.compare_tag
-                elif args.models:
-                    models_key = "-".join(args.models)
-                elif args.model_folders:
-                    models_key = "-".join(Path(f).name for f in args.model_folders)
+                elif args.inputs:
+                    models_key = "-".join(Path(i).name for i in args.inputs)
                 else:
                     models_key = "models"
                 args.job_name = "cmp_" + args.tag + "_" + models_key
@@ -103,32 +101,16 @@ def main(args):
         extra_args += (" " if extra_args else "") + "--tt-preselection"
 
     if args.compare_models:
-        has_explicit = args.models and args.model_dirs
-        has_folders = args.model_folders
-
-        if not has_explicit and not has_folders:
-            raise ValueError(
-                "--compare-models requires --models/--model-dirs or --model-folders (or both)"
-            )
-        if has_explicit and len(args.models) != len(args.model_dirs):
-            raise ValueError("--models and --model-dirs must have the same number of arguments")
+        if not args.inputs:
+            raise ValueError("--compare-models requires --inputs")
 
         # Build the compare_args string for the template
-        compare_parts: list[str] = []
-        if has_explicit:
-            models_str = " ".join(args.models)
-            model_dirs_str = " ".join([str(BDT_DIR / d) for d in args.model_dirs])
-            compare_parts.append(f"--models {models_str} --model-dirs {model_dirs_str}")
-        if has_folders:
-            folders_str = " ".join([str(BDT_DIR / f) for f in args.model_folders])
-            compare_parts.append(f"--model-folders {folders_str}")
+        inputs_str = " ".join(str(BDT_DIR / i) for i in args.inputs)
+        compare_args_str = f"--inputs {inputs_str}"
 
         compare_tag = args.compare_tag
         if not compare_tag:
-            if has_explicit:
-                compare_tag = "-".join(args.models)
-            else:
-                compare_tag = "-".join(Path(f).name for f in args.model_folders)
+            compare_tag = "-".join(Path(i).name for i in args.inputs)
         output_dir = str(BDT_DIR / args.tag / f"compare_{compare_tag}")
 
         years_str = " ".join(args.years)
@@ -138,7 +120,7 @@ def main(args):
             "args": extra_args,
             "datapath": str(PVC / args.datapath),
             "years": years_str,
-            "compare_args": " ".join(compare_parts),
+            "compare_args": compare_args_str,
         }
     elif args.study_rescaling:
         # Rescaling study mode: same template vars as training
@@ -186,24 +168,10 @@ if __name__ == "__main__":
         action=BooleanOptionalAction,
     )
     parser.add_argument(
-        "--models",
+        "--inputs",
         nargs="+",
         default=None,
-        help="list of model names to compare when --compare-models is set",
-        type=str,
-    )
-    parser.add_argument(
-        "--model-dirs",
-        nargs="+",
-        default=None,
-        help="list of model directories to compare when --compare-models is set",
-        type=str,
-    )
-    parser.add_argument(
-        "--model-folders",
-        nargs="+",
-        default=None,
-        help="parent directories to scan for trained models (alternative to --models/--model-dirs)",
+        help="model JSON files and/or directories to compare (paths relative to BDT_DIR or absolute)",
         type=str,
     )
     parser.add_argument(

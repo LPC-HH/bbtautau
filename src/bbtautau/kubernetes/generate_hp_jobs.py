@@ -1,8 +1,11 @@
 """
 Generate Kubernetes jobs for hyperparameter exploration configurations.
 
-This script reads generated config files and creates Kubernetes job YAMLs
-for each configuration, optionally submitting them to the cluster.
+Reads the summary JSON produced by generate_hp_configs.py and creates
+Kubernetes job YAMLs for each model, optionally submitting them.
+
+Since generate_hp_configs.py now writes configs directly into
+postprocessing/bdt_configs/<group>/, no file copying is needed.
 """
 
 from __future__ import annotations
@@ -12,7 +15,6 @@ import json
 import sys
 from pathlib import Path
 
-# Import the job generation function
 sys.path.insert(0, str(Path(__file__).parent / "jobs"))
 
 
@@ -22,17 +24,17 @@ def load_summary(summary_file: Path) -> dict:
         return json.load(f)
 
 
-def extract_modelname_from_config(config_file: Path) -> str:
-    """Extract modelname from a config file."""
-    with config_file.open() as f:
-        content = f.read()
-        # Find CONFIG = {...} and extract modelname
-        import re
-
-        match = re.search(r'"modelname":\s*"([^"]+)"', content)
-        if match:
-            return match.group(1)
-        raise ValueError(f"Could not extract modelname from {config_file}")
+def _resolve_summary(raw_path: str) -> Path:
+    """Find the summary JSON: accept an explicit path or a group name."""
+    p = Path(raw_path)
+    if p.exists():
+        return p
+    # Treat as group name → look under bdt_configs/<group>/
+    bdt_configs_dir = Path(__file__).parent.parent / "postprocessing" / "bdt_configs"
+    candidate = bdt_configs_dir / raw_path / "hp_exploration_summary.json"
+    if candidate.exists():
+        return candidate
+    raise FileNotFoundError(f"Summary not found: tried '{raw_path}' and '{candidate}'")
 
 
 def main():
@@ -40,10 +42,11 @@ def main():
         description="Generate Kubernetes jobs for hyperparameter exploration configs"
     )
     parser.add_argument(
-        "--summary-file",
+        "--summary",
         type=str,
-        default="bdt_configs/hp_exploration_summary.json",
-        help="Path to hyperparameter exploration summary JSON file",
+        required=True,
+        help="Path to hp_exploration_summary.json, or the group name "
+        "(e.g. 'key_pars_k2v0') to find it under bdt_configs/<group>/.",
     )
     parser.add_argument(
         "--tag",
@@ -75,105 +78,55 @@ def main():
 
     args = parser.parse_args()
 
-    # Load summary
-    summary_file = Path(args.summary_file)
-    if not summary_file.exists():
-        raise FileNotFoundError(f"Summary file not found: {summary_file}")
-
+    summary_file = _resolve_summary(args.summary)
     summary = load_summary(summary_file)
-    config_files = [Path(f) for f in summary["generated_files"]]
+    modelnames = summary["modelnames"]
 
-    print(f"Found {len(config_files)} configurations to process")
+    print(f"Group: {summary.get('group', '?')}")
+    print(f"Found {len(modelnames)} models to process")
     print(f"Tag: {args.tag}\n")
 
-    # Copy config files to bdt_configs directory if needed
-    bdt_configs_dir = Path(__file__).parent.parent.parent / "postprocessing" / "bdt_configs"
-    bdt_configs_dir.mkdir(parents=True, exist_ok=True)
-
     generated_jobs = []
-    for config_file in config_files:
-        if not config_file.exists():
-            print(f"Warning: Config file not found: {config_file}, skipping")
-            continue
-
-        # Extract modelname
-        try:
-            modelname = extract_modelname_from_config(config_file)
-        except ValueError as e:
-            print(f"Error: {e}, skipping")
-            continue
-
-        # Copy config to bdt_configs if not already there
-        target_config = bdt_configs_dir / config_file.name
-        if not target_config.exists() or args.overwrite:
-            import shutil
-
-            shutil.copy2(config_file, target_config)
-            print(f"Copied config: {config_file.name} -> {target_config}")
-
-        # Generate job using make_from_template
-        print(f"\nGenerating job for model: {modelname}")
-
-        # Prepare arguments for make_from_template
-        job_args = [
-            "--name",
-            modelname,
-            "--tag",
-            args.tag,
-            "--datapath",
-            args.datapath,
-        ]
-
-        if args.overwrite:
-            job_args.append("--overwrite")
-
-        if args.submit:
-            job_args.append("--submit")
-
+    for modelname in modelnames:
         if args.dry_run:
             print(
-                f"Would run: python jobs/make_from_template.py --name {modelname} --tag {args.tag} --datapath {args.datapath}"
+                f"[dry-run] make_from_template.py --name {modelname} "
+                f"--tag {args.tag} --datapath {args.datapath}"
             )
-        else:
-            # Import and call the main function
-            import sys
+            continue
 
-            jobs_dir = Path(__file__).parent / "jobs"
-            sys.path.insert(0, str(jobs_dir))
-            from make_from_template import main as generate_job_main
+        from make_from_template import main as generate_job_main
 
-            # Create a mock args object
-            class MockArgs:
-                def __init__(self, _modelname=modelname):
-                    self.from_json = ""
-                    self.name = _modelname
-                    self.job_name = ""
-                    self.compare_models = False
-                    self.models = None
-                    self.model_dirs = None
-                    self.years = ["all"]
-                    self.tag = args.tag
-                    self.datapath = args.datapath
-                    self.samples = None
-                    self.train_args = ""
-                    self.tt_preselection = False
-                    self.overwrite = args.overwrite
-                    self.submit = args.submit
+        class _Args:
+            def __init__(self, _mn=modelname):
+                self.from_json = ""
+                self.name = _mn
+                self.job_name = ""
+                self.compare_models = False
+                self.models = None
+                self.model_dirs = None
+                self.years = ["all"]
+                self.tag = args.tag
+                self.datapath = args.datapath
+                self.samples = None
+                self.train_args = ""
+                self.tt_preselection = False
+                self.overwrite = args.overwrite
+                self.submit = args.submit
 
-            try:
-                generate_job_main(MockArgs())
-                generated_jobs.append(modelname)
-                print(f"  ✓ Generated job for {modelname}")
-            except Exception as e:
-                print(f"  ✗ Error generating job for {modelname}: {e}")
+        try:
+            generate_job_main(_Args())
+            generated_jobs.append(modelname)
+            print(f"  + {modelname}")
+        except Exception as e:
+            print(f"  ! {modelname}: {e}")
 
     print(f"\n{'='*60}")
-    print("Summary:")
-    print(f"  Configurations processed: {len(config_files)}")
-    print(f"  Jobs generated: {len(generated_jobs)}")
+    print(f"  Models processed: {len(modelnames)}")
+    print(f"  Jobs generated:   {len(generated_jobs)}")
     if args.submit and not args.dry_run:
         print("  Jobs submitted to Kubernetes")
-    print(f"\nJob files location: kubernetes/bdt_trainings/{args.tag}/")
+    print(f"  Job files: kubernetes/bdt_trainings/{args.tag}/")
     print(f"{'='*60}")
 
 
