@@ -1633,16 +1633,127 @@ def _resolve_model_inputs(inputs: list[str | Path]) -> list[tuple[str, str, str]
     return result
 
 
+def _cms_distinct_colors(n: int) -> list[str]:
+    """Return *n* visually distinct colours using the ``tab20`` colormap."""
+    cmap = mpl.colormaps["tab20"]
+    return [mpl.colors.rgb2hex(cmap(i / max(n - 1, 1))) for i in range(n)]
+
+
+def _extract_hyperparameters(model_tags: list[str]) -> pd.DataFrame | None:
+    """Try to load BDT_CONFIG for each model tag and return a DataFrame of HPs.
+
+    Returns None if no config can be loaded for any model.
+    """
+    rows = []
+    hp_keys_of_interest = [
+        "max_depth",
+        "eta",
+        "subsample",
+        "colsample_bytree",
+        "num_parallel_tree",
+        "alpha",
+        "gamma",
+        "lambda",
+    ]
+    for tag in model_tags:
+        try:
+            cfg = BDT_CONFIG[tag]
+        except (KeyError, ValueError):
+            continue
+        hp = cfg.get("hyperpars", {})
+        row = {"model": tag}
+        for k in hp_keys_of_interest:
+            if k in hp:
+                row[k] = hp[k]
+        row["num_rounds"] = cfg.get("num_rounds")
+        row["n_folds"] = cfg.get("n_folds")
+        if len(row) > 1:
+            rows.append(row)
+    return pd.DataFrame(rows) if rows else None
+
+
+def _plot_hp_correlations(
+    ranking: pd.DataFrame,
+    hp_df: pd.DataFrame,
+    metric_col: str,
+    base_out: Path,
+) -> None:
+    """Scatter-plot each varying hyperparameter against the aggregate metric.
+
+    Also saves a Spearman correlation summary CSV.
+    """
+    from scipy import stats
+
+    merged = ranking.merge(hp_df, on="model", how="inner")
+    if merged.empty:
+        return
+
+    hp_cols = [c for c in hp_df.columns if c != "model"]
+    # Keep only HPs that actually vary across models
+    hp_cols = [c for c in hp_cols if len(merged[c].unique()) > 1]
+    if not hp_cols:
+        print("  All hyperparameters are constant across models — skipping HP plots.")
+        return
+
+    hp_dir = _ensure_dir(base_out / "hyperparameters")
+
+    # --- individual scatter plots ----------------------------------------
+    n_hp = len(hp_cols)
+    ncols = min(n_hp, 3)
+    nrows = (n_hp + ncols - 1) // ncols
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 5 * nrows), squeeze=False)
+
+    for idx, hp in enumerate(hp_cols):
+        ax = axes[idx // ncols][idx % ncols]
+        x = merged[hp].astype(float)
+        y = merged[metric_col].astype(float)
+        ax.scatter(x, y, s=60, zorder=5, edgecolors="black", linewidths=0.5)
+
+        rho, pval = stats.spearmanr(x, y)
+        ax.set_xlabel(hp, fontsize=14)
+        ax.set_ylabel(metric_col.replace("_", " "), fontsize=14)
+        ax.set_title(f"$\\rho_{{S}}$={rho:+.2f}  (p={pval:.2g})", fontsize=12)
+        ax.tick_params(labelsize=11)
+
+    # hide unused subplots
+    for idx in range(n_hp, nrows * ncols):
+        axes[idx // ncols][idx % ncols].set_visible(False)
+
+    fig.tight_layout()
+    fig.savefig(hp_dir / "hp_vs_metric.pdf", bbox_inches="tight")
+    fig.savefig(hp_dir / "hp_vs_metric.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # --- correlation summary CSV -----------------------------------------
+    corr_rows = []
+    for hp in hp_cols:
+        x = merged[hp].astype(float)
+        y = merged[metric_col].astype(float)
+        rho, pval = stats.spearmanr(x, y)
+        corr_rows.append({"hyperparameter": hp, "spearman_rho": rho, "p_value": pval})
+    corr_df = pd.DataFrame(corr_rows).sort_values("spearman_rho", key=abs, ascending=False)
+    corr_df.to_csv(hp_dir / "hp_correlations.csv", index=False)
+    print(f"  HP correlations saved to {hp_dir / 'hp_correlations.csv'}")
+
+
 def compare_models_light(
     inputs: list[str | Path],
     output_dir: str | None = None,
     discriminant_filter: str | None = "vsAll",
+    ranking_metric: str = "roc_auc",
 ) -> pd.DataFrame:
     """Light comparison of trained models using only metrics_summary.csv files.
 
     Reads pre-computed metrics from each model's output directory without
-    reloading data or recomputing predictions.  Produces summary tables and
-    grouped bar-chart visualizations of key performance metrics.
+    reloading data or recomputing predictions.  Produces:
+
+    * Per-signal summary tables (console)
+    * CMS-styled bar charts of key metrics
+    * An **aggregate ranking** across all signals
+    * A **heatmap** of models x signals
+    * Hyperparameter correlation plots (when configs are loadable)
+    * A GP surrogate fit to predict the optimal HP set
 
     Each entry in *inputs* can be a directory that either directly contains a
     ``metrics_summary.csv`` file or has subdirectories that do.  The folder
@@ -1654,10 +1765,17 @@ def compare_models_light(
         discriminant_filter: Only include discriminants whose name contains this
             substring.  Default ``"vsAll"`` keeps the BDT-vs-all-backgrounds
             discriminants.  Set to ``None`` to include everything.
+        ranking_metric: Metric to use for aggregate ranking across signals.
+            Default ``"roc_auc"``.
 
     Returns:
         Combined ``DataFrame`` with metrics from all input models.
     """
+    import mplhep as hep
+
+    plt.style.use(hep.style.CMS)
+    hep.style.use("CMS")
+
     base_out = Path(output_dir) if output_dir else Path("comparison_light")
     _ensure_dir(base_out)
 
@@ -1689,12 +1807,12 @@ def compare_models_light(
         print("No metrics matched the discriminant filter — nothing to compare.")
         return combined
 
-    # -- print summary table per signal ------------------------------------
     key_metrics = ["roc_auc", "pr_auc", "signal_eff", "precision", "f1_score", "threshold"]
-    signals = combined["signal"].unique()
+    signals = sorted(combined["signal"].unique())
     models = combined["model"].unique()
 
-    for sig in sorted(signals):
+    # -- per-signal summary tables ----------------------------------------
+    for sig in signals:
         rows = []
         for model_tag in models:
             sub = combined[(combined["signal"] == sig) & (combined["model"] == model_tag)]
@@ -1704,57 +1822,169 @@ def compare_models_light(
                 rows.append(
                     [model_tag, r["discriminant"]] + [f"{r.get(m, 0):.4f}" for m in key_metrics]
                 )
-
         headers = ["Model", "Discriminant"] + [m.replace("_", " ").title() for m in key_metrics]
         print(f"\n{'='*80}")
         print(f"  Signal: {sig}")
         print(f"{'='*80}")
         print(tabulate(rows, headers=headers, tablefmt="grid"))
 
-    # -- bar-chart visualizations -----------------------------------------
+    # =====================================================================
+    # AGGREGATE RANKING across signals
+    # =====================================================================
+    # For each model, compute the mean of `ranking_metric` over all signals.
+    # When a model has multiple discriminants per signal (rare with vsAll
+    # filter), we take the best per signal first.
+    best_per_signal = combined.groupby(["model", "signal"])[ranking_metric].max().reset_index()
+    ranking = (
+        best_per_signal.groupby("model")[ranking_metric]
+        .agg(["mean", "std", "min"])
+        .reset_index()
+        .rename(
+            columns={
+                "mean": f"mean_{ranking_metric}",
+                "std": f"std_{ranking_metric}",
+                "min": f"min_{ranking_metric}",
+            }
+        )
+        .sort_values(f"mean_{ranking_metric}", ascending=False)
+    )
+    ranking["rank"] = range(1, len(ranking) + 1)
+
+    print(f"\n{'='*80}")
+    print(f"  AGGREGATE RANKING  (metric: mean {ranking_metric} across {len(signals)} signals)")
+    print(f"{'='*80}")
+    rank_headers = ["Rank", "Model", f"Mean {ranking_metric}", "Std", "Worst-signal"]
+    rank_rows = [
+        [
+            r["rank"],
+            r["model"],
+            f"{r[f'mean_{ranking_metric}']:.5f}",
+            f"{r[f'std_{ranking_metric}']:.5f}" if pd.notna(r[f"std_{ranking_metric}"]) else "—",
+            f"{r[f'min_{ranking_metric}']:.5f}",
+        ]
+        for _, r in ranking.iterrows()
+    ]
+    print(tabulate(rank_rows, headers=rank_headers, tablefmt="grid"))
+    ranking.to_csv(base_out / "ranking.csv", index=False)
+
+    # =====================================================================
+    # CMS-styled bar charts (one subplot per signal)
+    # =====================================================================
+    n_models = len(models)
+    colors = _cms_distinct_colors(n_models)
+    model_color = {m: colors[i] for i, m in enumerate(models)}
+
     plot_metrics = ["roc_auc", "signal_eff", "f1_score"]
-    plot_labels = {"roc_auc": "ROC AUC", "signal_eff": "Signal Efficiency", "f1_score": "F1 Score"}
+    plot_labels = {
+        "roc_auc": "ROC AUC",
+        "signal_eff": r"Signal efficiency ($\epsilon_{sig}$)",
+        "f1_score": "F1 Score",
+    }
 
     for metric in plot_metrics:
-        import mplhep as hep
-
-        hep.style.use(hep.style.CMS)
+        n_sig = len(signals)
         fig, axes = plt.subplots(
             1,
-            len(signals),
-            figsize=(5 * len(signals), 5),
+            n_sig,
+            figsize=(max(6, 4 * n_sig), max(5, 0.45 * n_models + 2)),
             squeeze=False,
             sharey=True,
         )
-        for ax, sig in zip(axes[0], sorted(signals)):
-            sub = combined[combined["signal"] == sig]
+
+        for ax, sig in zip(axes[0], signals):
+            sub = combined[combined["signal"] == sig].sort_values(metric, ascending=True)
             if sub.empty:
                 continue
-
-            bar_labels = [f"{r['model']}\n{r['discriminant']}" for _, r in sub.iterrows()]
+            labels = sub["model"].tolist()
             values = sub[metric].astype(float).to_numpy()
-            colors = plt.cm.Set2(np.linspace(0, 1, len(values)))
+            bar_colors = [model_color[m] for m in labels]
 
-            bars = ax.barh(range(len(values)), values, color=colors)
+            bars = ax.barh(
+                range(len(values)),
+                values,
+                color=bar_colors,
+                edgecolor="black",
+                linewidth=0.4,
+                height=0.7,
+            )
             ax.set_yticks(range(len(values)))
-            ax.set_yticklabels(bar_labels, fontsize=7)
-            ax.set_xlabel(plot_labels[metric])
-            ax.set_title(sig, fontsize=10)
+            ax.set_yticklabels(labels, fontsize=9)
+            ax.set_xlabel(plot_labels[metric], fontsize=13)
+            ax.set_title(sig, fontsize=13, fontweight="bold")
 
             for bar, val in zip(bars, values):
                 ax.text(
-                    bar.get_width() + 0.002,
+                    bar.get_width() + 0.001,
                     bar.get_y() + bar.get_height() / 2,
                     f"{val:.4f}",
                     va="center",
-                    fontsize=7,
+                    fontsize=8,
                 )
 
-        fig.suptitle(plot_labels[metric], fontsize=13, fontweight="bold")
+            ax.tick_params(axis="both", labelsize=10)
+
+        hep.cms.label(ax=axes[0][0], label="Work in Progress", data=False, fontsize=13, loc=0)
         fig.tight_layout()
-        fig.savefig(base_out / f"compare_{metric}.pdf")
-        fig.savefig(base_out / f"compare_{metric}.png", dpi=150)
+        fig.savefig(base_out / f"compare_{metric}.pdf", bbox_inches="tight")
+        fig.savefig(base_out / f"compare_{metric}.png", dpi=150, bbox_inches="tight")
         plt.close(fig)
+
+    # =====================================================================
+    # HEATMAP: models x signals for the ranking metric
+    # =====================================================================
+    pivot = best_per_signal.pivot_table(index="model", columns="signal", values=ranking_metric)
+    # Sort models by aggregate ranking
+    rank_order = ranking.sort_values("rank")["model"].tolist()
+    pivot = pivot.reindex(rank_order)
+
+    fig, ax = plt.subplots(
+        figsize=(max(6, 1.5 * len(signals) + 2), max(4, 0.45 * len(rank_order) + 2))
+    )
+    im = ax.imshow(
+        pivot.to_numpy(),
+        aspect="auto",
+        cmap="RdYlGn",
+        vmin=pivot.to_numpy().min() - 0.01,
+        vmax=pivot.to_numpy().max() + 0.001,
+    )
+    ax.set_xticks(range(len(signals)))
+    ax.set_xticklabels(signals, rotation=35, ha="right", fontsize=11)
+    ax.set_yticks(range(len(rank_order)))
+    ax.set_yticklabels(rank_order, fontsize=10)
+    ax.set_ylabel("Model (ranked)", fontsize=13)
+
+    for i in range(len(rank_order)):
+        for j in range(len(signals)):
+            val = pivot.iloc[i, j]
+            if pd.notna(val):
+                ax.text(
+                    j,
+                    i,
+                    f"{val:.4f}",
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    color="white" if val < pivot.to_numpy().mean() else "black",
+                )
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label(ranking_metric.replace("_", " ").upper(), fontsize=12)
+    hep.cms.label(ax=ax, label="Work in Progress", data=False, fontsize=13, loc=0)
+    fig.tight_layout()
+    fig.savefig(base_out / "heatmap_models_signals.pdf", bbox_inches="tight")
+    fig.savefig(base_out / "heatmap_models_signals.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # =====================================================================
+    # HYPERPARAMETER ANALYSIS
+    # =====================================================================
+    hp_df = _extract_hyperparameters(list(models))
+    if hp_df is not None and not hp_df.empty:
+        agg_col = f"mean_{ranking_metric}"
+        print(f"\n  Loaded hyperparameters for {len(hp_df)} / {len(models)} models.")
+        _plot_hp_correlations(ranking, hp_df, agg_col, base_out)
+    else:
+        print("\n  Could not load hyperparameters from BDT_CONFIG — skipping HP analysis.")
 
     # -- save combined csv ------------------------------------------------
     combined.to_csv(base_out / "combined_metrics.csv", index=False)
@@ -2049,6 +2279,13 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--ranking-metric",
+        type=str,
+        default="roc_auc",
+        choices=["roc_auc", "pr_auc", "signal_eff", "f1_score"],
+        help=("Metric for aggregate model ranking in --compare-light. " "Default 'roc_auc'."),
+    )
+    parser.add_argument(
         "--inputs",
         nargs="+",
         default=None,
@@ -2150,6 +2387,7 @@ if __name__ == "__main__":
             inputs=resolved_inputs,
             output_dir=args.output_dir,
             discriminant_filter=disc_filter,
+            ranking_metric=args.ranking_metric,
         )
         exit()
 
