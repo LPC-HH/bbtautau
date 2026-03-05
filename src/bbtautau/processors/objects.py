@@ -528,6 +528,66 @@ def calculate_invariant_mass_2d(
     return mass
 
 
+def project_met_to_fatjet_p4(
+    fatjet_mass, fatjet_pt, fatjet_eta, fatjet_phi, fatjet_masscorr, met_pt, met_phi
+):
+    invalid = (
+        (fatjet_pt == -999)
+        | (fatjet_eta == -999)
+        | (fatjet_phi == -999)
+        | (fatjet_mass == -999)
+        | (met_pt == -999)
+        | (met_phi == -999)
+    )
+
+    px_fj = fatjet_pt * np.cos(fatjet_phi)
+    py_fj = fatjet_pt * np.sin(fatjet_phi)
+    pz_fj = fatjet_pt * np.sinh(fatjet_eta)
+
+    px_met = met_pt * np.cos(met_phi)
+    py_met = met_pt * np.sin(met_phi)
+
+    px_met = px_met[..., None]
+    py_met = py_met[..., None]
+
+    dot = px_met * px_fj + py_met * py_fj
+    pt2 = px_fj**2 + py_fj**2
+    pt2 = np.where(pt2 == 0, 1e-6, pt2)
+
+    proj_x = dot / pt2 * px_fj
+    proj_y = dot / pt2 * py_fj
+
+    pt_old = np.sqrt(px_fj**2 + py_fj**2)
+    pt_new = np.sqrt((px_fj + proj_x) ** 2 + (py_fj + proj_y) ** 2)
+    k = np.where(pt_old == 0, 1, pt_new / pt_old)
+
+    px_new = px_fj * k
+    py_new = py_fj * k
+    pz_new = pz_fj * k
+
+    phi_new = np.arctan2(py_new, px_new)
+
+    pt_safe = np.where(pt_new == 0, 1e-6, pt_new)
+    eta_new = np.arcsinh(pz_new / pt_safe)
+
+    p2_vis = px_fj**2 + py_fj**2 + pz_fj**2
+    fatjet_mass = fatjet_mass * fatjet_masscorr
+    E_vis = np.sqrt(p2_vis + fatjet_mass**2)
+
+    E_new = E_vis * k
+
+    M2_new = E_new**2 - (px_new**2 + py_new**2 + pz_new**2)
+    M2_new = np.where(M2_new < 0, 0, M2_new)  # 数值保护
+    M_new = np.sqrt(M2_new)
+
+    pt_new = ak.where(invalid, -999, pt_new)
+    eta_new = ak.where(invalid, -999, eta_new)
+    phi_new = ak.where(invalid, -999, phi_new)
+    M_new = ak.where(invalid, -999, M_new)
+
+    return pt_new, eta_new, phi_new, M_new
+
+
 def dRdau(
     eta0,
     phi0,
@@ -544,6 +604,48 @@ def dRdau(
     return dr
 
 
+# jin for -,day 202601
+def vector_subtraction(a_pt, a_eta, a_phi, a_mass, b_pt, b_eta, b_phi, b_mass):
+
+    invalid = (
+        (a_pt == -999)
+        | (a_eta == -999)
+        | (a_phi == -999)
+        | (a_mass == -999)
+        | (b_pt == -999)
+        | (b_eta == -999)
+        | (b_phi == -999)
+        | (b_mass == -999)
+    )
+
+    a_px = a_pt * np.cos(a_phi)
+    a_py = a_pt * np.sin(a_phi)
+    a_pz = a_pt * np.sinh(a_eta)
+    a_energy = np.sqrt(a_mass**2 + a_px**2 + a_py**2 + a_pz**2)
+
+    b_px = b_pt * np.cos(b_phi)
+    b_py = b_pt * np.sin(b_phi)
+    b_pz = b_pt * np.sinh(b_eta)
+    b_energy = np.sqrt(b_mass**2 + b_px**2 + b_py**2 + b_pz**2)
+
+    px_diff = a_px - b_px
+    py_diff = a_py - b_py
+    pz_diff = a_pz - b_pz
+    energy_diff = a_energy - b_energy
+
+    result_pt = np.sqrt(px_diff**2 + py_diff**2)
+    result_eta = 0.5 * np.log((energy_diff + pz_diff) / (energy_diff - pz_diff))
+    result_phi = np.arctan2(py_diff, px_diff)
+    result_mass = np.sqrt(energy_diff**2 - px_diff**2 - py_diff**2 - pz_diff**2)
+
+    result_pt = ak.where(invalid, -999, result_pt)
+    result_eta = ak.where(invalid, -999, result_eta)
+    result_phi = ak.where(invalid, -999, result_phi)
+    result_mass = ak.where(invalid, -999, result_mass)
+
+    return result_pt, result_eta, result_phi, result_mass
+
+
 def get_CA_MASS(
     fatjets: FatJetArray,
     taus: TauArray,
@@ -554,6 +656,17 @@ def get_CA_MASS(
 ):
 
     init_fields = {
+        "CA_tau_number": (0, int),
+        "CA_tau_number_in_fatjet": (0, int),
+        "CA_globalParT_massVisApplied_oneHPSTau": (-999.0, float),
+        "CA_globalParT_massVisApplied_oneHPSTau_thth": (-999.0, float),
+        "CA_globalParT_massVisApplied_oneHPSTauorMuon_thtm": (-999.0, float),
+        "CA_globalParT_massVisApplied_oneHPSTauorElectron_thte": (-999.0, float),
+        "CA_globalParT_massVisApplied_with_delta_axis_merged": (-999.0, float),
+        "CA_globalParT_massVisApplied_oneHPSTauorLepton_flag": (0, int),
+        "CA_globalParT_massVisApplied_000_fatjetwithMET": (-999.0, float),
+        "CA_globalParT_massVisApplied_000_fatjet": (-999.0, float),
+        "CA_globalParT_massVisApplied_000_fatjet_MET_with_same_dirc": (-999.0, float),
         "CA_mass_merged": (-999.0, float),
         "CA_msoftdrop_merged": (-999.0, float),
         "CA_globalParT_massVisApplied_merged": (-999.0, float),
@@ -799,6 +912,7 @@ def get_CA_MASS(
         matched_taus_per_fatjet = boostedtaus_in_pairs[close_matches]
 
         n_matched = ak.num(matched_taus_per_fatjet, axis=-1)
+        nn_matched = ak.num(boostedtaus_in_pairs, axis=-1)
         no2tau = n_matched < 2
         no1tau = n_matched < 1
 
@@ -1470,7 +1584,338 @@ def get_CA_MASS(
             electron0_pt,
         )
 
+        ##tau+(FatJet-tau/e/m),jin + -,day 202601
+        anothertau_pt, anothertau_eta, anothertau_phi, anothertau_mass = vector_subtraction(
+            fatjets_pt,
+            fatjets_eta,
+            fatjets_phi,
+            fatjets_mass,
+            tau0_pt,
+            tau0_eta,
+            tau0_phi,
+            tau0_mass,
+        )
+
+        # mass_boostedtau_tat = CA_got(
+        #     met_pt,
+        #     met_phi,
+        #     fatjets_mass,
+        #     fatjets_masscorr,
+        #     tau0_eta,
+        #     anothertau_eta,
+        #     tau0_phi,
+        #     anothertau_phi,
+        #     tau0_pt,
+        #     anothertau_pt,
+        # )
+        # msoftdrop_boostedtau_tat = CA_got(
+        #     met_pt,
+        #     met_phi,
+        #     fatjets_msoftdrop,
+        #     fatjets_masscorr,
+        #     tau0_eta,
+        #     anothertau_eta,
+        #     tau0_phi,
+        #     anothertau_phi,
+        #     tau0_pt,
+        #     anothertau_pt,
+        # )
+        globalParT_massVisApplied_boostedtau_tat = CA_got(
+            met_pt,
+            met_phi,
+            fatjets_globalParT_massVisApplied,
+            fake_corr,
+            tau0_eta,
+            anothertau_eta,
+            tau0_phi,
+            anothertau_phi,
+            tau0_pt,
+            anothertau_pt,
+        )
+        # globalParT_massResApplied_boostedtau_tat = CA_got(
+        #     met_pt,
+        #     met_phi,
+        #     fatjets_globalParT_massResApplied,
+        #     fake_corr,
+        #     tau0_eta,
+        #     anothertau_eta,
+        #     tau0_phi,
+        #     anothertau_phi,
+        #     tau0_pt,
+        #     anothertau_pt,
+        # )
+        # particleNet_mass_legacy_boostedtau_tat = CA_got(
+        #     met_pt,
+        #     met_phi,
+        #     fatjets_particleNet_mass_legacy,
+        #     fake_corr,
+        #     tau0_eta,
+        #     anothertau_eta,
+        #     tau0_phi,
+        #     anothertau_phi,
+        #     tau0_pt,
+        #     anothertau_pt,
+        # )
+
+        tau_f_e_pt, tau_f_e_eta, tau_f_e_phi, tau_f_e_mass = vector_subtraction(
+            fatjets_pt,
+            fatjets_eta,
+            fatjets_phi,
+            fatjets_mass,
+            electron0_pt,
+            electron0_eta,
+            electron0_phi,
+            electron0_mass,
+        )
+
+        # mass_boostedtau_et_at = CA_got(
+        #     met_pt,
+        #     met_phi,
+        #     fatjets_mass,
+        #     fatjets_masscorr,
+        #     tau_f_e_eta,
+        #     electron0_eta,
+        #     tau_f_e_phi,
+        #     electron0_phi,
+        #     tau_f_e_pt,
+        #     electron0_pt,
+        # )
+        # msoftdrop_boostedtau_et_at = CA_got(
+        #     met_pt,
+        #     met_phi,
+        #     fatjets_msoftdrop,
+        #     fatjets_masscorr,
+        #     tau_f_e_eta,
+        #     electron0_eta,
+        #     tau_f_e_phi,
+        #     electron0_phi,
+        #     tau_f_e_pt,
+        #     electron0_pt,
+        # )
+        globalParT_massVisApplied_boostedtau_et_at = CA_got(
+            met_pt,
+            met_phi,
+            fatjets_globalParT_massVisApplied,
+            fake_corr,
+            tau_f_e_eta,
+            electron0_eta,
+            tau_f_e_phi,
+            electron0_phi,
+            tau_f_e_pt,
+            electron0_pt,
+        )
+        # globalParT_massResApplied_boostedtau_et_at = CA_got(
+        #     met_pt,
+        #     met_phi,
+        #     fatjets_globalParT_massResApplied,
+        #     fake_corr,
+        #     tau_f_e_eta,
+        #     electron0_eta,
+        #     tau_f_e_phi,
+        #     electron0_phi,
+        #     tau_f_e_pt,
+        #     electron0_pt,
+        # )
+        # particleNet_mass_legacy_boostedtau_et_at = CA_got(
+        #     met_pt,
+        #     met_phi,
+        #     fatjets_particleNet_mass_legacy,
+        #     fake_corr,
+        #     tau_f_e_eta,
+        #     electron0_eta,
+        #     tau_f_e_phi,
+        #     electron0_phi,
+        #     tau_f_e_pt,
+        #     electron0_pt,
+        # )
+
+        tau_f_m_pt, tau_f_m_eta, tau_f_m_phi, tau_f_m_mass = vector_subtraction(
+            fatjets_pt,
+            fatjets_eta,
+            fatjets_phi,
+            fatjets_mass,
+            muon0_pt,
+            muon0_eta,
+            muon0_phi,
+            muon0_mass,
+        )
+
+        # mass_boostedtau_mt_at = CA_got(
+        #     met_pt,
+        #     met_phi,
+        #     fatjets_mass,
+        #     fatjets_masscorr,
+        #     tau_f_m_eta,
+        #     muon0_eta,
+        #     tau_f_m_phi,
+        #     muon0_phi,
+        #     tau_f_m_pt,
+        #     muon0_pt,
+        # )
+        # msoftdrop_boostedtau_mt_at = CA_got(
+        #     met_pt,
+        #     met_phi,
+        #     fatjets_msoftdrop,
+        #     fatjets_masscorr,
+        #     tau_f_m_eta,
+        #     muon0_eta,
+        #     tau_f_m_phi,
+        #     muon0_phi,
+        #     tau_f_m_pt,
+        #     muon0_pt,
+        # )
+        globalParT_massVisApplied_boostedtau_mt_at = CA_got(
+            met_pt,
+            met_phi,
+            fatjets_globalParT_massVisApplied,
+            fake_corr,
+            tau_f_m_eta,
+            muon0_eta,
+            tau_f_m_phi,
+            muon0_phi,
+            tau_f_m_pt,
+            muon0_pt,
+        )
+        # globalParT_massResApplied_boostedtau_mt_at = CA_got(
+        #     met_pt,
+        #     met_phi,
+        #     fatjets_globalParT_massResApplied,
+        #     fake_corr,
+        #     tau_f_m_eta,
+        #     muon0_eta,
+        #     tau_f_m_phi,
+        #     muon0_phi,
+        #     tau_f_m_pt,
+        #     muon0_pt,
+        # )
+        # particleNet_mass_legacy_boostedtau_mt_at = CA_got(
+        #     met_pt,
+        #     met_phi,
+        #     fatjets_particleNet_mass_legacy,
+        #     fake_corr,
+        #     tau_f_m_eta,
+        #     muon0_eta,
+        #     tau_f_m_phi,
+        #     muon0_phi,
+        #     tau_f_m_pt,
+        #     muon0_pt,
+        # )
+
+        # new MET+FatJet
+        # pt_new, eta_new, phi_new, mass_fatjet_withMET = project_met_to_fatjet_p4(
+        #     fatjets_mass, fatjets_pt, fatjets_eta, fatjets_phi, fatjets_masscorr, met_pt, met_phi
+        # )
+        # pt_new, eta_new, phi_new, msoftdrop_fatjet_withMET = project_met_to_fatjet_p4(
+        #     fatjets_msoftdrop,
+        #     fatjets_pt,
+        #     fatjets_eta,
+        #     fatjets_phi,
+        #     fatjets_masscorr,
+        #     met_pt,
+        #     met_phi,
+        # )
+        pt_new, eta_new, phi_new, globalParT_massVisApplied_fatjet_withMET = (
+            project_met_to_fatjet_p4(
+                fatjets_globalParT_massVisApplied,
+                fatjets_pt,
+                fatjets_eta,
+                fatjets_phi,
+                fake_corr,
+                met_pt,
+                met_phi,
+            )
+        )
+        # pt_new, eta_new, phi_new, globalParT_massResApplied_fatjet_withMET = (
+        #     project_met_to_fatjet_p4(
+        #         fatjets_globalParT_massResApplied,
+        #         fatjets_pt,
+        #         fatjets_eta,
+        #         fatjets_phi,
+        #         fake_corr,
+        #         met_pt,
+        #         met_phi,
+        #     )
+        # )
+        # pt_new, eta_new, phi_new, particleNet_mass_legacy_fatjet_withMET = project_met_to_fatjet_p4(
+        #     fatjets_particleNet_mass_legacy,
+        #     fatjets_pt,
+        #     fatjets_eta,
+        #     fatjets_phi,
+        #     fake_corr,
+        #     met_pt,
+        #     met_phi,
+        # )
+
         output_map = {
+            "CA_tau_number": [
+                (~no2tau, nn_matched),
+                (no2tau, nn_matched),
+            ],
+            "CA_tau_number_in_fatjet": [
+                (~no2tau, n_matched),
+                (no2tau, n_matched),
+            ],
+            "CA_globalParT_massVisApplied_oneHPSTau": [
+                ((~no1tau) & no2tau, globalParT_massVisApplied_boostedtau_tat)
+            ],
+            "CA_globalParT_massVisApplied_oneHPSTau_thth": [
+                (~no2tau, globalParT_massVisApplied_boostedtau),
+                ((~no1tau) & no2tau, globalParT_massVisApplied_boostedtau_tat),
+                (no1tau, fatjets_globalParT_massVisApplied),
+            ],
+            "CA_globalParT_massVisApplied_oneHPSTauorMuon_thtm": [
+                ((~no1tau) & (~no1muon), globalParT_massVisApplied_boostedtau_mt),
+                ((~no1tau) & no1muon, globalParT_massVisApplied_boostedtau_tat),
+                (no1tau & (~no1muon), globalParT_massVisApplied_boostedtau_mt_at),
+                (no1tau & no1muon, fatjets_globalParT_massVisApplied),
+            ],
+            "CA_globalParT_massVisApplied_oneHPSTauorElectron_thte": [
+                ((~no1tau) & (~no1electron), globalParT_massVisApplied_boostedtau_et),
+                ((~no1tau) & no1electron, globalParT_massVisApplied_boostedtau_tat),
+                (no1tau & (~no1electron), globalParT_massVisApplied_boostedtau_et_at),
+                (no1tau & no1electron, fatjets_globalParT_massVisApplied),
+            ],
+            # this one is the lastest type of CA mass
+            "CA_globalParT_massVisApplied_with_delta_axis_merged": [
+                (~no2tau, globalParT_massVisApplied_boostedtau),  # 2tau
+                (
+                    (~no1tau) & no2tau & (~no1electron),
+                    globalParT_massVisApplied_boostedtau_et,
+                ),  # 1t1e0m
+                (
+                    (~no1tau) & no2tau & (~no1muon),
+                    globalParT_massVisApplied_boostedtau_mt,
+                ),  # 1t1m(0-1e)
+                (
+                    (~no1tau) & no2tau & no1electron & no1muon,
+                    globalParT_massVisApplied_boostedtau_tat,
+                ),  # 1t0e0m
+                (no1tau & (~no1electron), globalParT_massVisApplied_boostedtau_et_at),  # 0t1e0m
+                (no1tau & (~no1muon), globalParT_massVisApplied_boostedtau_mt_at),  # 0t0e1m
+                (no1tau & no1electron & no1muon, fatjets_globalParT_massVisApplied),  # 0t0e0m
+            ],
+            "CA_globalParT_massVisApplied_oneHPSTauorLepton_flag": [
+                (~no2tau, 1),  # 2tau
+                ((~no1tau) & no2tau & (~no1electron), 2),  # 1t1e0m
+                ((~no1tau) & no2tau & (~no1muon), 3),  # 1t1m(0-1e)
+                ((~no1tau) & no2tau & no1electron & no1muon, 4),  # 1t0e0m
+                (no1tau & (~no1electron), 5),  # 0t1e0m
+                (no1tau & (~no1muon), 6),  # 0t0e1m
+                (no1tau & no1electron & no1muon, 7),  # 0t0e0m
+            ],
+            # for MET checking
+            "CA_globalParT_massVisApplied_000_fatjetwithMET": [
+                (no1tau & no1electron & no1muon, globalParT_massVisApplied_fatjet_tt),  # 0t0e0m
+            ],
+            "CA_globalParT_massVisApplied_000_fatjet": [
+                (no1tau & no1electron & no1muon, fatjets_globalParT_massVisApplied),  # 0t0e0m
+            ],
+            "CA_globalParT_massVisApplied_000_fatjet_MET_with_same_dirc": [
+                (
+                    no1tau & no1electron & no1muon,
+                    globalParT_massVisApplied_fatjet_withMET,
+                ),  # 0t0e0m
+            ],
             # merged: et -> mt -> hh; eachchannel: tau -> subjet -> fatjet
             "CA_mass_merged": [
                 (no2subjet & no2tau, mass_fatjet_tt),
