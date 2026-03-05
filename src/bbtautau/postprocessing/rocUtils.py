@@ -186,7 +186,7 @@ class Discriminant:
         self.roc = roc
         return roc
 
-    def compute_metrics(self, bkg_eff=1e-4):
+    def compute_metrics(self, bkg_eff=1e-3):
         """
         Compute performance metrics for the discriminant at fixed background efficiency.
 
@@ -743,7 +743,7 @@ class ROCAnalyzer:
                 background_names,
             )
 
-    def compute_rocs(self, verbose=True, compute_metrics=False, bkg_eff=1e-4, parallel=False):
+    def compute_rocs(self, verbose=True, compute_metrics=False, bkg_eff=1e-3, parallel=False):
         """
         Compute ROC curves for all discriminants (and optionally metrics).
 
