@@ -86,29 +86,7 @@ def bin_values_with_edges(values: np.ndarray | pd.Series, bin_edges: np.ndarray)
 
     bin_indices = np.digitize(values, bin_edges)
 
-    # Create binned values: map indices to bin left edges
-    # Index 0 -> use first edge
-    # Index i (1..len-1) -> use bin_edges[i-1]
-    # Index len -> use last edge
-    binned = np.zeros_like(values)
-
-    # Values below first edge: use first edge
-    mask_below = bin_indices == 0
-    if np.any(mask_below):
-        binned[mask_below] = bin_edges[0]
-
-    # Values in middle bins: use left edge of bin
-    for i in range(1, len(bin_edges)):
-        mask = bin_indices == i
-        if np.any(mask):
-            binned[mask] = bin_edges[i - 1]
-
-    # Values above last edge: use last edge
-    mask_above = bin_indices == len(bin_edges)
-    if np.any(mask_above):
-        binned[mask_above] = bin_edges[-1]
-
-    return binned
+    return bin_indices
 
 
 def bin_features(
