@@ -13,7 +13,7 @@ CONFIG = {
         "gamma": 1.0,
         "lambda": 1.0,
         "colsample_bytree": 0.7,
-        "num_parallel_tree": 5,  # 50
+        "num_parallel_tree": 20,  # 50
         "eval_metric": "mlogloss",
         "tree_method": "hist",
         "num_class": 11,
