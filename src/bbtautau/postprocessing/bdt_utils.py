@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import pickle
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import matplotlib as mpl
@@ -18,7 +19,7 @@ from boostedhh.utils import PAD_VAL
 
 from bbtautau.postprocessing.bbtautau_types import Channel, LoadedSample
 from bbtautau.postprocessing.bdt_config import BDT_CONFIG
-from bbtautau.postprocessing.Samples import CHANNELS
+from bbtautau.postprocessing.Samples import CHANNELS, canonical_signal_key
 
 # Non-interactive backend for batch/containers
 mpl.use("Agg")
@@ -212,10 +213,33 @@ def get_bdt_preds_dir(
     return base_dir / tag / signal_dir / model_dir_name / channel.key / year
 
 
+MODEL_EXTENSIONS = (".ubj", ".json")
+
+
+def _resolve_model_path(model_dir: Path, modelname: str, fold_idx: int, n_folds: int) -> Path:
+    """Find the model file, preferring .ubj over .json for faster loading."""
+    stem = modelname if n_folds == 1 else f"{modelname}_fold{fold_idx}"
+    base = model_dir / modelname
+    for ext in MODEL_EXTENSIONS:
+        path = base / f"{stem}{ext}"
+        if path.exists():
+            return path
+    raise FileNotFoundError(
+        f"No model file found for {stem} in {base}. " f"Looked for extensions: {MODEL_EXTENSIONS}"
+    )
+
+
+def _load_single_booster(path: Path) -> xgb.Booster:
+    bst = xgb.Booster()
+    bst.load_model(str(path))
+    return bst
+
+
 def load_models(model_dir: Path, modelname: str, n_folds: int = 1) -> list[xgb.Booster]:
     """Load trained model(s) from disk.
 
     This unified function handles both n_folds=1 (single model) and n_folds>1 (k models).
+    Prefers .ubj (binary) over .json for faster loading, and loads k-fold models in parallel.
 
     Args:
         model_dir: Path to the directory containing the models
@@ -225,22 +249,38 @@ def load_models(model_dir: Path, modelname: str, n_folds: int = 1) -> list[xgb.B
     Returns:
         List of XGBoost Booster objects (length 1 for single model, length k for k-fold)
     """
-    boosters = []
-    for fold_idx in range(n_folds):
-        if n_folds == 1:
-            model_path = model_dir / modelname / f"{modelname}.json"
-        else:
-            model_path = model_dir / modelname / f"{modelname}_fold{fold_idx}.json"
+    paths = [_resolve_model_path(model_dir, modelname, i, n_folds) for i in range(n_folds)]
 
-        if not model_path.exists():
-            raise FileNotFoundError(
-                f"Model file not found: {model_path}. "
-                f"Expected structure: model_dir/modelname/modelname[_fold{{i}}].json"
-            )
-        bst = xgb.Booster()
-        bst.load_model(str(model_path))
-        boosters.append(bst)
+    if n_folds == 1:
+        return [_load_single_booster(paths[0])]
+
+    with ThreadPoolExecutor(max_workers=n_folds) as pool:
+        boosters = list(pool.map(_load_single_booster, paths))
     return boosters
+
+
+def convert_models_to_ubj(model_dir: Path, modelname: str, n_folds: int = 1) -> None:
+    """Convert existing .json model files to .ubj (UBJSON) for faster loading.
+
+    The original .json files are kept as backups. Run once per model after training.
+    """
+    base = model_dir / modelname
+    for fold_idx in range(n_folds):
+        stem = modelname if n_folds == 1 else f"{modelname}_fold{fold_idx}"
+        json_path = base / f"{stem}.json"
+        ubj_path = base / f"{stem}.ubj"
+        if ubj_path.exists():
+            print(f"  {ubj_path.name} already exists, skipping")
+            continue
+        if not json_path.exists():
+            print(f"  {json_path.name} not found, skipping")
+            continue
+        bst = xgb.Booster()
+        bst.load_model(str(json_path))
+        bst.save_model(str(ubj_path))
+        json_mb = json_path.stat().st_size / 1e6
+        ubj_mb = ubj_path.stat().st_size / 1e6
+        print(f"  {json_path.name} ({json_mb:.0f} MB) -> {ubj_path.name} ({ubj_mb:.0f} MB)")
 
 
 # Mapping from sample names to BDT column name prefixes
@@ -263,11 +303,14 @@ def _get_bdt_key(
 ):
     """Get the BDT column key for a signal channel.
 
-    Prefix all BDT columns with the signal key to distinguish models.
+    Prefix all BDT columns with the canonical signal key to distinguish production modes.
+    Variant suffixes (e.g., '-k2v0') are stripped so that models trained on different
+    variants of the same production mode produce the same discriminant column names.
     Remove trailing 'tt' from signal_key to avoid redundancy (e.g., ggfbbtt -> ggfbb).
     This gives cleaner names like BDTggfbbtauhtauh instead of BDTggfbbtttauhtauh.
     """
-    signal_base = signal.removesuffix("tt") if signal.endswith("tt") else signal
+    canonical = canonical_signal_key(signal)
+    signal_base = canonical.removesuffix("tt") if canonical.endswith("tt") else canonical
     if prefix_only:
         return f"BDT{signal_base}"
     else:
@@ -442,6 +485,7 @@ def compute_bdt_preds(
     if n_folds > 1:
         print(f"Loading {n_folds} k-fold models for '{modelname}'...")
     boosters = load_models(model_dir, modelname, n_folds)
+    print(f"Loaded {len(boosters)} boosters successfully")
 
     feature_names = [
         feat
@@ -649,6 +693,11 @@ def _load_cached_predictions(
             )
             return None, None
 
+        # Validate that event_ids is a structured array with the expected dtype
+        if not (isinstance(event_ids, np.ndarray) and event_ids.dtype == EVENT_ID_DTYPE):
+            print(f"Warning: Stale cache format for {sample} - will recompute")
+            return None, None
+
         return predictions, event_ids
     except Exception as e:
         print(f"Warning: Failed to load cache for {sample}: {e}")
@@ -820,13 +869,24 @@ def check_bdt_prediction_cache(
                 }
                 continue
 
-            # Find which events are new (not in cache) via vectorized lookup
-            order = np.argsort(cached_event_ids)
-            sorted_cached = cached_event_ids[order]
-            positions = np.searchsorted(sorted_cached, current_event_ids)
-            in_bounds = positions < len(sorted_cached)
-            candidate_pos = np.clip(positions, 0, max(len(sorted_cached) - 1, 0))
-            matches = in_bounds & (sorted_cached[candidate_pos] == current_event_ids)
+            # Find which events are new (not in cache) via set lookup
+            # Structured arrays (EVENT_ID_DTYPE) don't support searchsorted,
+            # so we use a hash-set of (luminosityBlock, event) tuples instead.
+            cached_set = set(
+                zip(
+                    cached_event_ids["luminosityBlock"].tolist(),
+                    cached_event_ids["event"].tolist(),
+                )
+            )
+            matches = np.array(
+                [
+                    (lb, ev) in cached_set
+                    for lb, ev in zip(
+                        current_event_ids["luminosityBlock"].tolist(),
+                        current_event_ids["event"].tolist(),
+                    )
+                ]
+            )
             new_event_indices = np.flatnonzero(~matches)
 
             cache_info[year][sample] = {

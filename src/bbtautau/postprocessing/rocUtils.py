@@ -942,7 +942,7 @@ class ROCAnalyzer:
         (plot_dir / "rocs").mkdir(parents=True, exist_ok=True)
 
         if thresholds is None:
-            thresholds = [0.7, 0.9, 0.95]
+            thresholds = [0.3, 0.7, 0.9, 0.95]
 
         # Get discriminant keys (with composite keys if needed)
         disc_keys = [self._get_discriminant_key(disc_name, signal_name) for disc_name in disc_names]

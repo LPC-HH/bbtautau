@@ -34,9 +34,15 @@ from bbtautau.postprocessing.bdt_utils import (
     save_training_wps,
 )
 from bbtautau.postprocessing.rocUtils import ROCAnalyzer, multiclass_confusion_matrix
-from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES
+from bbtautau.postprocessing.Samples import (
+    CHANNELS,
+    SAMPLES,
+    sig_keys_ggf,
+    sig_keys_vbf,
+)
 from bbtautau.postprocessing.utils import (
     _ensure_dir,
+    apply_triggers,
     base_filter,
     bbtautau_assignment,
     delete_columns,
@@ -153,7 +159,7 @@ class Trainer:
                 f"bkg_samples={self.bkg_sample_names}"
             )
 
-        self.cap_weights = False
+        self.cap_weights = True  # set to be always true, leave the logic here for record
         self.events_dict = {year: {} for year in self.years}
 
     def load_data(self, force_reload=False):
@@ -197,8 +203,7 @@ class Trainer:
                     multithread=True,
                 )
 
-                # ARE WE APPLYING TRIGGERS?
-                # apply_triggers(self.events_dict[year], year, channel)
+                apply_triggers(self.events_dict[year], year, channel=None)
 
                 self.events_dict[year] = delete_columns(
                     self.events_dict[year], year, channels=list(CHANNELS.values())
@@ -230,37 +235,41 @@ class Trainer:
             writer.writeheader()
             writer.writerows(stats)
 
-    def _process_samples_for_training(self, scale_rule="signal", balance="bysample_clip_1to10"):
+    @staticmethod
+    def _get_sample_group(sample_name):
+        """Determine which physics group a sample belongs to: 'ggf', 'vbf', or 'bkg'."""
+        for key in sig_keys_ggf:
+            if sample_name.startswith(key):
+                return "ggf"
+        for key in sig_keys_vbf:
+            if sample_name.startswith(key):
+                return "vbf"
+        return "bkg"
+
+    def _process_samples_for_training(self, balance="equal_groups_equal_channels"):
         """Process samples and compute weights for training.
 
         This is the common data processing logic used by prepare_training_set().
         Extracts features and computes rescaled weights for all samples.
 
         Args:
-            scale_rule: Rule for global scaling weights
-            balance: Rule for balancing samples
+            balance: Strategy for balancing sample weights. Options:
+                - 'bysample': each sample gets equal total weight
+                - 'equal_groups': equal total weight per physics group (ggF, VBF, bkg),
+                  distributed proportionally to n_events within each group
+                - 'equal_groups_equal_channels': like equal_groups, but within signal
+                  groups each channel gets equal total weight; within backgrounds
+                  weight is distributed proportionally to n_events
 
         Returns:
             tuple: (X, y, weights, weights_rescaled) - processed data arrays
         """
-        if scale_rule not in ["signal", "signal_3e-1", "signal_3"]:
-            raise ValueError(f"Invalid scale rule: {scale_rule}")
-
         if balance not in [
             "bysample",
-            "bysample_clip_1to10",
-            "bysample_clip_1to20",
-            "grouped_physics",
-            "sqrt_scaling",
-            "ens_weighting",
+            "equal_groups",
+            "equal_groups_equal_channels",
         ]:
             raise ValueError(f"Invalid balance rule: {balance}")
-
-        global_scale_factor = {
-            "signal": 1.0,
-            "signal_3e-1": 3e-1,
-            "signal_3": 3,
-        }
 
         # Initialize lists for features, labels, weights, and masks
         X_list = []
@@ -273,15 +282,6 @@ class Trainer:
 
         # Process each sample
         for year in self.years:
-            # Compute signal statistics for this year
-            total_signal_weight = np.concatenate(
-                [
-                    np.abs(self.events_dict[year][sig_sample].get_var("finalWeight"))
-                    for sig_sample in self.samples
-                    if self.samples[sig_sample].isSignal
-                ]
-            ).sum()
-
             len_signal = sum(
                 len(self.events_dict[year][sig_sample].events)
                 for sig_sample in self.samples
@@ -292,38 +292,35 @@ class Trainer:
                 [sample for sample in self.samples if self.samples[sample].isSignal]
             )
 
-            avg_signal_weight = total_signal_weight / len_signal
+            # Pre-compute per-group statistics for group-based balancing
+            group_stats = {
+                "ggf": {"n_events": 0, "n_channels": 0},
+                "vbf": {"n_events": 0, "n_channels": 0},
+                "bkg": {"n_events": 0, "n_channels": 0},
+            }
+            for sname in self.events_dict[year]:
+                grp = self._get_sample_group(sname)
+                group_stats[grp]["n_events"] += len(self.events_dict[year][sname].events)
+                group_stats[grp]["n_channels"] += 1
 
             for sample_name, sample in self.events_dict[year].items():
                 X_sample = pd.DataFrame({feat: sample.get_var(feat) for feat in self.feats})
                 weights = np.abs(sample.get_var("finalWeight").copy())
                 weights_rescaled = weights.copy()
 
-                # Aggregate for multi-year stats
                 key = ("Initial", sample.sample.label)
                 if key not in weight_stats_by_stage_sample:
                     weight_stats_by_stage_sample[key] = []
                 weight_stats_by_stage_sample[key].append(weights_rescaled.copy())
 
-                # Global rescaling by average signal weight
-                weights_rescaled = (
-                    weights_rescaled / avg_signal_weight * global_scale_factor[scale_rule]
-                )
-
-                key = ("Global rescaling", sample.sample.label)
-                if key not in weight_stats_by_stage_sample:
-                    weight_stats_by_stage_sample[key] = []
-                weight_stats_by_stage_sample[key].append(weights_rescaled.copy())
-
-                # Apply balance rescaling
+                # Apply balance rescaling directly on abs(finalWeight)
                 weights_rescaled = self._apply_balance_rescaling(
                     weights_rescaled=weights_rescaled,
                     balance=balance,
-                    sample=sample,
                     sample_name=sample_name,
-                    year=year,
+                    len_signal=len_signal,
                     len_signal_per_channel=len_signal_per_channel,
-                    global_scale_factor=global_scale_factor[scale_rule],
+                    group_stats=group_stats,
                 )
 
                 key = ("Balance rescaling", sample.sample.label)
@@ -437,98 +434,49 @@ class Trainer:
         self,
         weights_rescaled,
         balance,
-        sample,
         sample_name,
-        year,
+        len_signal,
         len_signal_per_channel,
-        global_scale_factor,
+        group_stats,
     ):
         """Apply balance rescaling to weights based on the chosen strategy.
 
         Args:
-            weights_rescaled: Current rescaled weights
+            weights_rescaled: Current rescaled weights (abs finalWeight)
             balance: Balance strategy name
-            sample: LoadedSample object
             sample_name: Name of the sample
-            year: Year string
+            len_signal: Total signal events across all signal channels
             len_signal_per_channel: Average signal events per channel
-            global_scale_factor: Global scale factor value
+            group_stats: Dict with per-group n_events and n_channels
 
         Returns:
             Rescaled weights array
         """
-        n_events = len(sample.events)
+        n_events = len(weights_rescaled)
+        current_sum = np.sum(weights_rescaled)
 
         if balance == "bysample":
-            weights_rescaled = weights_rescaled / np.sum(weights_rescaled) * len_signal_per_channel
+            target = len_signal_per_channel
 
-        elif balance == "bysample_clip_1to10":
-            target_total_weight = len_signal_per_channel * global_scale_factor
-            avg_weight_if_scaled = target_total_weight / n_events
-            min_avg_weight = global_scale_factor / 10.0
-            if avg_weight_if_scaled < min_avg_weight:
-                target_total_weight = min_avg_weight * n_events
-            scaling_factor = target_total_weight / np.sum(weights_rescaled)
-            weights_rescaled = weights_rescaled * scaling_factor
+        elif balance in ("equal_groups", "equal_groups_equal_channels"):
+            group = self._get_sample_group(sample_name)
+            group_budget = len_signal / 3.0
 
-        elif balance == "bysample_clip_1to20":
-            target_total_weight = len_signal_per_channel * global_scale_factor
-            avg_weight_if_scaled = target_total_weight / n_events
-            min_avg_weight = global_scale_factor / 20.0
-            if avg_weight_if_scaled < min_avg_weight:
-                target_total_weight = min_avg_weight * n_events
-            scaling_factor = target_total_weight / np.sum(weights_rescaled)
-            weights_rescaled = weights_rescaled * scaling_factor
+            if balance == "equal_groups":
+                target = group_budget * (n_events / group_stats[group]["n_events"])
+            else:  # equal_groups_equal_channels
+                if group in ("ggf", "vbf"):
+                    target = group_budget / group_stats[group]["n_channels"]
+                else:
+                    target = group_budget * (n_events / group_stats[group]["n_events"])
 
-        elif balance == "grouped_physics":
-            if sample.sample.isSignal:
-                target_total_weight = len_signal_per_channel * global_scale_factor
-            elif "ttbar" in sample_name:
-                ttbar_total_events = sum(
-                    len(self.events_dict[year][s].events)
-                    for s in self.samples
-                    if "ttbar" in s and s in self.events_dict[year]
-                )
-                ttbar_fraction = n_events / ttbar_total_events
-                target_total_weight = len_signal_per_channel * global_scale_factor * ttbar_fraction
-            else:
-                other_total_events = sum(
-                    len(self.events_dict[year][s].events)
-                    for s in self.samples
-                    if not self.samples[s].isSignal
-                    and "ttbar" not in s
-                    and s in self.events_dict[year]
-                )
-                other_fraction = n_events / other_total_events if other_total_events > 0 else 1.0
-                target_total_weight = len_signal_per_channel * global_scale_factor * other_fraction
-            scaling_factor = target_total_weight / np.sum(weights_rescaled)
-            weights_rescaled = weights_rescaled * scaling_factor
-
-        elif balance == "sqrt_scaling":
-            sqrt_factor = np.sqrt(n_events)
-            target_total_weight = (
-                sqrt_factor * np.sqrt(len_signal_per_channel) * global_scale_factor
-            )
-            scaling_factor = target_total_weight / np.sum(weights_rescaled)
-            weights_rescaled = weights_rescaled * scaling_factor
-
-        elif balance == "ens_weighting":  # Effective number of samples
-            beta = 0.999
-            cb_weight = (1 - beta) / (1 - beta**n_events)
-            signal_cb_weight = (1 - beta) / (1 - beta**len_signal_per_channel)
-            target_total_weight = (
-                (cb_weight / signal_cb_weight) * len_signal_per_channel * global_scale_factor
-            )
-            scaling_factor = target_total_weight / np.sum(weights_rescaled)
-            weights_rescaled = weights_rescaled * scaling_factor
-
-        return weights_rescaled
+        scaling_factor = target / current_sum
+        return weights_rescaled * scaling_factor
 
     def prepare_training_set(
         self,
         save_buffer=False,
-        scale_rule="signal",
-        balance="bysample_clip_1to10",
+        balance="equal_groups_equal_channels",
         prediction_only=False,
     ):
         """Prepare features and labels for training with k-fold cross-validation.
@@ -541,8 +489,7 @@ class Trainer:
 
         Args:
             save_buffer: Whether to save DMatrix buffer files for quicker loading
-            scale_rule: Rule for global scaling weights ('signal', 'signal_3e-1', 'signal_3')
-            balance: Rule for balancing samples
+            balance: Strategy for balancing sample weights
             prediction_only: If True, only create validation DMatrices (dval) and skip
                 training DMatrices to save memory. Used by compare_models.
         """
@@ -551,7 +498,7 @@ class Trainer:
 
         # Process samples (common logic)
         X, y, weights, weights_rescaled, masks, event_ids_list = self._process_samples_for_training(
-            scale_rule=scale_rule, balance=balance
+            balance=balance
         )
 
         print(f"\nPreparing training sets with n_folds={self.n_folds}...")
@@ -768,9 +715,9 @@ class Trainer:
 
             if save:
                 if self.n_folds == 1:
-                    model_path = self.output_dir / f"{self.modelname}.json"
+                    model_path = self.output_dir / f"{self.modelname}.ubj"
                 else:
-                    model_path = self.output_dir / f"{self.modelname}_fold{fold_idx}.json"
+                    model_path = self.output_dir / f"{self.modelname}_fold{fold_idx}.ubj"
                 bst.save_model(model_path)
                 print(f"Model saved to {model_path}")
 
@@ -1249,22 +1196,22 @@ def study_rescaling(
     tt_preselection: bool = False,
     importance_only: bool = False,
 ) -> dict:
-    """Study the impact of different rescaling rules on BDT performance.
+    """Study the impact of different balance strategies on BDT performance.
 
-    Trains the same model architecture with every combination of signal scaling
-    and sample-balancing rules, then produces comparison tables.
+    Trains the same model architecture with each balance strategy,
+    then produces comparison tables.
 
     Args:
         years: Year(s) of data to use (defaults to all years)
         modelname: Model config name (must exist in BDT_CONFIG)
-        output_dir: Root directory for the study; each (scale, balance)
-            combination gets its own subdirectory.
+        output_dir: Root directory for the study; each balance strategy
+            gets its own subdirectory.
         data_path: Path to input data directories
         tt_preselection: Apply tt preselection
         importance_only: Only load existing models and compute feature importance
 
     Returns:
-        Dictionary containing study results for each rescaling rule
+        Dictionary containing study results for each balance strategy
     """
     if years is None:
         years = ["all"]
@@ -1281,52 +1228,39 @@ def study_rescaling(
     if not importance_only:
         trainer.load_data(force_reload=True)
 
-    scale_rules = ["signal", "signal_3e-1", "signal_3"]
     balance_rules = [
         "bysample",
-        "bysample_clip_1to10",
-        "bysample_clip_1to20",
-        "grouped_physics",
-        "sqrt_scaling",
-        "ens_weighting",
+        "equal_groups",
+        "equal_groups_equal_channels",
     ]
 
     results = {}
     study_dir = trainer.output_dir
 
-    for scale_rule in scale_rules:
-        if scale_rule not in results:
-            results[scale_rule] = {}
-        for balance_rule in balance_rules:
-            try:
-                print(f"\nTraining with scale_rule={scale_rule}, balance_rule={balance_rule}")
+    for balance_rule in balance_rules:
+        try:
+            print(f"\nTraining with balance_rule={balance_rule}")
 
-                current_test_dir = study_dir / f"{scale_rule}_{balance_rule}"
-                current_test_dir.mkdir(parents=True, exist_ok=True)
+            current_test_dir = study_dir / balance_rule
+            current_test_dir.mkdir(parents=True, exist_ok=True)
 
-                trainer.output_dir = current_test_dir
+            trainer.output_dir = current_test_dir
 
-                if importance_only:
-                    trainer.load_model()
-                else:
-                    trainer.prepare_training_set(
-                        save_buffer=False, scale_rule=scale_rule, balance=balance_rule
-                    )
-                    trainer.train_model()
-                    results[scale_rule][balance_rule] = trainer.compute_rocs(
-                        savedir=current_test_dir
-                    )
+            if importance_only:
+                trainer.load_model()
+            else:
+                trainer.prepare_training_set(save_buffer=False, balance=balance_rule)
+                trainer.train_model()
+                results[balance_rule] = trainer.compute_rocs(savedir=current_test_dir)
 
-                trainer.evaluate_training(savedir=current_test_dir)
+            trainer.evaluate_training(savedir=current_test_dir)
 
-            except Exception as e:
-                print(
-                    f"Error training with scale_rule={scale_rule}, balance_rule={balance_rule}: {e}"
-                )
-                import traceback
+        except Exception as e:
+            print(f"Error training with balance_rule={balance_rule}: {e}")
+            import traceback
 
-                traceback.print_exc()
-                continue
+            traceback.print_exc()
+            continue
 
     if not importance_only:
         _rescaling_comparison(results, study_dir)
@@ -1335,22 +1269,17 @@ def study_rescaling(
 
 
 def _rescaling_comparison(results: dict, output_dir: Path) -> None:
-    """Enhanced comparison of different rescaling rules with comprehensive metrics.
+    """Comparison of different balance strategies with comprehensive metrics.
 
     Args:
-        results: Dictionary containing study results with comprehensive metrics
+        results: Dictionary mapping balance_rule -> study results
         output_dir: Directory to save comparison plots and tables
     """
-    # Safety check in debugging
     if not isinstance(output_dir, Path):
-        print(f"output_dir is not a Path, converting to Path: {output_dir}")
         output_dir = Path(output_dir)
 
-    # Get unique scale and balance rules
-    scale_rules = list(results.keys())
-    balance_rules = list(results[scale_rules[0]].keys())
+    balance_rules = list(results.keys())
 
-    # Define metrics to analyze (at fixed bkg_eff)
     metrics = {
         "roc_auc": "ROC AUC",
         "pr_auc": "PR AUC",
@@ -1360,61 +1289,41 @@ def _rescaling_comparison(results: dict, output_dir: Path) -> None:
     }
 
     for sig in ["hh", "he", "hm"]:
-        # Create individual metric tables
         for metric_key, metric_name in metrics.items():
             table_data = []
-            for scale_rule in scale_rules:
-                row = [scale_rule]
-                for balance_rule in balance_rules:
-                    try:
-                        metric_value = results[scale_rule][balance_rule]["metrics"][sig].get(
-                            metric_key, 0
-                        )
-                        row.append(f"{metric_value:.3f}")
-                    except (KeyError, TypeError):
-                        row.append("-")
-                table_data.append(row)
+            for balance_rule in balance_rules:
+                try:
+                    metric_value = results[balance_rule]["metrics"][sig].get(metric_key, 0)
+                    table_data.append([balance_rule, f"{metric_value:.3f}"])
+                except (KeyError, TypeError):
+                    table_data.append([balance_rule, "-"])
 
-            # Print and save individual metric table
             print(f"\n{metric_name} for {sig} channel:")
-            print(tabulate(table_data, headers=["Scale"] + balance_rules, tablefmt="grid"))
+            print(tabulate(table_data, headers=["Balance", metric_name], tablefmt="grid"))
 
             with (output_dir / f"{metric_key}_{sig}.txt").open("w") as f:
                 f.write(f"{metric_name} for {sig} channel:\n")
-                f.write(tabulate(table_data, headers=["Scale"] + balance_rules, tablefmt="grid"))
+                f.write(tabulate(table_data, headers=["Balance", metric_name], tablefmt="grid"))
 
-        # Create comprehensive summary table for this signal
         summary_data = []
-        for scale_rule in scale_rules:
-            for balance_rule in balance_rules:
-                try:
-                    metrics_dict = results[scale_rule][balance_rule]["metrics"][sig]
-                    summary_data.append(
-                        [
-                            scale_rule,
-                            balance_rule,
-                            f"{metrics_dict.get('roc_auc', 0):.3f}",
-                            f"{metrics_dict.get('pr_auc', 0):.3f}",
-                            f"{metrics_dict.get('signal_eff', 0):.3f}",
-                            f"{metrics_dict.get('precision', 0):.3f}",
-                            f"{metrics_dict.get('f1_score', 0):.3f}",
-                            f"{metrics_dict.get('threshold', 0):.3f}",
-                        ]
-                    )
-                except (KeyError, TypeError):
-                    summary_data.append([scale_rule, balance_rule] + ["-"] * 6)
+        for balance_rule in balance_rules:
+            try:
+                metrics_dict = results[balance_rule]["metrics"][sig]
+                summary_data.append(
+                    [
+                        balance_rule,
+                        f"{metrics_dict.get('roc_auc', 0):.3f}",
+                        f"{metrics_dict.get('pr_auc', 0):.3f}",
+                        f"{metrics_dict.get('signal_eff', 0):.3f}",
+                        f"{metrics_dict.get('precision', 0):.3f}",
+                        f"{metrics_dict.get('f1_score', 0):.3f}",
+                        f"{metrics_dict.get('threshold', 0):.3f}",
+                    ]
+                )
+            except (KeyError, TypeError):
+                summary_data.append([balance_rule] + ["-"] * 6)
 
-        # Print and save comprehensive summary
-        headers = [
-            "Scale",
-            "Balance",
-            "ROC AUC",
-            "PR AUC",
-            "Sig Eff",
-            "Precision",
-            "F1",
-            "Threshold",
-        ]
+        headers = ["Balance", "ROC AUC", "PR AUC", "Sig Eff", "Precision", "F1", "Threshold"]
         print(f"\nMetrics for {sig} channel (at bkg_eff=1e-3):")
         print(tabulate(summary_data, headers=headers, tablefmt="grid"))
 
@@ -1422,11 +1331,10 @@ def _rescaling_comparison(results: dict, output_dir: Path) -> None:
             f.write(f"Metrics for {sig} channel (at bkg_eff=1e-3):\n")
             f.write(tabulate(summary_data, headers=headers, tablefmt="grid"))
 
-    # Create cross-channel comparison for key metrics
-    _create_cross_channel_comparison(results, scale_rules, balance_rules, output_dir)
+    _create_cross_channel_comparison(results, balance_rules, output_dir)
 
 
-def _create_cross_channel_comparison(results, scale_rules, balance_rules, output_dir):
+def _create_cross_channel_comparison(results, balance_rules, output_dir):
     """Create comparison tables across all channels for key metrics."""
     key_metrics = ["roc_auc", "signal_eff", "precision", "f1_score"]
     channels = ["hh", "he", "hm"]
@@ -1434,23 +1342,20 @@ def _create_cross_channel_comparison(results, scale_rules, balance_rules, output
     for metric in key_metrics:
         print(f"\nCross-channel comparison: {metric.upper()}")
 
-        # Create table with channels as columns
         table_data = []
-        for scale_rule in scale_rules:
-            for balance_rule in balance_rules:
-                row = [f"{scale_rule}_{balance_rule}"]
-                for sig in channels:
-                    try:
-                        value = results[scale_rule][balance_rule]["metrics"][sig].get(metric, 0)
-                        row.append(f"{value:.3f}")
-                    except (KeyError, TypeError):
-                        row.append("-")
-                table_data.append(row)
+        for balance_rule in balance_rules:
+            row = [balance_rule]
+            for sig in channels:
+                try:
+                    value = results[balance_rule]["metrics"][sig].get(metric, 0)
+                    row.append(f"{value:.3f}")
+                except (KeyError, TypeError):
+                    row.append("-")
+            table_data.append(row)
 
-        headers = ["Method"] + channels
+        headers = ["Balance"] + channels
         print(tabulate(table_data, headers=headers, tablefmt="grid"))
 
-        # Save to file
         with (output_dir / f"cross_channel_{metric}.txt").open("w") as f:
             f.write(f"Cross-channel comparison: {metric.upper()}\n")
             f.write(tabulate(table_data, headers=headers, tablefmt="grid"))
@@ -2245,7 +2150,7 @@ if __name__ == "__main__":
         "--study-rescaling",
         action="store_true",
         default=False,
-        help="Study the impact of different rescaling rules on BDT performance",
+        help="Study the impact of different balance strategies on BDT performance",
     )
     parser.add_argument(
         "--eval-bdt-preds",

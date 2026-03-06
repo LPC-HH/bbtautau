@@ -72,12 +72,7 @@ SIGNAL_ORDERING = ["ggfbbtt", "vbfbbtt"]  # order of applying selection and veto
 
 # Working point bin edges for tt GloParT discriminants
 # Determine using the plot_cuts_hist.py script
-# # Example:
-# WPS_TTPART = {
-#     "ttFatJetParTXtauhtauhvsQCDTop": np.array([0.1, 0.2, 0.3, 0.4, 0.5]),
-#     "ttFatJetParTXtauhtauevsQCDTop": np.array([0.15, 0.25, 0.35, 0.45]),
-#     "ttFatJetParTXtauhtaumvsQCDTop": np.array([0.12, 0.22, 0.32, 0.42, 0.52]),
-# }
+
 WPS_TTPART: dict[str, np.ndarray] = {
     "ttFatJetParTXtauhtauhvsQCDTop": np.array(
         [0.4, 0.7722271084785461, 0.9961739778518677, 0.9997739195823669, 0.9999425411224365]

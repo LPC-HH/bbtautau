@@ -26,11 +26,11 @@ spec:
           name: bbtautauvol
         resources:
           limits:
-            memory: 80Gi
-            cpu: "12"
+            memory: ${memory}Gi
+            cpu: "19"
           requests:
-            memory: 80Gi
-            cpu: "10"
+            memory: ${memory}Gi
+            cpu: "16"
       volumes:
       - name: bbtautauvol
         persistentVolumeClaim:

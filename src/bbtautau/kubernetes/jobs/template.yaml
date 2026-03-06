@@ -26,11 +26,11 @@ spec:
           name: bbtautauvol
         resources:
           limits:
-            memory: 80Gi
+            memory: ${memory}Gi
             cpu: "2.4"
             nvidia.com/gpu: "1"
           requests:
-            memory: 80Gi
+            memory: ${memory}Gi
             cpu: "2"
             nvidia.com/gpu: "1"
       volumes:

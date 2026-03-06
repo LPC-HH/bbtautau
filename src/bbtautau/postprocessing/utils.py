@@ -570,26 +570,34 @@ def apply_triggers_data(events_dict: dict[str, LoadedSample], year: str, channel
 def apply_triggers(
     events_dict: dict[str, pd.DataFrame | LoadedSample],
     year: str,
-    channel: Channel,
+    channel: Channel | None = None,
 ):
     """Apply triggers in MC and data, and remove overlap between datasets."""
 
-    if not isinstance(next(iter(events_dict.values())), LoadedSample):
-        warnings.warn(
-            "Deprecation warning: Should switch to using the LoadedSample class in the future!",
-            stacklevel=1,
-        )
-        return apply_triggers_old(events_dict, year, channel)
-
-    # MC
-    for _skey, sample in events_dict.items():
-        if not sample.sample.isData:
-            triggered = np.sum(
-                [sample.get_var(hlt) for hlt in channel.triggers(year, mc_only=True)], axis=0
-            ).astype(bool)
-            sample.events = sample.events[triggered]
+    if channel is None:  # agnostic, used for BDT training
+        for _skey, sample in events_dict.items():
+            if not sample.sample.isData:
+                triggered = np.sum(
+                    [
+                        sample.get_var(hlt)
+                        for ch in CHANNELS.values()
+                        for hlt in ch.triggers(year, mc_only=True)
+                    ],
+                    axis=0,
+                ).astype(bool)
+                sample.events = sample.events[triggered]
+    else:
+        # MC: apply only the triggers for the specific channel
+        for _skey, sample in events_dict.items():
+            if not sample.sample.isData:
+                triggered = np.sum(
+                    [sample.get_var(hlt) for hlt in channel.triggers(year, mc_only=True)], axis=0
+                ).astype(bool)
+                sample.events = sample.events[triggered]
 
     if any(sample.sample.isData for sample in events_dict.values()):
+        if channel is None:
+            raise ValueError("Channel is required to apply triggers to data")
         apply_triggers_data(events_dict, year, channel)
 
     return events_dict

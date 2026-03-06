@@ -144,6 +144,17 @@ SM_SIGNALS_CHANNELS = []
 sig_keys_ggf = ["ggfbbtt"]
 sig_keys_vbf = ["vbfbbtt", "vbfbbtt-k2v0"]
 
+
+def canonical_signal_key(signal: str) -> str:
+    """Map a signal key to its canonical production-mode form.
+
+    Strips variant suffixes (e.g., '-k2v0') so that BDT discriminant columns
+    are named consistently regardless of which signal variant was used for training.
+    Examples: 'vbfbbtt-k2v0' -> 'vbfbbtt', 'ggfbbtt' -> 'ggfbbtt'
+    """
+    return signal.split("-")[0]
+
+
 # add individual bbtt channels
 for signal in SIGNALS:
     for channel, CHANNEL in CHANNELS.items():

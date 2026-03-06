@@ -1702,13 +1702,13 @@ Examples:
     disc_group.add_argument(
         "--ggf-modelname",
         default="11Feb26Full",
-        help="BDT model name for ggF (default: 6Feb26test)",
+        help="BDT model name for ggF",
     )
     disc_group.add_argument(
         "--vbf-modelname",
         type=str,
         default="11Feb26Full",
-        help="BDT model name for VBF (default: 6Feb26test)",
+        help="BDT model name for VBF",
     )
     disc_group.add_argument(
         "--at-inference",
