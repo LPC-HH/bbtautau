@@ -2121,7 +2121,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="28May25_baseline",
+        default="3Mar26_weak_deep7_vbfk2v0",
         help="Name of the model configuration to use",
     )
     parser.add_argument(
