@@ -42,7 +42,6 @@ from bbtautau.postprocessing.Samples import (
 )
 from bbtautau.postprocessing.utils import (
     _ensure_dir,
-    apply_triggers,
     base_filter,
     bbtautau_assignment,
     delete_columns,
@@ -203,7 +202,8 @@ class Trainer:
                     multithread=True,
                 )
 
-                apply_triggers(self.events_dict[year], year, channel=None)
+                # Need to check this!
+                # apply_triggers(self.events_dict[year], year, channel=None)
 
                 self.events_dict[year] = delete_columns(
                     self.events_dict[year], year, channels=list(CHANNELS.values())
