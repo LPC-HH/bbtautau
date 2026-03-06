@@ -521,6 +521,9 @@ def compute_bdt_preds(
         else:
             print(f"No WP bin edges found for features: {bin_feats}")
 
+    # Pre-load fold lookup once (avoids re-reading .npz per sample).
+    fold_lookup = load_fold_lookup(model_dir, modelname) if n_folds > 1 else None
+
     # Process each sample
     for year in events_dict:
         for sample, sample_data in events_dict[year].items():
@@ -554,15 +557,22 @@ def compute_bdt_preds(
             # Determine if this is a DATA sample
             is_data = sample_data.sample.isData
 
+            n_new = len(new_event_indices) if new_event_indices is not None else -1
+            needs_prediction = not use_incremental or n_new > 0
+
             # Fetch event-level identifiers only when needed (k-fold OOF or saving).
             need_event_vars = (n_folds > 1 and not is_data) or save_dir is not None
             luminosity_block = sample_data.get_var("luminosityBlock") if need_event_vars else None
             event = sample_data.get_var("event") if need_event_vars else None
 
             fold_assignments = None
-            if n_folds > 1 and not is_data:
+            if n_folds > 1 and not is_data and needs_prediction:
                 fold_assignments_all = get_sample_fold_assignments(
-                    model_dir, modelname, luminosity_block=luminosity_block, event=event
+                    model_dir,
+                    modelname,
+                    luminosity_block=luminosity_block,
+                    event=event,
+                    fold_lookup=fold_lookup,
                 )
 
                 if fold_assignments_all is not None:
@@ -622,7 +632,13 @@ def compute_bdt_preds(
                         is_data=is_data,
                     )
 
-            if use_incremental:
+            if use_incremental and n_target_events == 0:
+                # All events are cached -- reorder cached preds to match current order.
+                order = np.argsort(cached_event_ids)
+                sorted_cached = cached_event_ids[order]
+                positions = np.searchsorted(sorted_cached, current_event_ids)
+                y_pred = cached_preds[order[positions]]
+            elif use_incremental:
                 y_pred = _merge_predictions(
                     current_event_ids=current_event_ids,
                     cached_predictions=cached_preds,
@@ -640,7 +656,8 @@ def compute_bdt_preds(
                 signal_objectives=signal_objectives,
             )
 
-            if save_dir is not None:
+            has_new_events = not use_incremental or n_target_events > 0
+            if save_dir is not None and has_new_events:
                 file_dir = get_bdt_preds_dir(
                     base_dir=save_dir,
                     modelname=modelname,
@@ -869,24 +886,13 @@ def check_bdt_prediction_cache(
                 }
                 continue
 
-            # Find which events are new (not in cache) via set lookup
-            # Structured arrays (EVENT_ID_DTYPE) don't support searchsorted,
-            # so we use a hash-set of (luminosityBlock, event) tuples instead.
-            cached_set = set(
-                zip(
-                    cached_event_ids["luminosityBlock"].tolist(),
-                    cached_event_ids["event"].tolist(),
-                )
-            )
-            matches = np.array(
-                [
-                    (lb, ev) in cached_set
-                    for lb, ev in zip(
-                        current_event_ids["luminosityBlock"].tolist(),
-                        current_event_ids["event"].tolist(),
-                    )
-                ]
-            )
+            # Vectorized delta: sort cached IDs and use searchsorted to find matches.
+            order = np.argsort(cached_event_ids)
+            sorted_cached = cached_event_ids[order]
+            positions = np.searchsorted(sorted_cached, current_event_ids)
+            in_bounds = positions < len(sorted_cached)
+            candidate_pos = np.clip(positions, 0, max(len(sorted_cached) - 1, 0))
+            matches = in_bounds & (sorted_cached[candidate_pos] == current_event_ids)
             new_event_indices = np.flatnonzero(~matches)
 
             cache_info[year][sample] = {
@@ -1071,30 +1077,15 @@ def compute_or_load_bdt_preds(
         )
 
 
-def get_sample_fold_assignments(
+def load_fold_lookup(
     model_dir: Path,
     modelname: str,
-    luminosity_block: np.ndarray | None = None,
-    event: np.ndarray | None = None,
-) -> np.ndarray | None:
-    """Get fold assignments for a specific sample from the k-fold training metadata.
-
-    For each event in the sample, returns which fold's validation set it was in during training.
-    This is used for out-of-fold (OOF) predictions on MC samples.
-
-    Uses (luminosityBlock, event) tuples to uniquely identify events, allowing
-    proper handling of events that may not have been in training.
-
-    Args:
-        model_dir: Path to the directory containing the model
-        modelname: Name of the BDT model
-        sample_name: Name of the sample (e.g., 'ggfbbtthe', 'qcd')
-        luminosity_block: Array of luminosityBlock values for each event (required)
-        event: Array of event numbers for each event (required)
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Load and pre-sort fold indices from disk (call once, reuse across samples).
 
     Returns:
-        Array of fold indices (one per event), or None if not a k-fold model.
-        Events not in training will have fold index -1.
+        Tuple of (sorted_keys, sorted_fold) ready for searchsorted, or None if
+        no fold indices file exists.
     """
     fold_indices_npz_path = model_dir / modelname / "fold_indices.npz"
     if not fold_indices_npz_path.exists():
@@ -1104,22 +1095,54 @@ def get_sample_fold_assignments(
     train_lumi = fold_info["luminosityBlock"].astype(np.int64, copy=False)
     train_event = fold_info["event"].astype(np.int64, copy=False)
     train_fold = fold_info["fold"].astype(np.int64, copy=False)
-    n_events = len(luminosity_block)
-    fold_assignments = np.full(n_events, -1, dtype=int)  # -1 = not in training
-    if len(train_lumi) == 0:
-        return fold_assignments
 
-    # Build sortable structured keys to perform vectorized lookup.
-    key_dtype = np.dtype([("luminosityBlock", np.int64), ("event", np.int64)])
-    train_keys = np.empty(len(train_lumi), dtype=key_dtype)
+    if len(train_lumi) == 0:
+        return np.empty(0, dtype=EVENT_ID_DTYPE), np.empty(0, dtype=np.int64)
+
+    train_keys = np.empty(len(train_lumi), dtype=EVENT_ID_DTYPE)
     train_keys["luminosityBlock"] = train_lumi
     train_keys["event"] = train_event
 
     order = np.argsort(train_keys)
-    sorted_keys = train_keys[order]
-    sorted_fold = train_fold[order]
+    return train_keys[order], train_fold[order]
 
-    query_keys = np.empty(n_events, dtype=key_dtype)
+
+def get_sample_fold_assignments(
+    model_dir: Path,
+    modelname: str,
+    luminosity_block: np.ndarray | None = None,
+    event: np.ndarray | None = None,
+    fold_lookup: tuple[np.ndarray, np.ndarray] | None = None,
+) -> np.ndarray | None:
+    """Get fold assignments for a specific sample from the k-fold training metadata.
+
+    For each event in the sample, returns which fold's validation set it was in during training.
+    This is used for out-of-fold (OOF) predictions on MC samples.
+
+    Args:
+        model_dir: Path to the directory containing the model
+        modelname: Name of the BDT model
+        luminosity_block: Array of luminosityBlock values for each event (required)
+        event: Array of event numbers for each event (required)
+        fold_lookup: Pre-loaded (sorted_keys, sorted_fold) from load_fold_lookup.
+            If None, loads from disk (backward-compatible).
+
+    Returns:
+        Array of fold indices (one per event), or None if not a k-fold model.
+        Events not in training will have fold index -1.
+    """
+    if fold_lookup is None:
+        fold_lookup = load_fold_lookup(model_dir, modelname)
+    if fold_lookup is None:
+        return None
+
+    sorted_keys, sorted_fold = fold_lookup
+    n_events = len(luminosity_block)
+    fold_assignments = np.full(n_events, -1, dtype=int)
+    if len(sorted_keys) == 0:
+        return fold_assignments
+
+    query_keys = np.empty(n_events, dtype=EVENT_ID_DTYPE)
     query_keys["luminosityBlock"] = np.asarray(luminosity_block, dtype=np.int64)
     query_keys["event"] = np.asarray(event, dtype=np.int64)
 
