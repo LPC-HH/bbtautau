@@ -282,6 +282,9 @@ class Trainer:
 
         # Process each sample
         for year in self.years:
+            total_weight_rescaled = 0
+            N_events = 0
+
             len_signal = sum(
                 len(self.events_dict[year][sig_sample].events)
                 for sig_sample in self.samples
@@ -303,15 +306,17 @@ class Trainer:
                 group_stats[grp]["n_events"] += len(self.events_dict[year][sname].events)
                 group_stats[grp]["n_channels"] += 1
 
+            year_start_idx = len(weights_rescaled_list)
+
             for sample_name, sample in self.events_dict[year].items():
                 X_sample = pd.DataFrame({feat: sample.get_var(feat) for feat in self.feats})
-                weights = np.abs(sample.get_var("finalWeight").copy())
-                weights_rescaled = weights.copy()
+                weights = np.abs(sample.get_var("finalWeight"))
+                weights_rescaled = weights
 
                 key = ("Initial", sample.sample.label)
                 if key not in weight_stats_by_stage_sample:
                     weight_stats_by_stage_sample[key] = []
-                weight_stats_by_stage_sample[key].append(weights_rescaled.copy())
+                weight_stats_by_stage_sample[key].append(weights_rescaled)
 
                 # Apply balance rescaling directly on abs(finalWeight)
                 weights_rescaled = self._apply_balance_rescaling(
@@ -326,7 +331,7 @@ class Trainer:
                 key = ("Balance rescaling", sample.sample.label)
                 if key not in weight_stats_by_stage_sample:
                     weight_stats_by_stage_sample[key] = []
-                weight_stats_by_stage_sample[key].append(weights_rescaled.copy())
+                weight_stats_by_stage_sample[key].append(weights_rescaled)
 
                 if self.cap_weights:
                     median_w = np.median(weights_rescaled)
@@ -344,7 +349,7 @@ class Trainer:
                     key = ("Weight capping", sample.sample.label)
                     if key not in weight_stats_by_stage_sample:
                         weight_stats_by_stage_sample[key] = []
-                    weight_stats_by_stage_sample[key].append(weights_rescaled.copy())
+                    weight_stats_by_stage_sample[key].append(weights_rescaled)
 
                 X_list.append(X_sample)
                 weights_list.append(weights)
@@ -362,6 +367,20 @@ class Trainer:
                     mask = getattr(sample, mask_name, None)
                     if mask is not None:
                         masks_list[mask_name].append(mask)
+
+                total_weight_rescaled += np.sum(weights_rescaled)
+                N_events += len(weights_rescaled)
+
+            # Normalize so the average weight across all samples in this year is 1
+            global_rescale_factor = total_weight_rescaled / N_events
+            print(f"\nYear {year}: global rescale factor = {global_rescale_factor:.4g}")
+            for i, sample in enumerate(self.events_dict[year].values()):
+                idx = year_start_idx + i
+                weights_rescaled_list[idx] = weights_rescaled_list[idx] / global_rescale_factor
+                key = ("Global rescaling", sample.sample.label)
+                if key not in weight_stats_by_stage_sample:
+                    weight_stats_by_stage_sample[key] = []
+                weight_stats_by_stage_sample[key].append(weights_rescaled_list[idx])
 
         # Save weight statistics
         weight_stats = []
@@ -1288,7 +1307,7 @@ def _rescaling_comparison(results: dict, output_dir: Path) -> None:
         "f1_score": "F1",
     }
 
-    for sig in ["hh", "he", "hm"]:
+    for sig in list(results[balance_rules[0]]["metrics"].keys()):
         for metric_key, metric_name in metrics.items():
             table_data = []
             for balance_rule in balance_rules:
@@ -1337,7 +1356,7 @@ def _rescaling_comparison(results: dict, output_dir: Path) -> None:
 def _create_cross_channel_comparison(results, balance_rules, output_dir):
     """Create comparison tables across all channels for key metrics."""
     key_metrics = ["roc_auc", "signal_eff", "precision", "f1_score"]
-    channels = ["hh", "he", "hm"]
+    sigs = list(results[balance_rules[0]]["metrics"].keys())
 
     for metric in key_metrics:
         print(f"\nCross-channel comparison: {metric.upper()}")
@@ -1345,7 +1364,7 @@ def _create_cross_channel_comparison(results, balance_rules, output_dir):
         table_data = []
         for balance_rule in balance_rules:
             row = [balance_rule]
-            for sig in channels:
+            for sig in sigs:
                 try:
                     value = results[balance_rule]["metrics"][sig].get(metric, 0)
                     row.append(f"{value:.3f}")
@@ -1353,7 +1372,7 @@ def _create_cross_channel_comparison(results, balance_rules, output_dir):
                     row.append("-")
             table_data.append(row)
 
-        headers = ["Balance"] + channels
+        headers = ["Balance"] + sigs
         print(tabulate(table_data, headers=headers, tablefmt="grid"))
 
         with (output_dir / f"cross_channel_{metric}.txt").open("w") as f:
