@@ -11,6 +11,7 @@ kubernetes_dir = Path("/home/users/lumori/bbtautau/src/bbtautau/kubernetes")
 templ_file = kubernetes_dir / "jobs" / "template.yaml"
 templ_compare_file = kubernetes_dir / "jobs" / "template_compare.yaml"
 templ_rescaling_file = kubernetes_dir / "jobs" / "template_rescaling.yaml"
+templ_compare_light_file = kubernetes_dir / "jobs" / "template_compare_light.yaml"
 
 PVC = Path("/bbtautauvol")
 BDT_DIR = PVC / "bdt"
@@ -44,27 +45,49 @@ def from_json(args):
 
 def main(args):
 
+    # Presel is independent of --tag, derived from --tt-preselection
+    presel = "tt_presel" if getattr(args, "tt_preselection", False) else "no_presel"
+
     if args.from_json != "":
         args = from_json(args)
+        job_type = getattr(args, "job_type", "training")
+        default_tag = getattr(args, "model_name", getattr(args, "modelname", "default"))
+        run_tag = getattr(args, "tag", None) or default_tag
     else:
+        # Job type and default run_tag for path grouping
+        if args.compare_models or args.compare_light:
+            job_type = "comparisons"
+            default_tag = (
+                args.compare_tag or "-".join(Path(i).name for i in args.inputs)
+                if args.inputs
+                else "models"
+            )
+        elif args.study_rescaling:
+            job_type = "rescaling"
+            default_tag = args.modelname
+        else:
+            job_type = "training"
+            default_tag = args.modelname
+
+        run_tag = args.tag if args.tag else default_tag
+
         if args.job_name == "":
-            if args.compare_models:
-                if args.compare_tag:
-                    models_key = args.compare_tag
-                elif args.inputs:
-                    models_key = "-".join(Path(i).name for i in args.inputs)
-                else:
-                    models_key = "models"
-                args.job_name = "cmp_" + args.tag + "_" + models_key
+            if args.compare_models or args.compare_light:
+                prefix = "cmpl_" if args.compare_light else "cmp_"
+                models_key = default_tag.replace("-", "_")
+                args.job_name = prefix + models_key
             elif args.study_rescaling:
-                args.job_name = "lm_" + args.tag + "_rescaling_" + args.name
+                args.job_name = "rescaling_" + args.modelname.replace("-", "_")
             else:
-                args.job_name = "lm_" + args.tag + "_" + args.name
+                args.job_name = args.modelname.replace("-", "_")
 
-    args.job_name = "_".join(args.job_name.split("-")).lower()  # hyphens to underscores, lowercase
+    args.job_name = "_".join(args.job_name.split("-")).lower()
+    run_tag = "_".join(str(run_tag).split("-")).lower()
 
-    Path.mkdir(kubernetes_dir / f"bdt_trainings/{args.tag}", exist_ok=True)
-    file_name = kubernetes_dir / f"bdt_trainings/{args.tag}/{args.job_name}.yml"
+    # Path: bdt_trainings/{job_type}/{presel}/{run_tag}/{job_name}.yml
+    out_dir = kubernetes_dir / "bdt_trainings" / job_type / presel / run_tag
+    Path.mkdir(out_dir, parents=True, exist_ok=True)
+    file_name = out_dir / f"{args.job_name}.yml"
 
     if Path.exists(file_name):
         print(f"Job exists: {file_name}")
@@ -82,7 +105,9 @@ def main(args):
                 sys.exit()
 
     # Choose appropriate template based on mode
-    if args.compare_models:
+    if args.compare_light:
+        template_path = templ_compare_light_file
+    elif args.compare_models:
         template_path = templ_compare_file
     elif args.study_rescaling:
         template_path = templ_rescaling_file
@@ -100,7 +125,27 @@ def main(args):
     if getattr(args, "tt_preselection", False):
         extra_args += (" " if extra_args else "") + "--tt-preselection"
 
-    if args.compare_models:
+    if args.compare_light:
+        if not args.inputs:
+            raise ValueError("--compare-light requires --inputs")
+
+        inputs_str = " ".join(str(BDT_DIR / i) for i in args.inputs)
+        compare_args_str = f"--inputs {inputs_str}"
+        if args.disc_filter is not None:
+            compare_args_str += f" --disc-filter {args.disc_filter}"
+
+        compare_tag = args.compare_tag
+        if not compare_tag:
+            compare_tag = "-".join(Path(i).name for i in args.inputs)
+        output_dir = str(BDT_DIR / job_type / presel / run_tag / f"compare_light_{compare_tag}")
+
+        args_dict = {
+            "job_name": "-".join(args.job_name.split("_")),
+            "output_dir": output_dir,
+            "args": extra_args,
+            "compare_args": compare_args_str,
+        }
+    elif args.compare_models:
         if not args.inputs:
             raise ValueError("--compare-models requires --inputs")
 
@@ -111,9 +156,10 @@ def main(args):
         compare_tag = args.compare_tag
         if not compare_tag:
             compare_tag = "-".join(Path(i).name for i in args.inputs)
-        output_dir = str(BDT_DIR / args.tag / f"compare_{compare_tag}")
+        output_dir = str(BDT_DIR / job_type / presel / run_tag / f"compare_{compare_tag}")
 
         years_str = " ".join(args.years)
+        memory = 20 if getattr(args, "tt_preselection", False) else 80
         args_dict = {
             "job_name": "-".join(args.job_name.split("_")),
             "output_dir": output_dir,
@@ -121,24 +167,31 @@ def main(args):
             "datapath": str(PVC / args.datapath),
             "years": years_str,
             "compare_args": compare_args_str,
+            "memory": memory,
         }
     elif args.study_rescaling:
-        # Rescaling study mode: same template vars as training
+        memory = 20 if getattr(args, "tt_preselection", False) else 80
         args_dict = {
             "job_name": "-".join(args.job_name.split("_")),
-            "name": args.name,
-            "output_dir": str(BDT_DIR / args.tag / f"rescaling_{args.name}"),
+            "modelname": args.modelname,
+            "output_dir": str(
+                BDT_DIR / job_type / presel / run_tag / f"rescaling_{args.modelname}"
+            ),
             "args": extra_args,
             "datapath": str(PVC / args.datapath),
+            "memory": memory,
         }
     else:
-        # Training mode arguments
+        # Training mode arguments (template uses $name for --model)
+        memory = 20 if getattr(args, "tt_preselection", False) else 80
         args_dict = {
-            "job_name": "-".join(args.job_name.split("_")),  # change underscores to hyphens
-            "name": args.name,
-            "output_dir": str(BDT_DIR / args.tag / args.name),
+            "job_name": "-".join(args.job_name.split("_")),
+            "name": args.modelname,
+            "modelname": args.modelname,
+            "output_dir": str(BDT_DIR / job_type / presel / run_tag / args.modelname),
             "args": extra_args,
             "datapath": str(PVC / args.datapath),
+            "memory": memory,
         }
 
     with Path.open(file_name, "w") as f:
@@ -151,7 +204,12 @@ def main(args):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--from-json", default="", help="json file to load args from", type=str)
-    parser.add_argument("--name", default="", help="", type=str)
+    parser.add_argument(
+        "--modelname",
+        default="",
+        help="Model name to pass (used for training and base for rescaling study)",
+        type=str,
+    )
     parser.add_argument("--job-name", default="", help="defaults to name", type=str)
     parser.add_argument(
         "--compare-models",
@@ -161,9 +219,22 @@ def build_parser() -> argparse.ArgumentParser:
         action=BooleanOptionalAction,
     )
     parser.add_argument(
+        "--compare-light",
+        default=False,
+        help="lightweight comparison using only metrics_summary.csv files (no data loading)",
+        type=bool,
+        action=BooleanOptionalAction,
+    )
+    parser.add_argument(
+        "--disc-filter",
+        default=None,
+        help="substring filter for discriminant names in --compare-light (e.g. 'vsAll')",
+        type=str,
+    )
+    parser.add_argument(
         "--study-rescaling",
         default=False,
-        help="use rescaling study mode to sweep scale/balance rules",
+        help="use balance study mode to sweep balance strategies",
         type=bool,
         action=BooleanOptionalAction,
     )
@@ -187,7 +258,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="years to use for comparison/training",
         type=str,
     )
-    parser.add_argument("--tag", default="no_presel", help="tag for job / bdt", type=str)
+    parser.add_argument(
+        "--tag",
+        default="",
+        help="optional custom tag for grouping (default: modelname for training/rescaling, compare_tag or input names for comparisons)",
+        type=str,
+    )
     parser.add_argument(
         "--datapath", default="25Sep23AddVars_v12_private_signal", help="", type=str
     )

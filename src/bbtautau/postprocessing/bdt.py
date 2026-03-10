@@ -1126,13 +1126,13 @@ class Trainer:
                 print(f"No discriminant found for {sig} with background {background_names}")
                 continue
 
-            main_disc = disc_bkgall[0]
+            main_disc = next((d for d in discs if d.name == f"BDT {sig}vsAll"), None)
 
             # Store comprehensive metrics
-            if hasattr(main_disc, "metrics"):
+            if main_disc and hasattr(main_disc, "metrics"):
                 eval_results["metrics"][sig] = main_disc.get_metrics(as_dict=True)
             else:
-                print(f"Warning: Metrics not computed for {main_disc.name}")
+                print(f"Warning: Metrics not computed for {sig} vs All")
                 eval_results["metrics"][sig] = {}
 
             # Plot BDT output score distributions
