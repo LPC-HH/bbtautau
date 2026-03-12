@@ -41,8 +41,8 @@ MODEL_DIR = Path(
     "/home/users/lumori/bbtautau/src/bbtautau/postprocessing/classifier/trained_models"
 )
 BDT_EVAL_DIR = Path("/ceph/cms/store/user/lumori/bbtautau/BDT_predictions/")
-DATA_DIR = "/ceph/cms/store/user/lumori/bbtautau/skimmer/25Sep23AddVars_v12_private_signal"
-# DATA_DIR = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Jan22_PNetPresbb0p3_v12_private_signal"
+# DATA_DIR = "/ceph/cms/store/user/lumori/bbtautau/skimmer/25Sep23AddVars_v12_private_signal"
+DATA_DIR = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
 DATA_PATHS = path_dict(DATA_DIR)
 
 PLOT_DIR = Path("/home/users/lumori/bbtautau/plots")

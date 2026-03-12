@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import datetime
 import gc
 import logging
 import pickle
@@ -44,8 +45,21 @@ control_plot_vars = (
         for jet, jlabel in [("bb", "bb"), ("tt", r"\tau\tau")]
     ]
     + [
-        ShapeVar(var=f"{jet}FatJetMass", label=rf"$m^{{{jlabel}}}$ [GeV]", bins=[20, 250, 1250])
+        ShapeVar(
+            var=f"{jet}FatJetCAglobalParT_massVisApplied",
+            label=rf"$m^{{{jlabel}}}$ [GeV]",
+            bins=[20, 250, 1250],
+        )
         for jet, jlabel in [("bb", "bb"), ("tt", r"\tau\tau")]
+    ]
+    + [
+        ShapeVar(
+            var=f"{jet}FatJetParTX{tautau}vsQCDTop",
+            label=rf"ParT X{tautau}vsQCDTop {jlabel}",
+            bins=[20, 0, 1],
+        )
+        for jet, jlabel in [("bb", "bb"), ("tt", r"\tau\tau")]
+        for tautau in ["tauhtauh", "tauhtaue", "tauhtaum"]
     ]
     + [
         ShapeVar(
@@ -147,6 +161,16 @@ def main(args: argparse.Namespace):
     Main function that handles multiple bmin values.
     Data is loaded once, but templates are generated for each bmin value with updated cuts.
     """
+    # For templates we currently enforce processing one year at a time
+    years = args.years
+    if len(years) != 1:
+        raise ValueError(
+            "Template maker currently supports exactly one year at a time. "
+            "Please pass a single year via `--years YEAR`. "
+            "Multi-year concatenation is supported for --control-plots only."
+        )
+    year_label = years[0]
+
     # Convert single bmin value to list for backward compatibility
     if isinstance(args.bmin, int):
         args.bmin = [args.bmin]
@@ -169,7 +193,7 @@ def main(args: argparse.Namespace):
         models = [args.ggf_modelname] + ([args.vbf_modelname] if args.do_vbf else [])
 
     events_dict, cutflow = load_data_channel(
-        years=[args.year],  # Wrap single year in list
+        years=years,
         signals=args.sigs,
         channel=CHANNEL,
         test_mode=args.test_mode,
@@ -180,12 +204,12 @@ def main(args: argparse.Namespace):
     )
 
     # Keep dictionary structure consistent with legacy code, working out templates one year at a time
-    events_dict = events_dict[args.year]
+    events_dict = events_dict[year_label]
     args.sigs = {s + CHANNEL.key: SAMPLES[s + CHANNEL.key] for s in args.sigs}
     systematics: dict[str, dict] = {}
     systematics_path: Path | None = None
     if args.template_dir:
-        systematics_path = args.template_dir / f"{args.year}_systematics.pkl"
+        systematics_path = args.template_dir / f"{year_label}_systematics.pkl"
 
         if systematics_path.exists() and not args.override_systs:
             try:
@@ -202,7 +226,7 @@ def main(args: argparse.Namespace):
             except (pickle.UnpicklingError, EOFError, AttributeError, ValueError) as exc:
                 logger.warning("Failed to load systematics from %s: %s", systematics_path, exc)
 
-    systematics.setdefault(args.year, {})
+    systematics.setdefault(year_label, {})
 
     # Now process each bmin value
     for bmin in args.bmin:
@@ -226,13 +250,13 @@ def main(args: argparse.Namespace):
             )
 
             if template_dir_bmin:
-                (template_dir_bmin / "cutflows" / args.year).mkdir(parents=True, exist_ok=True)
+                (template_dir_bmin / "cutflows" / year_label).mkdir(parents=True, exist_ok=True)
             if plot_dir_bmin:
                 plot_dir_bmin.mkdir(parents=True, exist_ok=True)
 
             templates = get_templates(
                 events_dict,  # Same data for all bmin values
-                args.year,
+                year_label,
                 args.sigs,
                 args.bgs,
                 CHANNEL,  # Updated channel with new cuts
@@ -261,7 +285,7 @@ def main(args: argparse.Namespace):
 
             if args.template_dir:
                 print(f"Saving templates for bmin={bmin}")
-                template_file = template_dir_bmin / f"{args.year}_templates.pkl"
+                template_file = template_dir_bmin / f"{year_label}_templates.pkl"
                 save_templates(
                     templates,
                     template_file,
@@ -288,14 +312,13 @@ def main(args: argparse.Namespace):
 
 
 def control_plots(
-    events_dict: dict[str, pd.DataFrame],
+    events_dict: dict[str, LoadedSample],
     channel: Channel,
     sigs: dict[str, Sample],
     bgs: dict[str, Sample],
     control_plot_vars: list[ShapeVar],
     plot_dir: Path,
     year: str,
-    bbtt_masks: dict[str, pd.DataFrame] = None,
     weight_key: str = "finalWeight",
     hists: dict = None,
     cutstr: str = "",
@@ -331,22 +354,15 @@ def control_plots(
     if sig_scale_dict is None:
         sig_scale_dict = {sig_key: 2e5 for sig_key in sigs}
 
-    print(control_plot_vars)
-    print(selection)
-    print(list(events_dict.keys()))
-
     for shape_var in control_plot_vars:
         if shape_var.var not in hists:
             hists[shape_var.var] = putils.singleVarHist(
                 events_dict,
                 shape_var,
                 channel,
-                bbtt_masks=bbtt_masks,
                 weight_key=weight_key,
                 selection=selection,
             )
-
-    print(hists)
 
     ylim = (np.max([h.values() for h in hists.values()]) * 1.05) if same_ylim else None
 
@@ -392,6 +408,92 @@ def control_plots(
         merger_control_plots.close()
 
     return hists
+
+
+def run_control_plots(args: argparse.Namespace) -> None:
+
+    # Decide which years to load; allow combining years per channel
+    if args.years == ["all"]:
+        years = list(hh_vars.years)
+        year_label = "all"
+    elif not isinstance(args.years, list):
+        raise ValueError("Cannot process multiple years at once other than 'all'")
+    else:
+        years = [args.years]
+        year_label = args.years
+
+    if args.sigs is None:
+        args.sigs = SIGNALS
+
+    if args.bgs is None:
+        args.bgs = {bkey: b for bkey, b in SAMPLES.items() if b.get_type() == "bg"}
+    else:
+        # CLI provides a list[str]; normalize to the dict form used elsewhere in this module
+        args.bgs = {bkey: SAMPLES[bkey] for bkey in args.bgs}
+
+    CHANNEL = CHANNELS[args.channel]
+
+    models = None
+    # if not args.use_ParT:
+    #     models = [args.ggf_modelname] + ([args.vbf_modelname] if args.do_vbf else [])
+
+    events_dict = load_data_channel(
+        years=years,
+        signals=args.sigs,
+        channel=CHANNEL,
+        test_mode=args.test_mode,
+        tt_pres=args.tt_pres,
+        models=models,
+        cutflow=False,
+        load_bgs=True,
+    )
+
+    if len(years) > 1:
+        events_dict = putils.concatenate_years(events_dict, years=years)
+    else:
+        events_dict = events_dict[years[0]]
+    sigs = {s + CHANNEL.key: SAMPLES[s + CHANNEL.key] for s in args.sigs}
+    bgs = args.bgs
+
+    if not args.plot_dir:
+        raise ValueError("--plot-dir is required for --control-plots")
+
+    # Filter control plot vars if requested
+    if args.control_plot_vars:
+        requested = set(args.control_plot_vars)
+        selected_vars = [sv for sv in control_plot_vars if sv.var in requested]
+        missing = requested - {sv.var for sv in selected_vars}
+        if missing:
+            raise ValueError(
+                "Unknown --control-plot-vars: "
+                + ", ".join(sorted(missing))
+                + ". Available: "
+                + ", ".join(sorted({sv.var for sv in control_plot_vars}))
+            )
+    else:
+        selected_vars = list(control_plot_vars)
+
+    # For now: inclusive control plots, no additional pass/fail selections.
+    plot_dir_cp = args.plot_dir
+    plot_dir_cp.mkdir(parents=True, exist_ok=True)
+
+    control_plots(
+        events_dict=events_dict,
+        channel=CHANNEL,
+        sigs=sigs,
+        bgs=bgs,
+        control_plot_vars=selected_vars,
+        plot_dir=plot_dir_cp,
+        year=year_label,  # very inefficient rn
+        selection=None,
+        cutstr="",
+        cutlabel="Inclusive",
+        title=f"{CHANNEL.label} inclusive control plots",
+        combine_pdf=True,
+        plot_ratio=True,
+        show=False,
+        log="both",
+    )
 
 
 def get_templates(
@@ -782,9 +884,11 @@ def parse_args(parser=None):
     )
 
     parser.add_argument(
-        "--year",
+        "--years",
         required=True,
-        choices=hh_vars.years,
+        nargs="+",
+        choices=hh_vars.years + ["all"],
+        help="Year(s) to process. For templates, provide exactly one year. For --control-plots, multiple years will be concatenated.",
         type=str,
     )
 
@@ -932,9 +1036,6 @@ def parse_args(parser=None):
 
     args.model_dir = Path(args.model_dir)
 
-    if args.control_plots:
-        raise NotImplementedError("Control plots not implemented")
-
     if args.data_dir:
         args.data_dir = Path(args.data_dir)
 
@@ -950,7 +1051,20 @@ def parse_args(parser=None):
 
     # save args in args.plot_dir and args.template_dir if they exit
     if args.plot_dir:
-        args.plot_dir = Path(args.plot_dir) / args.channel / args.year
+        year_label = "+".join(args.years)
+        base_plot_dir = Path(args.plot_dir)
+
+        # For control plots, add extra top-level structure:
+        # <today>/<test|tt-presel|no-presel>/<channel>/<year_label>
+        if args.control_plots:
+            today = datetime.date.today().strftime("%Y%m%d")
+            presel_label = (
+                "test" if args.test_mode else ("tt-presel-0.3" if args.tt_pres else "no-presel")
+            )
+            args.plot_dir = base_plot_dir / today / presel_label / args.channel / year_label
+        else:
+            args.plot_dir = base_plot_dir / args.channel / year_label
+
         args.plot_dir.mkdir(parents=True, exist_ok=True)
         # with (args.plot_dir / "args.json").open("w") as f:
         #     try:
@@ -972,4 +1086,7 @@ def parse_args(parser=None):
 if __name__ == "__main__":
     mpl.use("Agg")
     args = parse_args()
-    main(args)
+    if args.control_plots:
+        run_control_plots(args)
+    else:
+        main(args)

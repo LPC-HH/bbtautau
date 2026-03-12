@@ -158,17 +158,21 @@ def tt_filters(
     in_filters: dict[str, list[tuple]] = None,
     num_fatjets: int = 3,
     tt_cut: float = 0.3,
+    qcd_only: bool = False,
+    agnostic: bool = True,
 ):
     if in_filters is None:
         in_filters = base_filter()
 
     filters = {}
 
+    bkgstr = "QCD" if qcd_only else "QCDTop"
+
     # Agnostic selection: at least one jet with ParT score in any channel is required. Note that cannot sum scores together at this stage.
-    if channel is None:
+    if channel is None or agnostic:
         for dtype, ifilters_bydtype in in_filters.items():
             filters[dtype] = [
-                ifilter + [(f"('ak8FatJetParTX{ch.tagger_label}vsQCDTop', '{n}')", ">=", tt_cut)]
+                ifilter + [(f"('ak8FatJetParTX{ch.tagger_label}vs{bkgstr}', '{n}')", ">=", tt_cut)]
                 for n in range(num_fatjets)
                 for ifilter in ifilters_bydtype
                 for ch in CHANNELS.values()
@@ -177,7 +181,7 @@ def tt_filters(
         for dtype, ifilters_bydtype in in_filters.items():
             filters[dtype] = [
                 ifilter
-                + [(f"('ak8FatJetParTX{channel.tagger_label}vsQCDTop', '{n}')", ">=", tt_cut)]
+                + [(f"('ak8FatJetParTX{channel.tagger_label}vs{bkgstr}', '{n}')", ">=", tt_cut)]
                 for n in range(num_fatjets)
                 for ifilter in ifilters_bydtype
             ]
@@ -273,6 +277,8 @@ def get_columns(
             ("ht", 1),
             ("nElectrons", 1),
             ("nMuons", 1),
+            ("nTaus", 1),
+            ("nBoostedTaus", 1),
             ("run", 1),
             ("event", 1),
             ("luminosityBlock", 1),
@@ -1041,7 +1047,7 @@ def load_data_channel(
 
         if tt_pres:
             filters_dict = tt_filters(
-                channel=channel, in_filters=filters_dict, num_fatjets=3, tt_cut=0.3
+                channel=channel, in_filters=filters_dict, num_fatjets=3, tt_cut=0.1
             )
 
         columns = get_columns(year, triggers_in_channel=channel)
