@@ -65,6 +65,8 @@ DATA_DIR = Path(
     "/ceph/cms/store/user/lumori/bbtautau"
 )  # default directory for saving BDT predictions
 
+CAP_WEIGHTS = False
+
 
 class Trainer:
 
@@ -158,7 +160,7 @@ class Trainer:
                 f"bkg_samples={self.bkg_sample_names}"
             )
 
-        self.cap_weights = True  # set to be always true, leave the logic here for record
+        self.cap_weights = CAP_WEIGHTS
         self.events_dict = {year: {} for year in self.years}
 
     def load_data(self, force_reload=False):
