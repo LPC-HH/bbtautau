@@ -108,7 +108,19 @@ def extract_base_signal_key(sig_key_with_channel: str) -> str:
         "ggfbbtthh" -> "ggfbbtt"
         "vbfbbtthm" -> "vbfbbtt"
     """
-    for base_sig in ["ggfbbtt", "vbfbbtt", "vbfbbtt-k2v0"]:
+    # Check longer names first so "vbfbbtt-k2v0hh" doesn't match "vbfbbtt"
+    for base_sig in [
+        "ggfbbtt-kl5p00",
+        "ggfbbtt-kl2p45",
+        "ggfbbtt-kl0p00",
+        "ggfbbtt",
+        "vbfbbtt-kvm1p6-k2v2p72-klm1p36",
+        "vbfbbtt-kvm0p962-k2v0p959-klm1p43",
+        "vbfbbtt-kvm0p758-k2v1p44-klm19p3",
+        "vbfbbtt-kv1p74-k2v1p37-kl14p4",
+        "vbfbbtt-k2v0",
+        "vbfbbtt",
+    ]:
         if sig_key_with_channel.startswith(base_sig):
             return base_sig
     # If no match, assume it's already a base key
@@ -475,6 +487,11 @@ def load_samples(
 
     # keep only the specified signal channels
     for signal in signals:
+        if signal not in events_dict:
+            print(f"Warning: Signal {signal} was not loaded, skipping channel splitting")
+            print(f"  Available keys in events_dict: {list(events_dict.keys())}")
+            print(f"  Signals requested: {signals}")
+            continue
         for channel in channels:
             if not loaded_samples:
                 # quick fix due to old naming still in samples

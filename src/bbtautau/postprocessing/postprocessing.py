@@ -153,11 +153,14 @@ def main(args: argparse.Namespace):
 
     print(f"Processing bmin values: {args.bmin}")
 
-    # These are the regions to use: either only ggf or both ggf and vbf
+    # These are the regions to use: either only ggf or both ggf and vbf.
+    # BSM ggf samples (ggfbbtt-kl0p00, etc.) have no separate regions - they contribute to
+    # pass_ggfbbtt (using ggfbbtt cuts) and pass_vbfbbtt (using vbfbbtt cuts), like vbfbbtt-k2v0.
     signal_regions = copy.deepcopy(SIGNAL_ORDERING) if args.do_vbf else ["ggfbbtt"]
 
     if args.sigs is None:
         args.sigs = SIGNALS
+
 
     if args.bgs is None:
         args.bgs = {bkey: b for bkey, b in SAMPLES.items() if b.get_type() == "bg"}
@@ -242,8 +245,15 @@ def main(args: argparse.Namespace):
                 {},  # TODO: systematics
                 sig_scale_dict={
                     f"ggfbbtt{CHANNEL.key}": 300,
+                    f"ggfbbtt-kl0p00{CHANNEL.key}": 300,
+                    f"ggfbbtt-kl2p45{CHANNEL.key}": 300,
+                    f"ggfbbtt-kl5p00{CHANNEL.key}": 300,
                     f"vbfbbtt{CHANNEL.key}": 500,
-                    f"vbfbbtt-k2v0{CHANNEL.key}": 40,
+                    f"vbfbbtt-k2v0{CHANNEL.key}": 400,
+                    f"vbfbbtt-kv1p74-k2v1p37-kl14p4{CHANNEL.key}": 400,
+                    f"vbfbbtt-kvm0p758-k2v1p44-klm19p3{CHANNEL.key}": 400,
+                    f"vbfbbtt-kvm0p962-k2v0p959-klm1p43{CHANNEL.key}": 400,
+                    f"vbfbbtt-kvm1p6-k2v2p72-klm1p36{CHANNEL.key}": 400,
                 },
                 # prev_cutflow=cutflow, Tried to add this but seems to not work. May want to fix later
                 template_dir=template_dir_bmin,
