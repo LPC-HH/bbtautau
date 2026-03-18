@@ -72,8 +72,12 @@ def extract_optimal_cuts_from_csv(
         tuple: (txbb_cut, txtt_cut) - The optimal cuts for the given bmin
     """
     # Construct path to CSV directory; Needs to match `get_plot_dir` in SensitivityStudy.py structure.
+    if signal[:7] == "ggfbbtt":
+        csv_signal = "ggfbbtt" # let bsm kl samples use ggbbtt cuts
+    else:
+        csv_signal = signal
     csv_dir = Path(sensitivity_dir).joinpath(
-        f"full_presel/{'ParT' if use_ParT else 'BDT'}/{'do_vbf' if do_vbf else 'ggf_only'}/sm_signals/orthogonal_channels/{signal}/{channel_name}"
+        f"full_presel/{'ParT' if use_ParT else 'BDT'}/{'do_vbf' if do_vbf else 'ggf_only'}/sm_signals/orthogonal_channels/{csv_signal}/{channel_name}"
     )
 
     # Look for any FOM-specific CSV files
@@ -143,11 +147,15 @@ def get_selection_regions(
             [-CUT_MAX_VAL, txtt_cut],
         ]
     else:
-        pass_cuts[_get_bdt_key(signal, channel, prefix_only=False)] = [txtt_cut, CUT_MAX_VAL]
-        fail_cuts[f"{bb_disc}+{_get_bdt_key(signal, channel, prefix_only=False)}"] = [
+        if signal[:7] == "ggfbbtt":
+            bdt_signal = "ggfbbtt"
+        else:
+            bdt_signal = signal
+        pass_cuts[_get_bdt_key(bdt_signal, channel, prefix_only=False)] = [txtt_cut, CUT_MAX_VAL]
+        fail_cuts[f"{bb_disc}+{_get_bdt_key(bdt_signal, channel, prefix_only=False)}"] = [
             [-CUT_MAX_VAL, txbb_cut],
             [-CUT_MAX_VAL, txtt_cut],
-        ]
+        ]   
 
     if vetoes is not None:
         for veto in vetoes:
