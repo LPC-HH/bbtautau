@@ -48,7 +48,15 @@ control_plot_vars = (
         ShapeVar(
             var=f"{jet}FatJetCAglobalParT_massVisApplied",
             label=rf"$m^{{{jlabel}}}$ [GeV]",
-            bins=[20, 250, 1250],
+            bins=[20, 50, 300],
+        )
+        for jet, jlabel in [("bb", "bb"), ("tt", r"\tau\tau")]
+    ]
+    + [
+        ShapeVar(
+            var=f"{jet}FatJetParTmassVisApplied",
+            label=rf"$m^{{{jlabel}}}$ [GeV]",
+            bins=[20, 50, 300],
         )
         for jet, jlabel in [("bb", "bb"), ("tt", r"\tau\tau")]
     ]
@@ -1059,7 +1067,7 @@ def parse_args(parser=None):
         if args.control_plots:
             today = datetime.date.today().strftime("%Y%m%d")
             presel_label = (
-                "test" if args.test_mode else ("tt-presel-0.3" if args.tt_pres else "no-presel")
+                "test" if args.test_mode else ("tt-presel" if args.tt_pres else "no-presel")
             )
             args.plot_dir = base_plot_dir / today / presel_label / args.channel / year_label
         else:

@@ -159,7 +159,7 @@ def main(args):
         output_dir = str(BDT_DIR / job_type / presel / run_tag / f"compare_{compare_tag}")
 
         years_str = " ".join(args.years)
-        memory = 20 if getattr(args, "tt_preselection", False) else 80
+        memory = 25 if getattr(args, "tt_preselection", False) else 80
         args_dict = {
             "job_name": "-".join(args.job_name.split("_")),
             "output_dir": output_dir,
@@ -170,7 +170,7 @@ def main(args):
             "memory": memory,
         }
     elif args.study_rescaling:
-        memory = 20 if getattr(args, "tt_preselection", False) else 80
+        memory = 25 if getattr(args, "tt_preselection", False) else 80
         args_dict = {
             "job_name": "-".join(args.job_name.split("_")),
             "modelname": args.modelname,
@@ -183,7 +183,7 @@ def main(args):
         }
     else:
         # Training mode arguments (template uses $name for --model)
-        memory = 20 if getattr(args, "tt_preselection", False) else 80
+        memory = 25 if getattr(args, "tt_preselection", False) else 80
         args_dict = {
             "job_name": "-".join(args.job_name.split("_")),
             "name": args.modelname,

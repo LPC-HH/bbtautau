@@ -188,8 +188,6 @@ class Trainer:
                         channel=None,
                         in_filters=filters_dict,
                         num_fatjets=3,
-                        tt_cut=0.1,
-                        qcd_only=True,
                     )
 
                 columns = get_columns(year)

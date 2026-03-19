@@ -153,12 +153,11 @@ def bb_filters(
 
 
 def tt_filters(
-    # if channel is None, it is agnostic selection
     channel: Channel = None,
     in_filters: dict[str, list[tuple]] = None,
     num_fatjets: int = 3,
-    tt_cut: float = 0.3,
-    qcd_only: bool = False,
+    tt_cut: float = 0.1,
+    qcd_only: bool = True,
     agnostic: bool = True,
 ):
     if in_filters is None:
@@ -1046,9 +1045,7 @@ def load_data_channel(
         # filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3)
 
         if tt_pres:
-            filters_dict = tt_filters(
-                channel=channel, in_filters=filters_dict, num_fatjets=3, tt_cut=0.1
-            )
+            filters_dict = tt_filters(channel=channel, in_filters=filters_dict, num_fatjets=3)
 
         columns = get_columns(year, triggers_in_channel=channel)
 

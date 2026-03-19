@@ -552,75 +552,69 @@ def plot_overlaid_cuts(
 
 def build_hist_for_sample_with_cuts(
     sample,
-    channel_key: str,
     varname: str,
     cuts_dict: dict,
     bins: int,
     x_min: float,
     x_max: float,
-    use_bdt: bool = False,
+    cut_var: str,
 ) -> Hist:
     """
-    Build histogram for a single sample with different Bmin cuts.
-    Returns a histogram with axes: (Bmin, variable).
+    Build histogram for a single sample with different cuts overlaid.
+    Returns a histogram with axes: (cut_level, variable).
 
     Args:
         sample: LoadedSample object
-        channel_key: Channel key
         varname: Variable name to histogram
-        cuts_dict: Dictionary mapping Bmin values to cut thresholds
+        cuts_dict: Dictionary mapping cut labels to cut thresholds (applied on cut_var)
         bins: Number of bins
         x_min: Minimum x value
         x_max: Maximum x value
-        use_bdt: Whether to use BDT score for cuts
+        cut_var: Variable name on which cuts are applied
     """
-    channel = CHANNELS[channel_key]
-    taukey = channel.tagger_label
-
-    # Create histogram with Bmin axis
-    bmin_labels = [f"Bmin={bmin}" for bmin in cuts_dict]
+    cut_labels = list(cuts_dict.keys())
     h = Hist(
-        hist.axis.StrCategory(bmin_labels, name="Bmin"),
+        hist.axis.StrCategory(cut_labels, name="cut_level"),
         hist.axis.Regular(bins, x_min, x_max, name=varname),
         storage="weight",
     )
 
-    # Get variable for cut
-    if use_bdt:
-        xtt = sample.get_var(f"BDTScore{taukey}vsAll")
+    if cut_var == "aggregate_ParT":  # special case
+        arrs = np.stack(
+            [
+                sample.get_var(f"ttFatJetParTX{channel.tagger_label}vsQCDTop")
+                for channel in CHANNELS.values()
+            ],
+            axis=0,
+        )
+        xcut = np.max(arrs, axis=0)
     else:
-        xtt = sample.get_var(f"ttFatJetParTX{taukey}vsQCDTop")
-
+        xcut = sample.get_var(cut_var)
     vals = sample.get_var(varname)
     weight = sample.get_var("finalWeight")
 
     print(f"  Total events before cuts: {len(vals)}")
     print(f"  Variable '{varname}' range: [{np.min(vals):.3f}, {np.max(vals):.3f}]")
     print(f"  Histogram bin range: [{x_min}, {x_max}]")
-    print(f"  Cut variable range: [{np.min(xtt):.3f}, {np.max(xtt):.3f}]")
+    print(f"  Cut variable '{cut_var}' range: [{np.min(xcut):.3f}, {np.max(xcut):.3f}]")
 
-    # Check if data is outside histogram range
     n_outside = np.sum((vals < x_min) | (vals > x_max))
     if n_outside > 0:
         print(f"  WARNING: {n_outside}/{len(vals)} events outside histogram range!")
 
-    # Fill histogram for each Bmin cut
-    for bmin_value, cut_xtt in cuts_dict.items():
-        sel = xtt >= cut_xtt
-
-        # Apply selection to values and weights
+    for label, threshold in cuts_dict.items():
+        sel = xcut >= threshold
         vals_sel = vals[sel]
         weight_sel = weight[sel]
 
         print(
-            f"    Bmin={bmin_value}: cut={cut_xtt:.3f}, events passing={len(vals_sel)}, sum(weights)={np.sum(weight_sel):.2f}"
+            f"    {label}: cut={threshold:.3f}, events passing={len(vals_sel)}, sum(weights)={np.sum(weight_sel):.2f}"
         )
 
         if len(vals_sel):
-            h.fill(Bmin=f"Bmin={bmin_value}", **{varname: vals_sel}, weight=weight_sel)
+            h.fill(cut_level=label, **{varname: vals_sel}, weight=weight_sel)
 
-    # Check histogram total
-    total_events = np.sum([h[f"Bmin={bmin}", :].values().sum() for bmin in cuts_dict])
+    total_events = np.sum([h[label, :].values().sum() for label in cuts_dict])
     print(f"  Total events in histogram: {total_events:.2f}")
 
     return h
@@ -1437,34 +1431,49 @@ def run_cuts_hist_mode(args, channel: Channel, channel_name: str, years: list[st
     outdir = Path(args.output_dir) / assignment_type / "cut_hists" / channel_name
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # Read CSV
-    opt_results = pd.read_csv(args.csv, index_col=0)
-    # Identify Bmin columns
-    bmin_cols = [c for c in opt_results.columns if c.startswith("Bmin=")]
-    if not bmin_cols:
-        raise ValueError("No Bmin= columns found in CSV")
+    # Resolve the variable on which cuts are applied
+    taukey = channel.tagger_label
+    if args.cut_var is not None:
+        cut_var = args.cut_var
+    elif args.use_bdt:
+        cut_var = f"BDTScore{taukey}vsAll"
+    else:
+        cut_var = f"ttFatJetParTX{taukey}vsQCDTop"
+    print(f"Applying cuts on variable: {cut_var}")
 
-    # Extract cut values for each Bmin
-    bmin_cuts = {}
-    for col in bmin_cols:
-        try:
-            cut_xtt = float(opt_results.loc["Cut_Xtt", col])
-            bmin_value = col.split("=")[1]  # Extract the number from "Bmin=X"
-            bmin_cuts[bmin_value] = cut_xtt
-        except Exception as e:
-            print(f"Skipping column {col}: {e}")
-            continue
+    # Build cuts_dict: maps cut label -> threshold value
+    if args.csv is not None:
+        # Load optimized BDT thresholds indexed by Bmin from CSV
+        opt_results = pd.read_csv(args.csv, index_col=0)
+        bmin_cols = [c for c in opt_results.columns if c.startswith("Bmin=")]
+        if not bmin_cols:
+            raise ValueError("No Bmin= columns found in CSV")
 
-    # Sort by Bmin value for consistent ordering
-    bmin_cuts = dict(sorted(bmin_cuts.items(), key=lambda x: float(x[0])))
+        bmin_cuts = {}
+        for col in bmin_cols:
+            try:
+                cut_xtt = float(opt_results.loc["Cut_Xtt", col])
+                bmin_value = col.split("=")[1]
+                bmin_cuts[bmin_value] = cut_xtt
+            except Exception as e:
+                print(f"Skipping column {col}: {e}")
+                continue
 
-    # Select subset of Bmin values: every Nth one, up to max_bmin_plots
-    bmin_items = list(bmin_cuts.items())
-    selected_bmin_cuts = dict(bmin_items[:: args.bmin_step][: args.max_bmin_plots])
-
-    print(
-        f"Selected {len(selected_bmin_cuts)} Bmin values to plot: {list(selected_bmin_cuts.keys())}"
-    )
+        bmin_cuts = dict(sorted(bmin_cuts.items(), key=lambda x: float(x[0])))
+        bmin_items = list(bmin_cuts.items())
+        selected_bmin = dict(bmin_items[:: args.bmin_step][: args.max_bmin_plots])
+        selected_cuts = {f"Bmin={bmin}": cut for bmin, cut in selected_bmin.items()}
+        legend_labels = [
+            f"{cut_var} > {cut:.3f} (Bmin > {bmin})" for bmin, cut in selected_bmin.items()
+        ]
+        print(f"Selected {len(selected_cuts)} Bmin values from CSV: {list(selected_bmin.keys())}")
+    else:
+        # Use thresholds provided directly on the command line
+        thresholds = [float(t) for t in args.thresholds]
+        selected_thresholds = sorted(thresholds)[: args.max_bmin_plots]
+        selected_cuts = {f"{t:.3f}": t for t in selected_thresholds}
+        legend_labels = [f"{cut_var} > {t:.3f}" for t in selected_thresholds]
+        print(f"Using {len(selected_cuts)} thresholds: {selected_thresholds}")
 
     # Load events for this channel using load_data_channel (matching SensitivityStudy.py pattern)
     # One channel at a time, with backgrounds and data
@@ -1481,7 +1490,6 @@ def run_cuts_hist_mode(args, channel: Channel, channel_name: str, years: list[st
         at_inference=args.at_inference,
         load_bgs=True,  # Load backgrounds for plotting
         load_data=True,  # Load data for plotting
-        ttvsbb=args.ttvsbb,
     )
 
     # Merge events across all years for plotting
@@ -1512,33 +1520,22 @@ def run_cuts_hist_mode(args, channel: Channel, channel_name: str, years: list[st
         for sample_key, sample in merged_events.items():
             print(f"\nProcessing sample: {sample_key}, variable: {var}")
 
-            # Build histogram for this sample with cuts
             h = build_hist_for_sample_with_cuts(
                 sample,
-                channel_name,
                 var,
-                selected_bmin_cuts,
+                selected_cuts,
                 args.bins,
                 xmin,
                 xmax,
-                args.use_bdt,
+                cut_var,
             )
 
-            # Create filenames
             save_path_pdf = var_outdir / f"{sample_key}.pdf"
             save_path_png = var_outdir / f"{sample_key}.png"
 
-            # Create region label
             region_label = f"{channel.label}\n{sample_key}"
+            axis_labels = list(selected_cuts.keys())
 
-            # Get axis labels and legend labels for cuts
-            axis_labels = [f"Bmin={bmin}" for bmin in selected_bmin_cuts]
-            legend_labels = [
-                f"BDT score > {selected_bmin_cuts[bmin]:.3f} (Bmin > {bmin})"
-                for bmin in selected_bmin_cuts
-            ]
-
-            # Skip if no cuts to plot
             if not axis_labels:
                 print(f"Warning: No cuts to plot for {sample_key}, skipping...")
                 continue
@@ -1548,31 +1545,18 @@ def run_cuts_hist_mode(args, channel: Channel, channel_name: str, years: list[st
             print(f"  Legend labels: {legend_labels}")
             print(f"  Histogram axes: {h.axes.name}")
 
-            # Save PDF
-            plot_overlaid_cuts(
-                h,
-                cut_labels=axis_labels,
-                legend_labels=legend_labels,
-                years=years,
-                region_label=region_label,
-                cmslabel="Work in progress",
-                name=str(save_path_pdf),
-                show=False,
-            )
-            print(f"Saved {save_path_pdf}")
-
-            # Save PNG
-            plot_overlaid_cuts(
-                h,
-                cut_labels=axis_labels,
-                legend_labels=legend_labels,
-                years=years,
-                region_label=region_label,
-                cmslabel="Work in progress",
-                name=str(save_path_png),
-                show=False,
-            )
-            print(f"Saved {save_path_png}")
+            for save_path in (save_path_pdf, save_path_png):
+                plot_overlaid_cuts(
+                    h,
+                    cut_labels=axis_labels,
+                    legend_labels=legend_labels,
+                    years=years,
+                    region_label=region_label,
+                    cmslabel="Work in progress",
+                    name=str(save_path),
+                    show=False,
+                )
+                print(f"Saved {save_path}")
 
 
 def run_jet_assignment_mode(args, channel: Channel, channel_name: str, years: list[str]):
@@ -1743,6 +1727,12 @@ def main():
 
     # Arguments for --cuts-hist mode
     parser.add_argument(
+        "--thresholds",
+        nargs="+",
+        default=[0.1, 0.3, 0.5, 0.8, 0.9, 0.95],
+        help="Thresholds to plot (required for --cuts-hist)",
+    )
+    parser.add_argument(
         "--csv",
         type=str,
         default=None,
@@ -1765,6 +1755,16 @@ def main():
         "--auto-range", action="store_true", help="Automatically determine xmin/xmax from data"
     )
     parser.add_argument("--use-bdt", action="store_true", default=True)
+    parser.add_argument(
+        "--cut-var",
+        type=str,
+        default=None,
+        help=(
+            "Variable to apply cuts on. If not set, defaults to the BDT score "
+            "(when --use-bdt) or the tt discriminant. Use --csv to supply thresholds "
+            "from an optimization file, or --thresholds for direct threshold values."
+        ),
+    )
     parser.add_argument(
         "--max-bmin-plots",
         type=int,
@@ -1810,11 +1810,8 @@ def main():
     args = parser.parse_args()
 
     # Validate task-specific arguments
-    if args.cuts_hist:
-        if args.csv is None:
-            parser.error("--csv is required for --cuts-hist mode")
-        if args.variables is None:
-            parser.error("--variables is required for --cuts-hist mode")
+    if args.cuts_hist and args.variables is None:
+        parser.error("--variables is required for --cuts-hist mode")
 
     years = hh_vars.years if args.years[0] == "all" else list(args.years)
 
