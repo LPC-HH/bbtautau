@@ -14,12 +14,12 @@ CONFIG = {
     "hyperpars": {
         "objective": "multi:softprob",
         "max_depth": 9,
-        "eta": 0.05008122566891448,
-        "subsample": 0.5134834928372369,
+        "eta": 0.06806498053513158,
+        "subsample": 0.2773933971348948,
         "alpha": 1.0,
         "gamma": 1.0,
         "lambda": 1.0,
-        "colsample_bytree": 0.6594431044094771,
+        "colsample_bytree": 0.6177772417637908,
         "num_parallel_tree": 18,
         "eval_metric": "mlogloss",
         "tree_method": "hist",
@@ -57,6 +57,6 @@ CONFIG = {
             "ttMuoncharge",
         ],
         "away": ["ttJetAwayPt", "ttJetAwayPhi", "ttJetAwayEta", "ttJetAwayMass"],
-        "misc": ["METPt", "METPhi", "ht"],
+        "misc": ["METPt", "METPhi", "ht", "METsignificance"],
     },
 }
