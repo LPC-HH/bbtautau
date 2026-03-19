@@ -273,6 +273,7 @@ def get_columns(
             ("nFatJets", 1),
             ("METPt", 1),
             ("METPhi", 1),
+            ("METsignificance", 1),
             ("ht", 1),
             ("nElectrons", 1),
             ("nMuons", 1),
