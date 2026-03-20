@@ -250,7 +250,7 @@ class Trainer:
                 return "vbf"
         return "bkg"
 
-    def _process_samples_for_training(self, balance="equal_groups_equal_channels"):
+    def _process_samples_for_training(self, balance="bysample"):
         """Process samples and compute weights for training.
 
         This is the common data processing logic used by prepare_training_set().
@@ -499,7 +499,7 @@ class Trainer:
     def prepare_training_set(
         self,
         save_buffer=False,
-        balance="equal_groups_equal_channels",
+        balance="bysample",
         prediction_only=False,
     ):
         """Prepare features and labels for training with k-fold cross-validation.
