@@ -183,7 +183,7 @@ def main(args):
         }
     else:
         # Training mode arguments (template uses $name for --model)
-        memory = 25 if getattr(args, "tt_preselection", False) else 80
+        memory = 32 if getattr(args, "tt_preselection", False) else 80
         args_dict = {
             "job_name": "-".join(args.job_name.split("_")),
             "name": args.modelname,
@@ -264,9 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="optional custom tag for grouping (default: modelname for training/rescaling, compare_tag or input names for comparisons)",
         type=str,
     )
-    parser.add_argument(
-        "--datapath", default="25Sep23AddVars_v12_private_signal", help="", type=str
-    )
+    parser.add_argument("--datapath", default="26Mar5All_v12_private_signal", help="", type=str)
     parser.add_argument(
         "--samples",
         nargs="+",

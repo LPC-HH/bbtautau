@@ -46,7 +46,7 @@ control_plot_vars = (
     ]
     + [
         ShapeVar(
-            var=f"{jet}FatJetCAglobalParT_massVisApplied",
+            var=f"{jet}FatJetCAglobalParT_massVisApplied_with_delta_axis_merged",
             label=rf"$m^{{{jlabel}}}$ [GeV]",
             bins=[20, 50, 300],
         )

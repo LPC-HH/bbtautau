@@ -665,8 +665,8 @@ def bbtautau_assignment(
 
     for _skey, sample in events_dict.items():
         bbtt_masks = {
-            "bb": np.zeros_like(sample.get_var("ak8FatJetPt"), dtype=bool),
-            "tt": np.zeros_like(sample.get_var("ak8FatJetPt"), dtype=bool),
+            "bb": np.zeros_like(sample.get_var("ak8FatJetParTXbb"), dtype=bool),
+            "tt": np.zeros_like(sample.get_var("ak8FatJetParTXbb"), dtype=bool),
         }
 
         if ttvsbb:
@@ -1046,7 +1046,9 @@ def load_data_channel(
         # filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3)
 
         if tt_pres:
-            filters_dict = tt_filters(channel=channel, in_filters=filters_dict, num_fatjets=3)
+            filters_dict = tt_filters(
+                channel=channel, in_filters=filters_dict, num_fatjets=3, qcd_only=False
+            )
 
         columns = get_columns(year, triggers_in_channel=channel)
 

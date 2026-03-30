@@ -215,20 +215,20 @@ def main():
     # Define hyperparameter search ranges
     if args.explore_all:
         param_ranges = {
-            "max_depth": (6, 14),
-            "eta": (0.03, 0.15),
-            "subsample": (0.2, 0.8),
-            "colsample_bytree": (0.4, 1.0),
-            "num_parallel_tree": (30, 70),
-            "alpha": (0.5, 2.0),
-            "gamma": (0.5, 2.0),
-            "lambda": (0.5, 2.0),
+            "max_depth": (6, 9),
+            "eta": (0.08, 0.15),
+            "subsample": (0.5, 0.7),
+            "colsample_bytree": (0.5, 0.8),
+            "num_parallel_tree": (10, 30),
+            "alpha": (0.5, 5.0),
+            "gamma": (0.5, 5.0),
+            "lambda": (0.5, 5.0),
         }
         int_params = ["max_depth", "num_parallel_tree"]
     else:
         param_ranges = {
-            "max_depth": (6, 10),
-            "eta": (0.05, 0.1),
+            "max_depth": (6, 12),
+            "eta": (0.05, 0.15),
             "subsample": (0.2, 0.6),
             "colsample_bytree": (0.5, 0.8),
             "num_parallel_tree": (1, 30),
