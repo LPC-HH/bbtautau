@@ -2130,6 +2130,25 @@ def compare_models(
     return metrics_by_model
 
 
+def _configure_model_from_args(args, parser) -> str:
+    """Resolve the active model name from CLI args and optional config file."""
+    cli_model = args.model or None
+    if args.config_file:
+        try:
+            resolved_model = BDT_CONFIG.register_from_file(args.config_file, modelname=cli_model)
+        except (FileNotFoundError, KeyError, ValueError) as exc:
+            parser.error(str(exc))
+        args.model = resolved_model
+        print(f"Loaded explicit config for model '{resolved_model}' from {args.config_file}")
+        return resolved_model
+
+    if cli_model is None:
+        parser.error("Either --model or --config-file must be provided.")
+
+    args.model = cli_model
+    return args.model
+
+
 if __name__ == "__main__":
 
     # Set up argument parser
@@ -2144,8 +2163,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="3Mar26_weak_deep7_vbfk2v0",
-        help="Name of the model configuration to use",
+        default="",
+        help="Name of the model configuration to use. If omitted with --config-file, "
+        "the model name is read from CONFIG['modelname'].",
+    )
+    parser.add_argument(
+        "--config-file",
+        type=str,
+        default=None,
+        help="Explicit path to a Python config file defining CONFIG. If passed with "
+        "--model, the two model names must match.",
     )
     parser.add_argument(
         "--tt-preselection",
@@ -2251,11 +2278,12 @@ if __name__ == "__main__":
     group.add_argument("--load", action="store_true", default=True, help="Load model from file")
 
     args = parser.parse_args()
+    active_model = _configure_model_from_args(args, parser)
 
     if args.study_rescaling:
         study_rescaling(
             years=args.years,
-            modelname=args.model,
+            modelname=active_model,
             output_dir=args.output_dir,
             data_path=args.data_path,
             tt_preselection=args.tt_preselection,
@@ -2267,11 +2295,11 @@ if __name__ == "__main__":
         if not args.samples:
             parser.error("--eval-bdt-preds requires --samples to be specified.")
         else:
-            print(args.model)
+            print(active_model)
             eval_bdt_preds(
                 years=args.years,
                 samples=args.samples,
-                model=args.model,
+                model=active_model,
                 output_dir=args.output_dir,
                 data_path=args.data_path,
                 tt_preselection=args.tt_preselection,
@@ -2321,7 +2349,7 @@ if __name__ == "__main__":
 
     trainer = Trainer(
         years=args.years,
-        modelname=args.model,
+        modelname=active_model,
         output_dir=args.output_dir,
         data_path=args.data_path,
         tt_preselection=args.tt_preselection,
@@ -2329,7 +2357,7 @@ if __name__ == "__main__":
 
     # Apply feature binning settings from CLI to config
     if args.bin_features:
-        trainer.bdt_config[args.model]["bin_features"] = WPS_TTPART.keys()
+        trainer.bdt_config[active_model]["bin_features"] = WPS_TTPART.keys()
         print(f"Feature binning enabled for features: {WPS_TTPART.keys()}")
         print("  Note: Features will only be binned if WP bin edges are provided in WPS_TTPART")
 

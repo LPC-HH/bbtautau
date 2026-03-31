@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import os
 import sys
 from argparse import BooleanOptionalAction
@@ -22,6 +23,26 @@ class objectview:
 
     def __init__(self, d):
         self.__dict__ = d
+
+
+def _build_config_bootstrap(config_file: str | None) -> tuple[str, str]:
+    """Return shell fragments to materialize an explicit config in the pod."""
+    if not config_file:
+        return "", ""
+
+    config_path = Path(config_file).resolve()
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    runtime_path = Path("/tmp/bbtautau-configs") / config_path.name
+    config_b64 = base64.b64encode(config_path.read_bytes()).decode("ascii")
+    bootstrap = (
+        "mkdir -p /tmp/bbtautau-configs && "
+        "python -c "
+        '"from pathlib import Path; import base64; '
+        f"Path('{runtime_path}').write_bytes(base64.b64decode('{config_b64}'))\" && "
+    )
+    return bootstrap, f" --config-file {runtime_path}"
 
 
 def from_json(args):
@@ -182,16 +203,17 @@ def main(args):
             "memory": memory,
         }
     else:
-        # Training mode arguments (template uses $name for --model)
+        # Training mode arguments are passed through $model_args.
         memory = 32 if getattr(args, "tt_preselection", False) else 80
+        config_bootstrap, config_arg = _build_config_bootstrap(getattr(args, "config_file", None))
         args_dict = {
             "job_name": "-".join(args.job_name.split("_")),
-            "name": args.modelname,
-            "modelname": args.modelname,
+            "model_args": f"--model {args.modelname}{config_arg}",
             "output_dir": str(BDT_DIR / job_type / presel / run_tag / args.modelname),
             "args": extra_args,
             "datapath": str(PVC / args.datapath),
             "memory": memory,
+            "config_bootstrap": config_bootstrap,
         }
 
     with Path.open(file_name, "w") as f:
@@ -208,6 +230,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--modelname",
         default="",
         help="Model name to pass (used for training and base for rescaling study)",
+        type=str,
+    )
+    parser.add_argument(
+        "--config-file",
+        default="",
+        help="Optional local config file to embed in training jobs and pass to bdt.py.",
         type=str,
     )
     parser.add_argument("--job-name", default="", help="defaults to name", type=str)

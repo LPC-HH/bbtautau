@@ -4,8 +4,8 @@ Generate Kubernetes jobs for hyperparameter exploration configurations.
 Reads the summary JSON produced by generate_hp_configs.py and creates
 Kubernetes job YAMLs for each model, optionally submitting them.
 
-Since generate_hp_configs.py now writes configs directly into
-postprocessing/bdt_configs/<group>/, no file copying is needed.
+Each generated job embeds its corresponding config file and passes it
+to `bdt.py --config-file`, so the config does not need to be committed.
 """
 
 from __future__ import annotations
@@ -22,6 +22,27 @@ def load_summary(summary_file: Path) -> dict:
     """Load the hyperparameter exploration summary."""
     with summary_file.open() as f:
         return json.load(f)
+
+
+def _build_config_map(summary: dict, summary_file: Path) -> dict[str, Path]:
+    """Map model names to generated config files from the summary."""
+    modelnames = summary["modelnames"]
+    generated_files = summary.get("generated_files", [])
+    if len(generated_files) != len(modelnames):
+        raise ValueError(
+            "Summary is missing generated_files entries for some models. "
+            "Re-run generate_hp_configs.py before generating jobs."
+        )
+
+    config_map: dict[str, Path] = {}
+    for modelname, raw_path in zip(modelnames, generated_files):
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = (summary_file.parent / path).resolve()
+        if not path.exists():
+            raise FileNotFoundError(f"Config for model '{modelname}' not found: {path}")
+        config_map[modelname] = path
+    return config_map
 
 
 def _resolve_summary(raw_path: str) -> Path:
@@ -57,7 +78,7 @@ def main():
     parser.add_argument(
         "--datapath",
         type=str,
-        default="25Sep23AddVars_v12_private_signal",
+        default="26Mar5All_v12_private_signal",
         help="Data path within PVC",
     )
     parser.add_argument(
@@ -86,6 +107,7 @@ def main():
     summary_file = _resolve_summary(args.summary)
     summary = load_summary(summary_file)
     modelnames = summary["modelnames"]
+    config_files = _build_config_map(summary, summary_file)
 
     print(f"Group: {summary.get('group', '?')}")
     print(f"Found {len(modelnames)} models to process")
@@ -107,7 +129,13 @@ def main():
         passthrough_flags.append("--tt-preselection")
 
     for modelname in modelnames:
-        job_argv = ["--name", modelname, *passthrough_flags]
+        job_argv = [
+            "--modelname",
+            modelname,
+            "--config-file",
+            str(config_files[modelname]),
+            *passthrough_flags,
+        ]
 
         if args.dry_run:
             print(f"[dry-run] make_from_template.py {' '.join(job_argv)}")
