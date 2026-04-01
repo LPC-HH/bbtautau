@@ -2278,7 +2278,10 @@ if __name__ == "__main__":
     group.add_argument("--load", action="store_true", default=True, help="Load model from file")
 
     args = parser.parse_args()
-    active_model = _configure_model_from_args(args, parser)
+    active_model = None
+
+    if not (args.compare_models or args.compare_light):
+        active_model = _configure_model_from_args(args, parser)
 
     if args.study_rescaling:
         study_rescaling(
