@@ -122,6 +122,21 @@ SAMPLES = {
         label=r"ggF HHbb$\tau\tau$",
         isSignal=True,
     ),
+    "ggfbbtt-kl0p00": Sample(
+    selector=hh_vars.bbtt_sigs["ggfbbtt-kl0p00"],
+    label=r"ggF HHbb$\tau\tau$ ($\kappa_\lambda=0$)",
+    isSignal=True,
+    ),
+    "ggfbbtt-kl2p45": Sample(
+        selector=hh_vars.bbtt_sigs["ggfbbtt-kl2p45"],
+        label=r"ggF HHbb$\tau\tau$ ($\kappa_\lambda=2.45$)",
+        isSignal=True,
+    ),
+    "ggfbbtt-kl5p00": Sample(
+        selector=hh_vars.bbtt_sigs["ggfbbtt-kl5p00"],
+        label=r"ggF HHbb$\tau\tau$ ($\kappa_\lambda=5.00$)",
+        isSignal=True,
+    ),
     "vbfbbtt": Sample(
         selector=hh_vars.bbtt_sigs["vbfbbtt"],
         label=r"VBF HHbb$\tau\tau$ (SM)",
@@ -132,17 +147,56 @@ SAMPLES = {
         label=r"VBF HHbb$\tau\tau$ ($\kappa_{2V}=0$)",
         isSignal=True,
     ),
+    # BSM VBF samples (no own regions - contribute to ggf/vbf like vbfbbtt-k2v0)
+    "vbfbbtt-kv1p74-k2v1p37-kl14p4": Sample(
+        selector=hh_vars.bbtt_sigs["vbfbbtt-kv1p74-k2v1p37-kl14p4"],
+        label=r"VBF HHbb$\tau\tau$ (BSM)",
+        isSignal=True,
+    ),
+    "vbfbbtt-kvm0p758-k2v1p44-klm19p3": Sample(
+        selector=hh_vars.bbtt_sigs["vbfbbtt-kvm0p758-k2v1p44-klm19p3"],
+        label=r"VBF HHbb$\tau\tau$ (BSM)",
+        isSignal=True,
+    ),
+    "vbfbbtt-kvm0p962-k2v0p959-klm1p43": Sample(
+        selector=hh_vars.bbtt_sigs["vbfbbtt-kvm0p962-k2v0p959-klm1p43"],
+        label=r"VBF HHbb$\tau\tau$ (BSM)",
+        isSignal=True,
+    ),
+    "vbfbbtt-kvm1p6-k2v2p72-klm1p36": Sample(
+        selector=hh_vars.bbtt_sigs["vbfbbtt-kvm1p6-k2v2p72-klm1p36"],
+        label=r"VBF HHbb$\tau\tau$ (BSM)",
+        isSignal=True,
+    ),
 }
 
 # Do not include the unified SM signal below
-SIGNALS = ["ggfbbtt", "vbfbbtt", "vbfbbtt-k2v0"]
+SIGNALS = [
+    "ggfbbtt",
+    "ggfbbtt-kl0p00",
+    "ggfbbtt-kl2p45",
+    "ggfbbtt-kl5p00",
+    "vbfbbtt",
+    "vbfbbtt-k2v0",
+    "vbfbbtt-kv1p74-k2v1p37-kl14p4",
+    "vbfbbtt-kvm0p758-k2v1p44-klm19p3",
+    "vbfbbtt-kvm0p962-k2v0p959-klm1p43",
+    "vbfbbtt-kvm1p6-k2v2p72-klm1p36",
+]
 SIGNALS_CHANNELS = []
 
 SM_SIGNALS = ["ggfbbtt", "vbfbbtt"]
 SM_SIGNALS_CHANNELS = []
 
-sig_keys_ggf = ["ggfbbtt"]
-sig_keys_vbf = ["vbfbbtt", "vbfbbtt-k2v0"]
+sig_keys_ggf = ["ggfbbtt", "ggfbbtt-kl0p00", "ggfbbtt-kl2p45", "ggfbbtt-kl5p00"]
+sig_keys_vbf = [
+    "vbfbbtt",
+    "vbfbbtt-k2v0",
+    "vbfbbtt-kv1p74-k2v1p37-kl14p4",
+    "vbfbbtt-kvm0p758-k2v1p44-klm19p3",
+    "vbfbbtt-kvm0p962-k2v0p959-klm1p43",
+    "vbfbbtt-kvm1p6-k2v2p72-klm1p36",
+]
 
 # add individual bbtt channels
 for signal in SIGNALS:
