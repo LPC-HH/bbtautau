@@ -193,6 +193,5 @@ data/.sites_map.json
 *.C
 
 src/bbtautau/postprocessing/templates/
-src/bbtautau/userConfig.py
 src/bbtautau/combine/bbtautau_ggfvbf.code-workspace
 src/bbtautau/combine/binder/
