@@ -89,6 +89,9 @@ parser.add_argument(
     "--min-qcd-val", default=1e-3, type=float, help="clip the pass QCD to above a minimum value"
 )
 
+# NOTE: --only-sm does NOT filter which signal processes are written into the datacards.
+# The signal processes are controlled by --sigs (default: SIGNALS from `postprocessing/Samples.py`).
+# This flag only restricts some nuisance assignments by redefining `sig_keys_ggf`/`sig_keys_vbf` below.
 add_bool_arg(parser, "only-sm", "Only add SM HH samples", default=False)
 
 parser.add_argument(
@@ -242,6 +245,8 @@ mc_samples_sig = OrderedDict(
 bg_keys = list(mc_samples.keys())
 
 if args.only_sm:
+    # Important: this only changes which samples some nuisances apply to (via sig_keys_*).
+    # It does NOT change the set of signal processes added to the datacards; see `all_sig_keys` / `--sigs`.
     sig_keys_ggf = [f"ggfbbtt{channel.key}" for channel in channels]
     sig_keys_vbf = [f"vbfbbtt{channel.key}" for channel in channels]
 
