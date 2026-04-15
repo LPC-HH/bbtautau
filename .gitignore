@@ -195,4 +195,4 @@ data/.sites_map.json
 
 *.C
 
-/home/users/lumori/bbtautau/src/bbtautau/kubernetes/bdt_trainings/*
+src/bbtautau/kubernetes/bdt_trainings/*

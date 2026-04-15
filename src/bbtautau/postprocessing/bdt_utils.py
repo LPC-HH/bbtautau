@@ -497,8 +497,17 @@ def compute_bdt_preds(
     bin_feats = BDT_CONFIG[modelname].get("bin_features", None)
     bin_edges_loaded = {}
     bin_feat_indices = []
+    wps = load_training_wps(model_dir, modelname)
+    if not bin_feats and wps:
+        # Auto-detect: apply binning for whichever features appear in both wps_ttpart.json
+        # and the model's feature list.
+        bin_feats = [f for f in feature_names if f in wps]
+        if bin_feats:
+            print(
+                f"Auto-detected feature binning from {WPS_FILENAME} "
+                f"(not set in config): {bin_feats}"
+            )
     if bin_feats:
-        wps = load_training_wps(model_dir, modelname)
         if wps is None:
             from bbtautau.userConfig import WPS_TTPART
 

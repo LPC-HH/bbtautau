@@ -54,14 +54,14 @@ TT_DISC_NAMES_PART = {  # ParT does not distinguish between signals
         channel_key: f"ttFatJetParTX{CHANNELS[channel_key].tagger_label}vsQCDTop"
         for channel_key in CHANNELS
     }
-    for sig_key in SM_SIGNALS
+    for sig_key in SIGNAL_ORDERING
 }
 TT_DISC_NAMES_BDT = {
     sig_key: {
         channel_key: f"BDT{sig_key.removesuffix('tt')}{CHANNELS[channel_key].tagger_label}vsAll"
         for channel_key in CHANNELS
     }
-    for sig_key in SM_SIGNALS
+    for sig_key in SIGNAL_ORDERING
 }
 
 # Non-QCD backgrounds for data minus simulated non-QCD backgrounds ABCD estimation
@@ -170,26 +170,6 @@ class Analyser:
         self.tt_disc_name_channel = self.tt_disc_name[self.channel.key]
 
         self.plot_dir = plot_dir
-
-    # Can remove in next PR, leave just for record. was only used in plot_mass, but that was updated
-
-    # @staticmethod
-    # def get_jet_vals(vals, mask, nan_to_pad=True):
-
-    #     # TODO: Deprecate this (just need to use get_var properly)
-
-    #     # check if vals is a numpy array
-    #     if not isinstance(vals, np.ndarray):
-    #         vals = vals.to_numpy()
-    #     if len(vals.shape) == 1:
-    #         warnings.warn(
-    #             f"vals is a numpy array of shape {vals.shape}. Ignoring mask.", stacklevel=2
-    #         )
-    #         return vals if not nan_to_pad else np.nan_to_num(vals, nan=PAD_VAL)
-    #     if nan_to_pad:
-    #         return np.nan_to_num(vals[mask], nan=PAD_VAL)
-    #     else:
-    #         return vals[mask]
 
     def compute_and_plot_rocs(self, discs=None):
         years = list(self.events_dict.keys())
@@ -1492,6 +1472,7 @@ def main(args):
             tt_pres=args.tt_pres,
             models=models,
             additional_samples=additional_samples,
+            at_inference=args.at_inference,
         )
 
         channel_regions: list[SRConfig] = []  # within current channel (overlapping mode)
@@ -1701,13 +1682,13 @@ Examples:
     )
     disc_group.add_argument(
         "--ggf-modelname",
-        default="11Feb26Full",
+        default="3Apr26_prod",  # 3Apr26_prod
         help="BDT model name for ggF",
     )
     disc_group.add_argument(
         "--vbf-modelname",
         type=str,
-        default="11Feb26Full",
+        default="3Apr26_prod",
         help="BDT model name for VBF",
     )
     disc_group.add_argument(
