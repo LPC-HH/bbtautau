@@ -165,7 +165,6 @@ Thumbs.db
 *.root
 *.buffer
 *.parquet
-*.txt
 test.ipynb
 **/__pycache__
 **/.DS_Store
@@ -192,3 +191,7 @@ docker_stderror
 data/.sites_map.json
 
 *.C
+
+src/bbtautau/postprocessing/templates/
+src/bbtautau/combine/bbtautau_ggfvbf.code-workspace
+src/bbtautau/combine/binder/

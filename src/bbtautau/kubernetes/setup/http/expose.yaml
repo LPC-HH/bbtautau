@@ -1,0 +1,15 @@
+#letting the pod expose itself on port 80
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    run: bbtautauserver
+  name: bbtautausexpose
+spec:
+  ports:
+  - port: 80
+    protocol: TCP
+    targetPort: 80
+  selector:
+    run: bbtautauserver
+  type: ClusterIP

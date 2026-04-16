@@ -45,6 +45,8 @@ def main(args):
     processor_args = f"--region {args.region}"
     if args.fatjet_pt_cut is not None:
         processor_args += f" --fatjet-pt-cut {args.fatjet_pt_cut}"
+    if args.prescale_factor is not None:
+        processor_args += f" --prescale-factor {args.prescale_factor}"
     processor_args += (
         " --fatjet-bb-preselection"
         if args.fatjet_bb_preselection
@@ -77,7 +79,7 @@ if __name__ == "__main__":
             else:
                 print(f"Year-specific settings for {year} not found in YAML; using full YAML")
                 tdict = samples_to_submit
-            
+
             args.year = year
             for sample, sdict in tdict.items():
                 args.samples = [sample]
