@@ -86,8 +86,6 @@ def create_blinded_histogram(hists: Hist, blind_region: list, axis=0):
         mask = np.ones(len(bins) - 1, dtype=bool)
         mask[lv:rv] = False
 
-        print(type(masked_hists.view(flow=True)))
-
         masked_hists.view(flow=True)[data_key_index][lv:rv] = np.nan
 
     return masked_hists

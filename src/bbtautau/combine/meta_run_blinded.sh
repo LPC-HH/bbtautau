@@ -5,18 +5,28 @@
 # Usage: ./meta_run_blinded.sh [combined|individual|both] [--cmds <commands>]
 
 # Configuration
-CARDS_BASE_DIR="/home/users/lumori/bbtautau/src/bbtautau/cards/26Jan6-vbf"
-SCRIPT_PATH="/home/users/lumori/bbtautau/src/bbtautau/combine/run_blinded_bbtt.sh"
+CARDS_BASE_DIR="/home/users/haoyang/bbtautau_ggfvbf/src/bbtautau/postprocessing/cards/hello"
+SCRIPT_PATH="/home/users/haoyang/bbtautau_ggfvbf/src/bbtautau/combine/run_blinded_bbtt.sh"
 CHANNELS=("hh" "hm" "he")
 
 # Default values
 DEFAULT_CMDS="--bfit --limits --dfit"
 cmds="$DEFAULT_CMDS"
 do_vbf=0
+only_dirs=""
+skip_confirm=0
 
 # Parse named arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --only)
+            only_dirs="$2"
+            shift 2
+            ;;
+        -y|--yes)
+            skip_confirm=1
+            shift
+            ;;
         --cmds)
             case "$2" in
                 "dfit")
@@ -33,11 +43,13 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            echo "Usage: $0 [MODE] [--cmds COMMANDS] [--do-vbf]"
+            echo "Usage: $0 [MODE] [--cmds COMMANDS] [--do-vbf] [--only DIR] [-y]"
             echo "  MODE: combined (default), individual, or both"
             echo "  --cmds: commands to pass to analysis script (default: '$DEFAULT_CMDS')"
             echo "          Use 'dfit' as shorthand for '--dfit'"
             echo "  --do-vbf: include VBF regions"
+            echo "  --only DIR: run only for specified dir(s), comma-separated (e.g. --only bmin_10 or --only bmin_10,bmin_12)"
+            echo "  -y, --yes: skip confirmation prompt"
             echo ""
             echo "Signal region behavior:"
             echo "  Without --do-vbf:"
@@ -59,6 +71,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 individual --do-vbf       # 6 individual fits (ggf+vbf)"
             echo "  $0 both --do-vbf             # 1 combined + 6 individual = 7 fits"
             echo "  $0 --cmds dfit               # combined ggf with --dfit"
+            echo "  $0 individual --do-vbf --only bmin_10 -y  # only bmin_10, no prompt"
             exit 0
             ;;
         -*)
@@ -178,18 +191,43 @@ if [ ${#card_dirs[@]} -eq 0 ]; then
     exit 1
 fi
 
+# Filter to --only dirs if specified
+if [ -n "$only_dirs" ]; then
+    IFS=',' read -ra ONLY_ARR <<< "$only_dirs"
+    filtered=()
+    for dir in "${card_dirs[@]}"; do
+        base=$(basename "$dir")
+        for want in "${ONLY_ARR[@]}"; do
+            if [ "$base" = "$want" ]; then
+                filtered+=("$dir")
+                break
+            fi
+        done
+    done
+    if [ ${#filtered[@]} -eq 0 ]; then
+        echo "ERROR: No matching directories for --only $only_dirs"
+        avail=""
+        for d in "${card_dirs[@]}"; do avail="$avail $(basename "$d")"; done
+        echo "Available:$avail"
+        exit 1
+    fi
+    card_dirs=("${filtered[@]}")
+fi
+
 echo "Found ${#card_dirs[@]} card directories:"
 for dir in "${card_dirs[@]}"; do
     echo "  - $(basename "$dir")"
 done
 echo ""
 
-# Ask for confirmation
-read -p "Do you want to proceed? (y/N): " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Aborted."
-    exit 0
+# Ask for confirmation unless -y
+if [ "$skip_confirm" -eq 0 ]; then
+    read -p "Do you want to proceed? (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Aborted."
+        exit 0
+    fi
 fi
 
 # Run analysis based on mode
