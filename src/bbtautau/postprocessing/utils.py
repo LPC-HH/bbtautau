@@ -1085,13 +1085,9 @@ def load_data_channel(
         derive_lepton_variables(events_dict[year])
         derive_vbf_variables(events_dict[year])
 
-    # Load or compute BDT predictions for all signals in a single pass
-    # For single-signal models, only run matching model-signal pairs to avoid overwriting discriminator columns
-    # (e.g., ggf model should only be used with ggfbbtt signal_objective, vbf model with vbfbbtt).
-    #
-    # For multi-signal ("unified"/extended) models (e.g. signals=['ggfbbtt','vbfbbtt']), run once per model:
-    # the model itself writes distinct BDT columns per signal objective (BDT{sig_base}{channel}vsAll),
-    # so there is no overwrite risk and name-matching would incorrectly skip such models.
+    # Load or compute BDT predictions for every requested model.
+    # Each model writes signal-specific columns (e.g. BDTggfbb{ch}vsAll, BDTvbfbb{ch}vsAll)
+    # so there is no overwrite risk between models. The caller controls which models to evaluate.
     if models is not None:
         for model in models:
             if model not in BDT_CONFIG:
@@ -1104,44 +1100,17 @@ def load_data_channel(
                 )
 
             n_folds = int(BDT_CONFIG[model].get("n_folds", 1))
-            is_multi_signal_model = len(model_signals) > 1
-
-            if is_multi_signal_model:
-                # Unified model: run once, it will populate BDT columns for all configured signal objectives.
-                compute_or_load_bdt_preds(
-                    events_dict=events_dict,
-                    modelname=model,
-                    model_dir=model_dir,
-                    channel=channel,
-                    bdt_preds_dir=bdt_eval_dir,
-                    tt_pres=tt_pres,
-                    test_mode=test_mode,
-                    at_inference=at_inference,
-                    n_folds=n_folds,
-                )
-                continue
-
-            # Single-signal model: only run if it matches at least one requested signal base.
-            # This prevents e.g. a VBF-only model from overwriting GGF discriminator columns.
-            matched = False
-            for sig in signals:
-                sig_base = sig.removesuffix("tt") if sig.endswith("tt") else sig
-                if sig_base in model.lower():
-                    matched = True
-                    break
-
-            if matched:
-                compute_or_load_bdt_preds(
-                    events_dict=events_dict,
-                    modelname=model,
-                    model_dir=model_dir,
-                    channel=channel,
-                    bdt_preds_dir=bdt_eval_dir,
-                    tt_pres=tt_pres,
-                    test_mode=test_mode,
-                    at_inference=at_inference,
-                    n_folds=n_folds,
-                )
+            compute_or_load_bdt_preds(
+                events_dict=events_dict,
+                modelname=model,
+                model_dir=model_dir,
+                channel=channel,
+                bdt_preds_dir=bdt_eval_dir,
+                tt_pres=tt_pres,
+                test_mode=test_mode,
+                at_inference=at_inference,
+                n_folds=n_folds,
+            )
 
     if cutflow:
         return events_dict, cutflow

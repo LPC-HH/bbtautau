@@ -41,23 +41,35 @@ Main script for generating Kubernetes Job manifests. Supports two modes:
 **Training Mode** (default):
 - Generates jobs that train BDT models
 - Uses `template.yaml` as the base template
-- Job name format: `lm_{tag}_{name}`
+- Job name defaults to the model name
 - Automatically includes `--bin-features` flag
 
 **Comparison Mode** (`--compare-models`):
 - Generates jobs that compare multiple trained models
 - Uses `template_compare.yaml` as the base template
-- Job name format: `cmp_{tag}_{models}`
+- Job name defaults to a tag derived from the compared inputs
+
+**Light Comparison Mode** (`--compare-light`):
+- Uses `template_compare_light.yaml`
+- Compares existing `metrics_summary.csv` outputs without reloading training data
+
+**Rescaling Study Mode** (`--study-rescaling`):
+- Uses `template_rescaling.yaml`
+- Runs the balance/rescaling study workflow for a single model
 
 **Key Arguments:**
-- `--name`: Model name (training mode) - must match a config file in `bdt_configs/`
-- `--tag`: Tag for organizing jobs/outputs (default: `no_presel`)
-- `--datapath`: Path to data within PVC (default: `25Sep23AddVars_v12_private_signal`)
+- `--modelname`: Model name for training or rescaling jobs
+- `--config-file`: Optional local config file to embed in a training job and pass to `bdt.py --config-file`
+- `--tag`: Tag for organizing jobs/outputs
+- `--datapath`: Path to data within PVC (default: `26Mar5All_v12_private_signal`)
 - `--years`: Years to process (default: `all`)
 - `--compare-models`: Enable comparison mode
-- `--models`: List of model names to compare (comparison mode)
-- `--model-dirs`: List of model directories to compare (comparison mode)
+- `--compare-light`: Enable metrics-only comparison mode
+- `--study-rescaling`: Enable rescaling study mode
+- `--inputs`: Model JSON files and/or directories to compare
+- `--compare-tag`: Optional label for comparison output grouping
 - `--train-args`: Additional arguments for training script
+- `--tt-preselection`: Route output under `tt_presel/` and append the flag to the runtime command
 - `--from-json`: Load arguments from JSON file
 - `--submit`: Automatically submit job after generation
 - `--overwrite`: Overwrite existing job files without prompting
@@ -66,34 +78,35 @@ Main script for generating Kubernetes Job manifests. Supports two modes:
 ```bash
 # Generate a training job
 python jobs/make_from_template.py \
-    --name my_model \
-    --tag no_presel \
+    --modelname my_model \
+    --config-file ../postprocessing/bdt_configs/standard/config_my_model.py \
+    --tag my_scan \
     --submit
 
 # Generate a comparison job
 python jobs/make_from_template.py \
     --compare-models \
-    --models model1 model2 \
-    --model-dirs model1_dir model2_dir \
-    --tag no_presel \
+    --inputs training/no_presel/model1 training/no_presel/model2 \
+    --compare-tag model1_vs_model2 \
     --submit
 ```
 
 #### Templates
 
 **`template.yaml`**: Training job template
-- Clones repository from GitHub (`kube` branch)
+- Clones repository from GitHub (`dev-bdt` branch)
 - Installs dependencies
 - Runs `bdt.py --train --bin-features` with specified parameters
+- If `--config-file` is used when generating the YAML, the config content is embedded into the job and passed back to `bdt.py --config-file` inside the pod
 - Requires GPU (1x nvidia.com/gpu)
-- Resources: 32Gi memory, 8 CPU cores
-- Outputs to `/bbtautauvol/bdt/{tag}/{name}/`
+- Resources: 32Gi memory for `tt_presel`, 80Gi otherwise
+- Outputs to `/bbtautauvol/bdt/training/{presel}/{tag}/{modelname}/`
 
 **`template_compare.yaml`**: Comparison job template
 - Similar setup but runs `bdt.py --compare-models`
 - No GPU required
-- Resources: 32Gi memory, 6 CPU cores
-- Outputs to `/bbtautauvol/bdt/{tag}/compare_{models}/`
+- Resources: 25Gi memory for `tt_presel`, 80Gi otherwise
+- Outputs to `/bbtautauvol/bdt/comparisons/{presel}/{tag}/compare_{compare_tag}/`
 
 Both templates:
 - Mount persistent volume at `/bbtautauvol`
@@ -138,7 +151,7 @@ kubectl create -f setup/http/ingress.yaml -n cms-ml
 
 ### Hyperparameter Exploration
 
-Configs are written directly into `postprocessing/bdt_configs/<group>/`, so there is no manual copying step. The config loader (`bdt_config.py`) scans subfolders automatically.
+Configs are written directly into `postprocessing/bdt_configs/<group>/`, and `generate_hp_jobs.py` now forwards each generated config file into the corresponding Kubernetes job. That means hyperparameter scans no longer require the generated configs to be committed before the pod can train with them.
 
 #### `generate_hp_configs.py`
 Generates BDT configuration files by systematically exploring the hyperparameter space using Latin Hypercube Sampling (LHS) for efficient coverage.
@@ -200,6 +213,12 @@ python generate_hp_jobs.py \
     --dry-run
 ```
 
+Each generated training job passes both:
+- `--modelname <generated_model>`
+- `--config-file <local path to generated config>`
+
+so the pod can reconstruct the config at startup and call `bdt.py --config-file ...` without relying on the cloned repository to already contain that config file.
+
 **End-to-end workflow:**
 ```bash
 # 1. Generate configs (written directly to postprocessing/bdt_configs/my_scan/)
@@ -246,12 +265,13 @@ Run cells sequentially to review and clean up jobs.
 2. **Generate and Submit Training Job**:
    ```bash
    python jobs/make_from_template.py \
-       --name my_model \
+       --modelname my_model \
+       --config-file ../postprocessing/bdt_configs/standard/config_my_model.py \
        --tag no_presel \
        --submit
    ```
 
-   Note: The model name must correspond to a config file under `postprocessing/bdt_configs/` (e.g., `bdt_configs/standard/config_my_model.py`). The loader searches subfolders automatically.
+   Note: for training jobs, either the cloned repo must contain the config under `postprocessing/bdt_configs/`, or you should pass `--config-file` so the generated YAML carries the config explicitly.
 
 3. **Monitor Jobs**:
    ```bash
@@ -268,9 +288,12 @@ Run cells sequentially to review and clean up jobs.
 
 ## Generated Job Files
 
-Job YAML files are stored in `bdt_trainings/{tag}/` directory with naming convention:
-- Training: `lm_{tag}_{name}.yml`
-- Comparison: `cmp_{tag}_{models}.yml`
+Job YAML files are stored under `bdt_trainings/{job_type}/{presel}/{tag}/`.
+
+Examples:
+- Training: `bdt_trainings/training/no_presel/<tag>/<modelname>.yml`
+- Comparison: `bdt_trainings/comparisons/no_presel/<tag>/cmp_<inputs>.yml`
+- Rescaling: `bdt_trainings/rescaling/no_presel/<tag>/rescaling_<modelname>.yml`
 
 These files can be:
 - Manually edited if needed
@@ -280,7 +303,7 @@ These files can be:
 ## Notes
 
 - All jobs run in the `cms-ml` namespace
-- Jobs use the `kube` branch of the repository
+- Jobs use the `dev-bdt` branch of the repository
 - Outputs are stored in `/bbtautauvol/bdt/` within the PVC
 - GPU resources are required for training jobs but not for comparison jobs
 - The system automatically excludes certain nodes from scheduling

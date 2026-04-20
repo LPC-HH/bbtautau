@@ -603,6 +603,22 @@ class Trainer:
                 self.dtrain = self.fold_data["dtrain"][0]
             self.dval = self.fold_data["dval"][0]
 
+        # Append GloParT comparison tagger columns for ROC plotting.
+        # These are added AFTER DMatrix creation so they don't become
+        # training features.
+        if not prediction_only:
+            for ch in CHANNELS.values():
+                col = f"ttFatJetParTX{ch.tagger_label}vsQCDTop"
+                if col not in X.columns:
+                    try:
+                        vals = []
+                        for year in self.years:
+                            for sample in self.events_dict[year].values():
+                                vals.append(sample.get_var(col))
+                        X[col] = np.concatenate(vals)
+                    except Exception:
+                        pass
+
         if prediction_only:
             # Free arrays that DMatrix has already internalized
             self.fold_data["X"] = None
@@ -1054,6 +1070,8 @@ class Trainer:
         for sig_tagger in signal_names:
             taukey = CHANNELS[sig_tagger[-2:]].tagger_label
             disc_name = f"ttFatJetParTX{taukey}vsQCDTop"
+            if disc_name not in comparison_tagger_cols:
+                continue
             disc_names_to_fill = [disc_name]
             unbinned_name = unbinned_col_map.get(disc_name)
             if unbinned_name:

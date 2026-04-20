@@ -20,7 +20,7 @@ spec:
             pip install -e /opt/repo/bbtautau/boostedhh &&
             python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --compare-models
             $compare_args --years $years
-            --output-dir $output_dir --data-path $datapath/ $args | tee $output_dir/log.txt
+            --output-dir $output_dir --data-path $datapath/ $args 2>&1 | tee $output_dir/log.txt
         volumeMounts:
         - mountPath: /bbtautauvol
           name: bbtautauvol
@@ -44,5 +44,6 @@ spec:
                     operator: NotIn
                     values:
                       - service-02.nrp.mghpcc.org
+                      - clu-fiona2.ucmerced.edu
       restartPolicy: Never
   backoffLimit: 0

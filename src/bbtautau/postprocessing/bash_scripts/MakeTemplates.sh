@@ -24,7 +24,7 @@ bmin_values=(5 10 12)  # Can be overridden with --bmin
 
 MAIN_DIR="/home/users/lumori/bbtautau"
 SCRIPT_DIR="${MAIN_DIR}/src/bbtautau/postprocessing"
-DATA_DIR="/ceph/cms/store/user/lumori/bbtautau/skimmer/25Sep23AddVars_v12_private_signal"
+DATA_DIR="/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
 SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2026-02-16/"
 COMBINED_SIGNALS="separate_signals"
 TAG=""

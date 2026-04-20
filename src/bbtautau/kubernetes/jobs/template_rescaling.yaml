@@ -18,9 +18,8 @@ spec:
             mkdir -p $output_dir/ &&
             pip install -e /opt/repo/bbtautau &&
             pip install -e /opt/repo/bbtautau/boostedhh &&
-            $config_bootstrap
-            python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --train $model_args
-            --output-dir $output_dir --data-path $datapath/ --bin-features $args
+            python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --study-rescaling --model $modelname
+            --output-dir $output_dir --data-path $datapath/ $args
             2>&1 | tee $output_dir/log.txt
         volumeMounts:
         - mountPath: /bbtautauvol
@@ -48,5 +47,15 @@ spec:
                     values:
                       - service-02.nrp.mghpcc.org
                       - clu-fiona2.ucmerced.edu
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                    - NVIDIA-GeForce-RTX-4090
+                    - NVIDIA-GeForce-RTX-3090
+                    - NVIDIA-A10
+                    - NVIDIA-TITAN-RTX
+                    - NVIDIA-RTX-A5000
+                    - Quadro-RTX-6000
+                    - Tesla-V100-SXM2-32GB
       restartPolicy: Never
   backoffLimit: 0

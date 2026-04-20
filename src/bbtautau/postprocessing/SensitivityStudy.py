@@ -1411,6 +1411,7 @@ def get_plot_dir(
     use_sm_signals: bool,
     overlapping_channels: bool,
     sr_config: SRConfig,
+    ggf_modelname: str | None = None,
 ):
 
     if test_mode:
@@ -1420,7 +1421,9 @@ def get_plot_dir(
     else:
         test_dir = "full_presel"
 
-    tag = "ParT/" if use_ParT else "BDT/"
+    disc_tag = "ParT" if use_ParT else ggf_modelname if ggf_modelname else "BDT"
+
+    tag = f"{disc_tag}/"
     tag += "do_vbf/" if do_vbf else "ggf_only/"
     tag += "sm_signals/" if use_sm_signals else "separate_signals/"
     tag += "overlapping_channels/" if overlapping_channels else "orthogonal_channels/"
@@ -1503,6 +1506,7 @@ def main(args):
                 args.use_sm_signals,
                 args.overlapping_channels,
                 sr_config,
+                ggf_modelname=args.ggf_modelname,
             )
             plot_dir.mkdir(parents=True, exist_ok=True)
 

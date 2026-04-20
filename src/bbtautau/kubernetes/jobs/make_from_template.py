@@ -180,7 +180,7 @@ def main(args):
         output_dir = str(BDT_DIR / job_type / presel / run_tag / f"compare_{compare_tag}")
 
         years_str = " ".join(args.years)
-        memory = 25 if getattr(args, "tt_preselection", False) else 80
+        memory = 25 if getattr(args, "tt_preselection", False) else 90
         args_dict = {
             "job_name": "-".join(args.job_name.split("_")),
             "output_dir": output_dir,

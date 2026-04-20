@@ -15,25 +15,22 @@ spec:
           - "-c"
           - >
             git clone --single-branch --recurse-submodules --branch dev-bdt https://github.com/LPC-HH/bbtautau.git /opt/repo/bbtautau &&
-            mkdir -p $output_dir/ &&
+            mkdir -p $output_dir &&
             pip install -e /opt/repo/bbtautau &&
             pip install -e /opt/repo/bbtautau/boostedhh &&
-            $config_bootstrap
-            python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --train $model_args
-            --output-dir $output_dir --data-path $datapath/ --bin-features $args
-            2>&1 | tee $output_dir/log.txt
+            python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --compare-light
+            $compare_args
+            --output-dir $output_dir $args 2>&1 | tee $output_dir/log.txt
         volumeMounts:
         - mountPath: /bbtautauvol
           name: bbtautauvol
         resources:
           limits:
-            memory: ${memory}Gi
+            memory: 4Gi
             cpu: "2.4"
-            nvidia.com/gpu: "1"
           requests:
-            memory: ${memory}Gi
+            memory: 4Gi
             cpu: "2"
-            nvidia.com/gpu: "1"
       volumes:
       - name: bbtautauvol
         persistentVolumeClaim:
