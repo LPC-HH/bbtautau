@@ -12,6 +12,7 @@ from __future__ import annotations
 
 # from utils import add_bool_arg
 import argparse
+import json
 import logging
 import pickle
 import warnings
@@ -88,6 +89,9 @@ parser.add_argument(
     "--min-qcd-val", default=1e-3, type=float, help="clip the pass QCD to above a minimum value"
 )
 
+# NOTE: --only-sm does NOT filter which signal processes are written into the datacards.
+# The signal processes are controlled by --sigs (default: SIGNALS from `postprocessing/Samples.py`).
+# This flag only restricts some nuisance assignments by redefining `sig_keys_ggf`/`sig_keys_vbf` below.
 add_bool_arg(parser, "only-sm", "Only add SM HH samples", default=False)
 
 parser.add_argument(
@@ -112,7 +116,13 @@ parser.add_argument(
     default=[0],
     type=int,
     nargs="*",
-    help="order of polynomial for TF.",
+    help="order of polynomial for TF (used when --nTF-per-channel not set).",
+)
+parser.add_argument(
+    "--nTF-per-channel",
+    default=None,
+    type=str,
+    help="Per-channel TF orders: JSON file path or inline JSON. Format: {\"ggfbbtt\": {\"hh\": 0, \"he\": 1, \"hm\": 0}, \"vbfbbtt\": {...}}. Overrides --nTF when set.",
 )
 parser.add_argument(
     "--regions",
@@ -123,6 +133,18 @@ parser.add_argument(
     choices=["pass"],
 )
 parser.add_argument("--model-name", default=None, type=str, help="output model name")
+parser.add_argument(
+    "--bmin",
+    default=None,
+    type=int,
+    help="Process only this bmin value (e.g. 10 → bmin_10). If omitted, process all bmin dirs.",
+)
+parser.add_argument(
+    "-y",
+    "--yes",
+    action="store_true",
+    help="Non-interactive: process all signal regions without prompting",
+)
 parser.add_argument(
     "--year",
     type=str,
@@ -141,6 +163,28 @@ add_bool_arg(
 )
 args = parser.parse_args()
 
+# Parse --nTF-per-channel if provided
+nTF_per_channel: dict | None = None
+if args.nTF_per_channel is not None:
+    raw = args.nTF_per_channel.strip()
+    if raw.startswith("{"):
+        nTF_per_channel = json.loads(raw)
+    else:
+        with open(raw) as f:
+            nTF_per_channel = json.load(f)
+    logging.info(f"Per-channel TF orders: {nTF_per_channel}")
+    for sr_key, ch_orders in nTF_per_channel.items():
+        for ch_key, order in ch_orders.items():
+            if ch_key not in CHANNELS:
+                raise ValueError(
+                    f"nTF-per-channel: unknown channel '{ch_key}' for {sr_key}. "
+                    f"Valid: {list(CHANNELS.keys())}"
+                )
+            if not isinstance(order, int) or order < 0:
+                raise ValueError(
+                    f"nTF-per-channel: order for {sr_key}/{ch_key} must be non-negative int, got {order}"
+                )
+
 
 CMS_PARAMS_LABEL = "CMS_bbtautau_boosted"
 MCB_LABEL = "MCBlinded"
@@ -154,6 +198,8 @@ blind_window = SHAPE_VAR["blind_window"]
 #         args.nTF = [0]
 
 print("Transfer factors:", args.nTF)
+if nTF_per_channel is not None:
+    print("Per-channel TF orders (overrides --nTF):", nTF_per_channel)
 
 signal_regions = ["pass"] if args.regions == "pass" else args.regions
 
@@ -177,9 +223,9 @@ mc_samples = OrderedDict(
 mc_samples_sig = OrderedDict(
     [
         ("ggfbbtt", "ggHH_kl_1_kt_1_13p6TeV_hbbhtauau"),
-        ("ggfbbtt-kl0", "ggHH_kl_0_kt_1_13p6TeV_hbbhtauau"),
+        ("ggfbbtt-kl0p00", "ggHH_kl_0_kt_1_13p6TeV_hbbhtauau"),
         ("ggfbbtt-kl2p45", "ggHH_kl_2p45_kt_1_13p6TeV_hbbhtauau"),
-        ("ggfbbtt-kl5", "ggHH_kl_5_kt_1_13p6TeV_hbbhtauau"),
+        ("ggfbbtt-kl5p00", "ggHH_kl_5_kt_1_13p6TeV_hbbhtauau"),
         ("vbfbbtt", "qqHH_CV_1_C2V_1_kl_1_13p6TeV_hbbhtauau"),
         ("vbfbbtt-k2v0", "qqHH_CV_1_C2V_0_kl_1_13p6TeV_hbbhtauau"),
         ("vbfbbtt-kv1p74-k2v1p37-kl14p4", "qqHH_CV_1p74_C2V_1p37_kl_14p4_13p6TeV_hbbhtauau"),
@@ -199,6 +245,8 @@ mc_samples_sig = OrderedDict(
 bg_keys = list(mc_samples.keys())
 
 if args.only_sm:
+    # Important: this only changes which samples some nuisances apply to (via sig_keys_*).
+    # It does NOT change the set of signal processes added to the datacards; see `all_sig_keys` / `--sigs`.
     sig_keys_ggf = [f"ggfbbtt{channel.key}" for channel in channels]
     sig_keys_vbf = [f"vbfbbtt{channel.key}" for channel in channels]
 
@@ -258,12 +306,12 @@ nuisance_params = {
     "THU_HH": Syst(
         prior="lnN",
         samples=sig_keys_ggf,
-        value={"ggfbbtt": 1.06, "ggfbbtt-kl0": 1.08, "ggfbbtt-kl2p45": 1.06, "ggfbbtt-kl5": 1.18},
+        value={"ggfbbtt": 1.06, "ggfbbtt-kl0p00": 1.08, "ggfbbtt-kl2p45": 1.06, "ggfbbtt-kl5p00": 1.18},
         value_down={
             "ggfbbtt": 0.77,
-            "ggfbbtt-kl0": 0.82,
+            "ggfbbtt-kl0p00": 0.82,
             "ggfbbtt-kl2p45": 0.75,
-            "ggfbbtt-kl5": 0.87,
+            "ggfbbtt-kl5p00": 0.87,
         },
         diff_samples=True,
     ),
@@ -571,8 +619,15 @@ def fill_regions(
                     val = val[region]
                     val_down = val_down[region] if val_down is not None else val_down
                 if syst.diff_samples:
-                    val = val[sample_name]
-                    val_down = val_down[sample_name] if val_down is not None else val_down
+                    lookup_key = sample_name
+                    if lookup_key not in val:
+                        # Some params (e.g. THU_HH) use base names (ggfbbtt) not channel-specific (ggfbbtthe)
+                        for chan in channels:
+                            if sample_name.endswith(chan.key):
+                                lookup_key = sample_name[: -len(chan.key)]
+                                break
+                    val = val[lookup_key]
+                    val_down = val_down[lookup_key] if val_down is not None else val_down
 
                 sample.setParamEffect(param, val, effect_down=val_down)
 
@@ -858,6 +913,17 @@ def main(args):
     base_templates_dir = Path(args.templates_dir)
     analysis_dirs = [d for d in base_templates_dir.iterdir() if d.is_dir()]
 
+    # Restrict to requested bmin if specified
+    if args.bmin is not None:
+        target = f"bmin_{args.bmin}"
+        analysis_dirs = [d for d in analysis_dirs if d.name == target]
+        if not analysis_dirs:
+            raise FileNotFoundError(
+                f"No analysis directory '{target}' found in {base_templates_dir}. "
+                f"Available: {[d.name for d in base_templates_dir.iterdir() if d.is_dir()]}"
+            )
+        logging.info(f"Processing only {target}")
+
     logging.info(f"Found analysis directories: {[d.name for d in analysis_dirs]}")
 
     # Process each analysis subfolder. In current state will be just 1 bmin value.
@@ -868,6 +934,9 @@ def main(args):
 
         # Check for signal region subfolders in analysis_dir
         sr_subdirs = [d.name for d in analysis_dir.iterdir() if d.is_dir()]
+        # Restrict to requested signals when --sigs is set
+        if args.sigs is not None and len(args.sigs) > 0:
+            sr_subdirs = [sr for sr in sr_subdirs if sr in args.sigs]
 
         if len(sr_subdirs) == 0:
             logging.warning(f"No signal region subfolders found in {analysis_name}, skipping")
@@ -877,14 +946,18 @@ def main(args):
             logging.info(f"Found single signal region: {sr_keys[0]}")
         else:
             logging.info(f"Found multiple signal regions: {sr_subdirs}")
-            user_input = (
-                input(f"Process all {len(sr_subdirs)} signal regions? [y/n]: ").strip().lower()
-            )
-            if user_input in ["y", "yes"]:
+            if args.yes:
                 sr_keys = sr_subdirs
+                logging.info("Processing all (--yes)")
             else:
-                logging.info("User chose not to process multiple signal regions. Exiting.")
-                break
+                user_input = (
+                    input(f"Process all {len(sr_subdirs)} signal regions? [y/n]: ").strip().lower()
+                )
+                if user_input in ["y", "yes"]:
+                    sr_keys = sr_subdirs
+                else:
+                    logging.info("User chose not to process multiple signal regions. Exiting.")
+                    break
 
         # Loop over signal region subfolders
         for sr_key in sr_keys:
@@ -910,12 +983,19 @@ def main(args):
                 # random template from which to extract shape vars
                 sample_templates: Hist = templates_summed[next(iter(templates_summed.keys()))]
 
+                # TF order: per-channel config if set, else global --nTF (per signal region)
+                if nTF_per_channel is not None:
+                    order = nTF_per_channel.get(sr_key, {}).get(channel.key, args.nTF[0])
+                    orders = {sr: order for sr in signal_regions}
+                else:
+                    orders = {sr: args.nTF[i] for i, sr in enumerate(signal_regions)}
+
                 # [mH(bb)]
                 shape_vars = [
                     ShapeVar(
                         name=axis.name,
                         bins=axis.edges,
-                        orders={sr: args.nTF[i] for i, sr in enumerate(signal_regions)},
+                        orders=orders,
                     )
                     for _, axis in enumerate(sample_templates.axes[1:])
                 ]

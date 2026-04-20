@@ -196,3 +196,6 @@ data/.sites_map.json
 *.C
 
 src/bbtautau/kubernetes/bdt_trainings/*
+src/bbtautau/postprocessing/templates/
+src/bbtautau/combine/bbtautau_ggfvbf.code-workspace
+src/bbtautau/combine/binder/

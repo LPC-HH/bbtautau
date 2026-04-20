@@ -13,6 +13,7 @@
 # --use-part: Use ParT tagger instead of BDT (maps to --use_ParT in python)
 # --do-vbf: Include VBF signal regions
 # --bmin: Minimum background yield value(s) - supports multiple values (e.g., --bmin 1 5 10)
+# --sensitivity-dir PATH: Override sensitivity study plot directory (see default next to SENSITIVITY_DIR)
 # --no-sensitivity-dir: Disable the --sensitivity-dir argument (default: enabled)
 # --test-mode: Run in test mode (reduced data size)
 # --tt-pres: Apply tt preselection
@@ -22,7 +23,8 @@ years=("2022" "2022EE" "2023" "2023BPix")
 channels=("hh" "hm" "he")
 bmin_values=(5 10 12)  # Can be overridden with --bmin
 
-MAIN_DIR="/home/users/lumori/bbtautau"
+# Repo root (parent of src/); works for any user/checkout path
+MAIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 SCRIPT_DIR="${MAIN_DIR}/src/bbtautau/postprocessing"
 DATA_DIR="/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
 SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2026-02-16/"
@@ -50,6 +52,7 @@ show_help() {
     echo "  --channel CHANNEL      Channel to run on (default: all channels)"
     echo "  --use-part             Use ParT tagger instead of BDT"
     echo "  --do-vbf               Include VBF signal regions"
+    echo "  --sensitivity-dir DIR  Directory for --sensitivity-dir (default: /home/users/lumori/bbtautau/plots/SensitivityStudy/2025-12-27/)"
     echo "  --no-sensitivity-dir   Disable the --sensitivity-dir argument (default: enabled)"
     echo "  --test-mode            Run in test mode (reduced data size)"
     echo "  --tt-pres              Apply tt preselection"
@@ -100,6 +103,16 @@ while [[ $# -gt 0 ]]; do
             ;;
         --do-vbf)
             DO_VBF=1
+            shift
+            ;;
+        --sensitivity-dir)
+            shift
+            if [[ $# -eq 0 || $1 =~ ^-- ]]; then
+                echo "Error: --sensitivity-dir requires a directory path" >&2
+                exit 1
+            fi
+            SENSITIVITY_DIR="${1%/}/"
+            USE_SENSITIVITY_DIR=1
             shift
             ;;
         --no-sensitivity-dir)
@@ -159,6 +172,7 @@ echo "CHANNELS: ${channels[*]}"
 echo "USE_PART: $USE_PART"
 echo "DO_VBF: $DO_VBF"
 echo "USE_SENSITIVITY_DIR: $USE_SENSITIVITY_DIR"
+echo "SENSITIVITY_DIR: $SENSITIVITY_DIR"
 echo "TEST_MODE: $TEST_MODE"
 echo "TT_PRES: $TT_PRES"
 echo "GGF_MODEL: $GGF_MODEL"

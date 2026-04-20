@@ -1,14 +1,31 @@
 """
 Configuration file for the bbtautau package.
 
-Authors: Ludovico Mori
+Authors: Ludovico Mori, Haoyang Billy Li
+
+Paths under the git checkout are resolved from this file's location (not the process cwd).
+Default skimmer data path points to Billy's primary ceph area because it has BSM samples; override if needed:
+
+  export BBTAUTAU_DATA_DIR=/path/to/skimmer/output
+  export BBTAUTAU_BDT_EVAL_DIR=/path/to/BDT_predictions
 """
 
 from __future__ import annotations
 
+import getpass
+import os
 from pathlib import Path
 
 import numpy as np
+
+
+def _username() -> str:
+    return os.environ.get("USER") or getpass.getuser()
+
+
+# .../src/bbtautau/userConfig.py -> repo root (parent of src/)
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_PACKAGE_ROOT = Path(__file__).resolve().parent
 
 
 def path_dict(path: str, path_2022: str = None):
@@ -36,16 +53,21 @@ def path_dict(path: str, path_2022: str = None):
     }
 
 
-MAIN_DIR = Path("../../")
-MODEL_DIR = Path(
-    "/home/users/lumori/bbtautau/src/bbtautau/postprocessing/classifier/trained_models"
-)
-BDT_EVAL_DIR = Path("/ceph/cms/store/user/lumori/bbtautau/BDT_predictions/")
-# DATA_DIR = "/ceph/cms/store/user/lumori/bbtautau/skimmer/25Sep23AddVars_v12_private_signal"
-DATA_DIR = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
+MAIN_DIR = _REPO_ROOT
+MODEL_DIR = _PACKAGE_ROOT / "postprocessing" / "classifier" / "trained_models"
+CLASSIFIER_DIR = _PACKAGE_ROOT / "postprocessing" / "classifier"
+
+_user = _username()
+_repo_name = _REPO_ROOT.name
+# Skimmer ntuple path (shared bbtautau skimmer tag on ceph)
+_default_data_dir = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
+DATA_DIR = os.environ.get("BBTAUTAU_DATA_DIR", _default_data_dir)
 DATA_PATHS = path_dict(DATA_DIR)
 
-PLOT_DIR = Path("/home/users/lumori/bbtautau/plots")
+_default_bdt_eval = f"/ceph/cms/store/user/{_user}/{_repo_name}/BDT_predictions/"
+BDT_EVAL_DIR = Path(os.environ.get("BBTAUTAU_BDT_EVAL_DIR", _default_bdt_eval))
+
+PLOT_DIR = _REPO_ROOT / "plots"
 
 # backwards compatibility
 # data_dir_2022 = "/ceph/cms/store/user/rkansal/bbtautau/skimmer/25Apr17bbpresel_v12_private_signal"
