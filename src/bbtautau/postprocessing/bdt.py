@@ -715,8 +715,8 @@ class Trainer:
 
         This unified method handles both n_folds=1 (single model) and n_folds>1 (k models).
 
-        For n_folds=1: Trains one model, saves as {modelname}.json
-        For n_folds>1: Trains k models, saves as {modelname}_fold{i}.json
+        For n_folds=1: Trains one model, saves as {modelname}.ubj
+        For n_folds>1: Trains k models, saves as {modelname}_fold{i}.ubj
 
         Args:
             save: Whether to save the trained models
@@ -800,12 +800,15 @@ class Trainer:
 
         for fold_idx in range(self.n_folds):
             if self.n_folds == 1:
-                model_path = self.output_dir / f"{self.modelname}.json"
+                model_base = self.output_dir / self.modelname
             else:
-                model_path = self.output_dir / f"{self.modelname}_fold{fold_idx}.json"
+                model_base = self.output_dir / f"{self.modelname}_fold{fold_idx}"
+            candidate_paths = [model_base.with_suffix(".ubj"), model_base.with_suffix(".json")]
+            model_path = next((p for p in candidate_paths if p.exists()), None)
 
-            if not model_path.exists():
-                raise FileNotFoundError(f"Model not found: {model_path}")
+            if model_path is None:
+                attempted = ", ".join(str(p) for p in candidate_paths)
+                raise FileNotFoundError(f"Model not found. Tried: {attempted}")
 
             bst = xgb.Booster()
             bst.load_model(model_path)
@@ -1511,8 +1514,9 @@ _NON_MODEL_JSON = {
 def _discover_models_in_folder(folder: str | Path) -> list[tuple[str, str]]:
     """Discover trained BDT models in a directory tree.
 
-    Scans *folder* and its immediate subdirectories for XGBoost model JSON
-    files (``{modelname}.json`` or ``{modelname}_fold{i}.json``).
+    Scans *folder* and its immediate subdirectories for XGBoost model files
+    (``{modelname}.ubj``/``{modelname}.json`` or
+    ``{modelname}_fold{i}.ubj``/``{modelname}_fold{i}.json``).
 
     Returns:
         List of ``(model_name, model_dir)`` tuples.
@@ -1526,8 +1530,9 @@ def _discover_models_in_folder(folder: str | Path) -> list[tuple[str, str]]:
 
     for search_dir in search_dirs:
         seen_models: set[str] = set()
-        for json_file in sorted(search_dir.glob("*.json")):
-            stem = json_file.stem
+        model_files = sorted(list(search_dir.glob("*.ubj")) + list(search_dir.glob("*.json")))
+        for model_file in model_files:
+            stem = model_file.stem
             if stem in _NON_MODEL_JSON:
                 continue
             model_name = re.sub(r"_fold\d+$", "", stem)
@@ -1543,10 +1548,10 @@ def _resolve_model_inputs(inputs: list[str | Path]) -> list[tuple[str, str, str]
 
     Each input can be:
 
-    - A path to a ``.json`` model file (absolute or relative): the model name
+    - A path to a ``.ubj`` or ``.json`` model file (absolute or relative): the model name
       is derived from the file stem (``_fold{i}`` suffixes are stripped) and
       the parent directory is used as *model_dir*.
-    - A directory path: scanned for model JSON files via
+    - A directory path: scanned for model files via
       :func:`_discover_models_in_folder`.
 
     Duplicate ``(model_name, model_dir)`` pairs are silently dropped.
@@ -1573,7 +1578,7 @@ def _resolve_model_inputs(inputs: list[str | Path]) -> list[tuple[str, str, str]
 
     for item in inputs:
         p = Path(item)
-        if p.suffix == ".json":
+        if p.suffix in {".ubj", ".json"}:
             if not p.is_file():
                 raise ValueError(f"Model file not found: {p}")
             model_name = re.sub(r"_fold\d+$", "", p.stem)
@@ -1593,7 +1598,7 @@ def _resolve_model_inputs(inputs: list[str | Path]) -> list[tuple[str, str, str]
             for name, mdir in discovered:
                 _add(name, mdir, tag, str(p))
         else:
-            raise ValueError(f"Input '{item}' is neither a .json file nor a directory")
+            raise ValueError(f"Input '{item}' is neither a .ubj/.json model file nor a directory")
 
     return result
 
@@ -1972,14 +1977,14 @@ def compare_models(
 
     Each entry in *inputs* can be:
 
-    - An absolute or relative path to a ``.json`` model file.
-    - A directory path, which is scanned for model JSON files.
+    - An absolute or relative path to a ``.ubj`` or ``.json`` model file.
+    - A directory path, which is scanned for model files.
 
     Mixed lists are supported. All discovered model names are validated against
     :data:`BDT_CONFIG` before any data is loaded.
 
     Args:
-        inputs: Model JSON files and/or directories to scan.
+        inputs: Model files and/or directories to scan.
         years: Years to include in the comparison.
         data_path: Optional path to data directory.
         tt_preselection: Whether to apply tt preselection.
@@ -2282,8 +2287,8 @@ if __name__ == "__main__":
         nargs="+",
         default=None,
         help=(
-            "Model JSON files and/or directories to compare. "
-            "Each entry can be a path to a .json model file or a directory "
+            "Model files and/or directories to compare. "
+            "Each entry can be a path to a .ubj/.json model file or a directory "
             "that will be scanned for model files."
         ),
     )
