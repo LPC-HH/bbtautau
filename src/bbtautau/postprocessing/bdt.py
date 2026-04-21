@@ -603,9 +603,9 @@ class Trainer:
                 self.dtrain = self.fold_data["dtrain"][0]
             self.dval = self.fold_data["dval"][0]
 
-        # Append GloParT comparison tagger columns for ROC plotting.
-        # These are added AFTER DMatrix creation so they don't become
-        # training features.
+        # Extract GloParT comparison tagger columns for ROC plotting.
+        # Stored separately so they don't pollute the training feature matrix.
+        comparison_taggers = {}
         if not prediction_only:
             for ch in CHANNELS.values():
                 col = f"ttFatJetParTX{ch.tagger_label}vsQCDTop"
@@ -615,9 +615,12 @@ class Trainer:
                         for year in self.years:
                             for sample in self.events_dict[year].values():
                                 vals.append(sample.get_var(col))
-                        X[col] = np.concatenate(vals)
+                        comparison_taggers[col] = np.concatenate(vals)
                     except Exception:
                         pass
+        self.fold_data["X_comparison_taggers"] = (
+            pd.DataFrame(comparison_taggers, index=X.index) if comparison_taggers else None
+        )
 
         if prediction_only:
             # Free arrays that DMatrix has already internalized
@@ -625,6 +628,7 @@ class Trainer:
             self.fold_data["weights_rescaled"] = None
             self.fold_data["masks"] = None
             self.fold_data["X_unbinned_glopart"] = None
+            self.fold_data["X_comparison_taggers"] = None
             del X, weights_rescaled, masks
             return
 
@@ -749,7 +753,6 @@ class Trainer:
                 early_stopping_rounds=early_stopping_rounds,
             )
 
-            self.boosters.append(bst)
             self.evals_results.append(evals_result)
 
             if save:
@@ -759,6 +762,17 @@ class Trainer:
                     model_path = self.output_dir / f"{self.modelname}_fold{fold_idx}.ubj"
                 bst.save_model(model_path)
                 print(f"Model saved to {model_path}")
+
+            # XGBoost <=2.x retains GPU working memory (caches, histograms) inside
+            # the booster even after training finishes. Serialize+reload to release it.
+            # See: https://github.com/dmlc/xgboost/issues/4668
+            if self.n_folds > 1 and save:
+                buf = bst.save_raw()
+                del bst
+                bst = xgb.Booster()
+                bst.load_model(buf)
+
+            self.boosters.append(bst)
 
         # Save evaluation results as JSON
         evals_filename = "evals_result.json"
@@ -961,6 +975,7 @@ class Trainer:
         # Get predictions and labels based on n_folds
         masks = self.fold_data.get("masks", {})
         X_unbinned_full = self.fold_data.get("X_unbinned_glopart", None)
+        X_comp_full = self.fold_data.get("X_comparison_taggers", None)
         if self.n_folds == 1:
             # Single fold: predict on validation set
             y_pred = self.boosters[0].predict(self.dval)
@@ -969,6 +984,8 @@ class Trainer:
             val_idx = self.fold_data["fold_indices"][0][1]  # validation indices
             X_eval = self.fold_data["X"].iloc[val_idx]
             X_unbinned_eval = X_unbinned_full.iloc[val_idx] if X_unbinned_full is not None else None
+            if X_comp_full is not None:
+                X_eval = pd.concat([X_eval, X_comp_full.iloc[val_idx]], axis=1)
             # Filter masks to validation indices
             masks_val = {k: v[val_idx] if v is not None else None for k, v in masks.items()}
             title_suffix = ""
@@ -976,6 +993,8 @@ class Trainer:
             # Multi-fold: use out-of-fold predictions
             y_pred, weights, y_labels = self.get_oof_predictions()
             X_eval = self.fold_data["X"]
+            if X_comp_full is not None:
+                X_eval = pd.concat([X_eval, X_comp_full], axis=1)
             X_unbinned_eval = X_unbinned_full
             masks_val = masks  # Use all masks for OOF
             title_suffix = f" ({self.n_folds}-fold OOF)"
