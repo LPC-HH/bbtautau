@@ -767,8 +767,9 @@ class Trainer:
             # the booster even after training finishes. Serialize+reload to release it.
             # See: https://github.com/dmlc/xgboost/issues/4668
             if self.n_folds > 1 and save:
-                buf = bst.save_raw()
+                buf = bst.save_raw(raw_format="ubj")
                 del bst
+                gc.collect()
                 bst = xgb.Booster()
                 bst.load_model(buf)
 
