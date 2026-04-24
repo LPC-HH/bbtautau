@@ -1052,6 +1052,7 @@ def load_data_channel(
     at_inference: bool = False,
     cutflow: bool = False,
     ttvsbb: bool = True,
+    unbiased_mc_eval: bool = True,
     **kwargs,
 ):
     """Load data for all years and signals for a given channel."""
@@ -1127,6 +1128,7 @@ def load_data_channel(
                 test_mode=test_mode,
                 at_inference=at_inference,
                 n_folds=n_folds,
+                unbiased_mc_eval=unbiased_mc_eval,
             )
 
     if cutflow:

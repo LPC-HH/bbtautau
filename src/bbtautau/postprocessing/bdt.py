@@ -451,7 +451,7 @@ class Trainer:
         for i, class_name in enumerate(self.sample_names):
             print(f"Class {i}: {class_name}")
 
-        return X, y, weights, weights_rescaled, masks, event_ids_list
+        return X, y, weights, weights_rescaled, masks, event_ids_list, sample_names_labels
 
     def _apply_balance_rescaling(
         self,
@@ -520,9 +520,15 @@ class Trainer:
             return
 
         # Process samples (common logic)
-        X, y, weights, weights_rescaled, masks, event_ids_list = self._process_samples_for_training(
-            balance=balance
-        )
+        (
+            X,
+            y,
+            weights,
+            weights_rescaled,
+            masks,
+            event_ids_list,
+            sample_names_labels,
+        ) = self._process_samples_for_training(balance=balance)
 
         print(f"\nPreparing training sets with n_folds={self.n_folds}...")
         print(f"Total samples: {len(y)}")
@@ -657,6 +663,36 @@ class Trainer:
                 fold=event_fold_assignment.astype(np.int16),
             )
             print(f"Fold indices saved to {fold_indices_path}")
+        else:
+            # Persist training event IDs (per-sample) so downstream inference (e.g.
+            # SensitivityStudy) can exclude training events from MC evaluation and
+            # rescale the remaining validation-event weights to preserve total
+            # sample normalization. Only needed for n_folds=1; k-fold models get
+            # unbiased evaluation via OOF predictions.
+            train_event_ids_path = self.output_dir / "train_event_ids.npz"
+            train_idx_all = self.fold_data["fold_indices"][0][0]
+
+            sample_names_arr = np.asarray(sample_names_labels)
+            lumi_values = np.asarray([lumi for lumi, _ in event_ids_list], dtype=np.int64)
+            event_values = np.asarray([event for _, event in event_ids_list], dtype=np.int64)
+
+            np.savez_compressed(
+                train_event_ids_path,
+                sample_names=sample_names_arr[train_idx_all].astype("U64"),
+                luminosityBlock=lumi_values[train_idx_all],
+                event=event_values[train_idx_all],
+                test_size=np.array(
+                    [self.bdt_config[self.modelname]["test_size"]], dtype=np.float32
+                ),
+                random_seed=np.array(
+                    [self.bdt_config[self.modelname]["random_seed"]], dtype=np.int32
+                ),
+            )
+            print(
+                f"Training event IDs ({len(train_idx_all)} events across "
+                f"{len(np.unique(sample_names_arr[train_idx_all]))} samples) saved to "
+                f"{train_event_ids_path}"
+            )
 
         # Save WPS bin edges used for feature binning (if any)
         if self._wps_used:

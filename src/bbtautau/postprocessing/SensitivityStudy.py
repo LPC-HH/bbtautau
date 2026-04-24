@@ -1476,6 +1476,7 @@ def main(args):
             models=models,
             additional_samples=additional_samples,
             at_inference=args.at_inference,
+            unbiased_mc_eval=args.unbiased_mc_eval,
         )
 
         channel_regions: list[SRConfig] = []  # within current channel (overlapping mode)
@@ -1700,6 +1701,18 @@ Examples:
         action="store_true",
         default=False,
         help="Force BDT inference (ignore cached predictions)",
+    )
+    disc_group.add_argument(
+        "--unbiased-mc-eval",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "For n_folds=1 BDT models, drop training events from MC samples and "
+            "rescale validation weights per-sample so total normalization is "
+            "preserved. Requires train_event_ids.npz saved next to the model. "
+            "Data and samples not seen in training are never filtered. "
+            "Use --no-unbiased-mc-eval to disable."
+        ),
     )
     disc_group.add_argument(
         "--llsl-weight",

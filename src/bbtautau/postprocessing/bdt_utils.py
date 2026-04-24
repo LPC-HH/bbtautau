@@ -1003,6 +1003,7 @@ def compute_or_load_bdt_preds(
     n_folds: int = 1,
     test_mode: bool = False,
     at_inference: bool = False,
+    unbiased_mc_eval: bool = True,
 ):
     """Wrapper function to compute or load BDT predictions.
 
@@ -1027,6 +1028,13 @@ def compute_or_load_bdt_preds(
         n_folds: Number of folds (1 for single model, >1 for k-fold)
         test_mode: Whether in test mode
         at_inference: If True, always compute predictions (don't try to load)
+        unbiased_mc_eval: Only applies to n_folds=1 models. When True (default),
+            MC samples that were in the training set are filtered down to their
+            validation events (using ``train_event_ids.npz``) and ``finalWeight``
+            is rescaled per-sample so the total weight matches the original
+            sample. Events from samples not seen during training (e.g. data) are
+            left untouched. Has no effect for k-fold models, which already get
+            unbiased predictions via OOF.
     """
     if modelname not in BDT_CONFIG:
         raise ValueError(f"Could not find config for modelname {modelname}")
@@ -1043,6 +1051,32 @@ def compute_or_load_bdt_preds(
 
     if n_folds > 1:
         print(f"Using {n_folds}-fold k-fold BDT inference.")
+
+    # For n_folds=1 models only: drop training events from MC samples so that
+    # downstream evaluations (e.g. SensitivityStudy MC-vs-data comparisons) are
+    # not biased by the events the BDT was fit on. Data is never in training
+    # and is left untouched. Filtering happens *before* cache check / compute
+    # so the cache ends up containing only validation-event predictions.
+    if unbiased_mc_eval and n_folds == 1:
+        train_event_ids = load_train_event_ids(model_dir, modelname)
+        if train_event_ids is None:
+            print(
+                f"[unbiased-mc-eval] No {TRAIN_EVENT_IDS_FILENAME} for model "
+                f"'{modelname}' at {model_dir / modelname} -- MC samples will "
+                "not be filtered. Retrain the model to enable this feature."
+            )
+        else:
+            print(
+                f"[unbiased-mc-eval] Filtering training events for model '{modelname}' "
+                f"({len(train_event_ids)} trained samples known)"
+            )
+            for year in events_dict:
+                for sample_name, sample_data in events_dict[year].items():
+                    if sample_data.sample.isData:
+                        continue
+                    if sample_name not in train_event_ids:
+                        continue
+                    _apply_unbiased_mc_eval(sample_data, sample_name, train_event_ids)
 
     if at_inference:
         # Compute predictions directly at inference time
@@ -1084,6 +1118,112 @@ def compute_or_load_bdt_preds(
             save_dir=bdt_preds_dir,
             cache_info=cache_info,
         )
+
+
+TRAIN_EVENT_IDS_FILENAME = "train_event_ids.npz"
+
+
+def load_train_event_ids(
+    model_dir: Path,
+    modelname: str,
+) -> dict[str, np.ndarray] | None:
+    """Load per-sample training event IDs saved by the Trainer when n_folds=1.
+
+    Returns a mapping ``sample_name -> sorted_event_ids`` where each value is a
+    sorted structured array with dtype ``EVENT_ID_DTYPE`` ready for binary search
+    via :func:`numpy.searchsorted`. Returns ``None`` if no metadata file is
+    present (e.g. the model predates this feature, or was trained with k-fold
+    which uses OOF predictions instead).
+    """
+    path = model_dir / modelname / TRAIN_EVENT_IDS_FILENAME
+    if not path.exists():
+        return None
+
+    data = np.load(path, allow_pickle=False)
+    sample_names = data["sample_names"].astype(str)
+    lumi = data["luminosityBlock"].astype(np.int64, copy=False)
+    event = data["event"].astype(np.int64, copy=False)
+
+    result: dict[str, np.ndarray] = {}
+    for name in np.unique(sample_names):
+        mask = sample_names == name
+        ids = np.empty(int(mask.sum()), dtype=EVENT_ID_DTYPE)
+        ids["luminosityBlock"] = lumi[mask]
+        ids["event"] = event[mask]
+        ids.sort()
+        result[str(name)] = ids
+
+    return result
+
+
+def _apply_unbiased_mc_eval(
+    sample_data: LoadedSample,
+    sample_name: str,
+    train_event_ids: dict[str, np.ndarray],
+) -> bool:
+    """Filter training events out of an MC LoadedSample and rescale weights.
+
+    For MC samples that were used during training of an n_folds=1 model, keep
+    only the validation events and rescale ``finalWeight`` so the per-sample
+    total weight matches the pre-filter total. This gives an unbiased
+    evaluation while preserving the overall normalization seen by downstream
+    analyses (e.g. SensitivityStudy).
+
+    The operation is performed in place on ``sample_data`` (events + all
+    per-event masks). No-ops when there is no training metadata for this
+    sample or nothing to exclude.
+
+    Returns ``True`` if any events were dropped.
+    """
+    train_ids = train_event_ids.get(sample_name)
+    if train_ids is None or len(train_ids) == 0:
+        return False
+
+    lumi = np.asarray(sample_data.get_var("luminosityBlock"), dtype=np.int64)
+    event = np.asarray(sample_data.get_var("event"), dtype=np.int64)
+
+    if len(lumi) == 0:
+        return False
+
+    cur_ids = np.empty(len(lumi), dtype=EVENT_ID_DTYPE)
+    cur_ids["luminosityBlock"] = lumi
+    cur_ids["event"] = event
+
+    positions = np.searchsorted(train_ids, cur_ids)
+    in_bounds = positions < len(train_ids)
+    candidate_pos = np.clip(positions, 0, len(train_ids) - 1)
+    is_train = in_bounds & (train_ids[candidate_pos] == cur_ids)
+    n_train = int(np.sum(is_train))
+    if n_train == 0:
+        return False
+
+    val_mask = ~is_train
+    events = sample_data.events
+
+    weight_series = events["finalWeight"]
+    total_weight_pre = float(np.sum(np.asarray(weight_series).squeeze()))
+
+    sample_data.events = events.iloc[val_mask].reset_index(drop=True)
+    if sample_data.bb_mask is not None:
+        sample_data.bb_mask = sample_data.bb_mask[val_mask]
+    if sample_data.tt_mask is not None:
+        sample_data.tt_mask = sample_data.tt_mask[val_mask]
+    if sample_data.m_mask is not None:
+        sample_data.m_mask = sample_data.m_mask[val_mask]
+    if sample_data.e_mask is not None:
+        sample_data.e_mask = sample_data.e_mask[val_mask]
+
+    new_sum = float(np.sum(np.asarray(sample_data.events["finalWeight"]).squeeze()))
+    if new_sum > 0 and total_weight_pre > 0:
+        scale = total_weight_pre / new_sum
+        sample_data.events["finalWeight"] = sample_data.events["finalWeight"] * scale
+
+    print(
+        f"  [unbiased-mc-eval] {sample_name}: dropped {n_train}/{len(lumi)} training events, "
+        f"rescaled val weights by {total_weight_pre / new_sum if new_sum > 0 else 0:.4g} "
+        f"(pre-total={total_weight_pre:.4g}, val-sum-pre-rescale={new_sum:.4g})"
+    )
+    return True
 
 
 def load_fold_lookup(
