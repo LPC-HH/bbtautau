@@ -446,6 +446,16 @@ class Trainer:
             X = bin_features(X, bin_feats, bin_edges_dict=bin_edges, inplace=True)
             self._wps_used = bin_edges
 
+        # # Downcast float64 feature columns to float32. XGBoost histogram method
+        # # internally works in float32 anyway, and this halves the DataFrame
+        # # footprint (and the DMatrix internalized copy made for each fold).
+        # # Skips any non-float column (e.g. integer-valued binned features).
+        # f64_cols = [c for c in X.columns if X[c].dtype == np.float64]
+        # if f64_cols:
+        #     print(f"  Downcasting {len(f64_cols)} feature columns from float64 to float32")
+        #     X[f64_cols] = X[f64_cols].astype(np.float32, copy=False)
+        # weights_rescaled = weights_rescaled.astype(np.float32, copy=False)
+
         # Print class mapping
         print("\nClass mapping:")
         for i, class_name in enumerate(self.sample_names):
@@ -571,9 +581,22 @@ class Trainer:
             for fold_idx, (train_idx, val_idx) in enumerate(fold_splits):
                 print(f"Fold {fold_idx}: {len(train_idx)} train, {len(val_idx)} val")
 
-        # Create DMatrix objects for each fold
+        # DMatrix construction strategy (memory):
+        #   - n_folds == 1, training:        build all 4 DMatrices (used by compute_rocs).
+        #   - n_folds == 1, prediction_only: build only dval (used by compare_models).
+        #   - n_folds  > 1, prediction_only: build only dval per fold (compare_models).
+        #   - n_folds  > 1, training:        DEFER all DMatrix construction to
+        #     train_model so each fold's DMatrices are freed right after that
+        #     fold's xgb.train returns. Otherwise the 4 * n_folds DMatrices
+        #     (CPU data + GPU histogram caches) live concurrently and dominate
+        #     peak memory near the end of training.
+        defer_dmatrices = self.n_folds > 1 and not prediction_only
+
         for train_idx, val_idx in fold_splits:
             self.fold_data["fold_indices"].append((train_idx, val_idx))
+
+            if defer_dmatrices:
+                continue
 
             if not prediction_only:
                 # DMatrix with rescaled weights (for training)
@@ -768,21 +791,43 @@ class Trainer:
         self.boosters = []
         self.evals_results = []
 
+        # k-fold path defers DMatrix construction here to keep peak memory bounded:
+        # only the current fold's DMatrices live during training, then are freed.
+        build_lazy = self.n_folds > 1 and not self.fold_data["dtrain_rescaled"]
+
         for fold_idx in range(self.n_folds):
             if self.n_folds > 1:
                 print(f"\n{'='*60}")
                 print(f"Training fold {fold_idx + 1}/{self.n_folds}")
                 print(f"{'='*60}")
 
+            if build_lazy:
+                X = self.fold_data["X"]
+                y = self.fold_data["y"]
+                weights_rescaled = self.fold_data["weights_rescaled"]
+                train_idx, val_idx = self.fold_data["fold_indices"][fold_idx]
+                dtrain_rescaled = xgb.DMatrix(
+                    X.iloc[train_idx],
+                    label=y[train_idx],
+                    weight=weights_rescaled[train_idx],
+                    nthread=8,
+                )
+                dval_rescaled = xgb.DMatrix(
+                    X.iloc[val_idx],
+                    label=y[val_idx],
+                    weight=weights_rescaled[val_idx],
+                    nthread=8,
+                )
+            else:
+                dtrain_rescaled = self.fold_data["dtrain_rescaled"][fold_idx]
+                dval_rescaled = self.fold_data["dval_rescaled"][fold_idx]
+
             evals_result = {}
-            evallist = [
-                (self.fold_data["dtrain_rescaled"][fold_idx], "train"),
-                (self.fold_data["dval_rescaled"][fold_idx], "eval"),
-            ]
+            evallist = [(dtrain_rescaled, "train"), (dval_rescaled, "eval")]
 
             bst = xgb.train(
                 self.hyperpars,
-                self.fold_data["dtrain_rescaled"][fold_idx],
+                dtrain_rescaled,
                 self.bdt_config[self.modelname]["num_rounds"],
                 evals=evallist,
                 evals_result=evals_result,
@@ -791,6 +836,7 @@ class Trainer:
 
             self.evals_results.append(evals_result)
 
+            model_path = None
             if save:
                 if self.n_folds == 1:
                     model_path = self.output_dir / f"{self.modelname}.ubj"
@@ -800,22 +846,37 @@ class Trainer:
                 print(f"Model saved to {model_path}")
 
             # XGBoost <=2.x retains GPU working memory (caches, histograms) inside
-            # the booster even after training finishes. Serialize+reload to release it.
+            # the booster even after training finishes. Since we already wrote the
+            # model to disk above, drop the in-memory booster and reload from
+            # disk -- avoids the transient CPU memory doubling that save_raw()
+            # to a bytes buffer would cause.
             # See: https://github.com/dmlc/xgboost/issues/4668
-            if self.n_folds > 1 and save:
-                buf = bst.save_raw(raw_format="ubj")
+            if self.n_folds > 1 and save and model_path is not None:
                 del bst
                 gc.collect()
                 bst = xgb.Booster()
-                bst.load_model(buf)
+                bst.load_model(str(model_path))
 
             self.boosters.append(bst)
+
+            # Free per-fold DMatrices (CPU data + GPU histogram caches) before the
+            # next fold begins. compute_rocs in k-fold mode uses OOF predictions
+            # via predict_bdt(features=X.values, ...) and never needs them again.
+            if build_lazy:
+                del dtrain_rescaled, dval_rescaled
+                gc.collect()
 
         # Save evaluation results as JSON
         evals_filename = "evals_result.json"
         evals_data = self.evals_results[0] if self.n_folds == 1 else self.evals_results
         with (self.output_dir / evals_filename).open("w") as f:
             json.dump(evals_data, f, indent=2)
+
+        # Rescaled weights are only used during training; downstream evaluation
+        # (compute_rocs, get_oof_predictions) uses fold_data["weights"] only.
+        if self.n_folds > 1:
+            self.fold_data["weights_rescaled"] = None
+            gc.collect()
 
         # For backward compatibility with n_folds=1
         if self.n_folds == 1:
