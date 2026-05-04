@@ -28,12 +28,17 @@ from bbtautau.postprocessing.bbtautau_types import LoadedSample
 from bbtautau.postprocessing.bdt_config import BDT_CONFIG
 from bbtautau.postprocessing.bdt_utils import (
     DEFAULT_BKG_ORDER,
+    bdt_eval_discriminant_vsall,
     bin_features,
     get_expected_sample_order,
     predict_bdt,
     save_training_wps,
 )
-from bbtautau.postprocessing.rocUtils import ROCAnalyzer, multiclass_confusion_matrix
+from bbtautau.postprocessing.rocUtils import (
+    DEFAULT_METRICS_BKG_EFF,
+    ROCAnalyzer,
+    multiclass_confusion_matrix,
+)
 from bbtautau.postprocessing.Samples import (
     CHANNELS,
     SAMPLES,
@@ -1064,7 +1069,7 @@ class Trainer:
         For n_folds=1: Uses validation set predictions.
         For n_folds>1: Uses out-of-fold predictions for unbiased evaluation.
 
-        Metrics are computed at fixed background efficiency (bkg_eff=1e-3 by default)
+        Metrics are computed at fixed background efficiency (DEFAULT_METRICS_BKG_EFF in rocUtils).
         """
         time_start = time.time()
 
@@ -1215,7 +1220,7 @@ class Trainer:
             for bkg_taggers in bkg_tagger_groups:
                 # Include full signal name to avoid ggf/vbf collision
                 name = (
-                    f"BDT {sig_tagger}vsAll"
+                    bdt_eval_discriminant_vsall(sig_tagger)
                     if len(bkg_taggers) == 5
                     else f"BDT {sig_tagger}vsQCDTop"
                 )
@@ -1268,7 +1273,7 @@ class Trainer:
                 print(f"No discriminant found for {sig} with background {background_names}")
                 continue
 
-            main_disc = next((d for d in discs if d.name == f"BDT {sig}vsAll"), None)
+            main_disc = next((d for d in discs if d.name == bdt_eval_discriminant_vsall(sig)), None)
 
             # Store comprehensive metrics
             if main_disc and hasattr(main_disc, "metrics"):
@@ -1342,10 +1347,13 @@ class Trainer:
             rows.append(row)
 
         print("\n" + "=" * 70)
-        print("METRICS SUMMARY (at bkg_eff=1e-3)")
+        print(f"METRICS SUMMARY (at bkg_eff={DEFAULT_METRICS_BKG_EFF})")
         print("=" * 70)
         print(tabulate(rows, headers=headers, tablefmt="grid"))
-        print("\nSignal Eff = signal efficiency at 0.1% background efficiency")
+        print(
+            f"\nSignal Eff = signal efficiency at benchmark background efficiency "
+            f"({DEFAULT_METRICS_BKG_EFF:.0e})"
+        )
         print("=" * 70)
 
 
@@ -1485,11 +1493,11 @@ def _rescaling_comparison(results: dict, output_dir: Path) -> None:
                 summary_data.append([balance_rule] + ["-"] * 6)
 
         headers = ["Balance", "ROC AUC", "PR AUC", "Sig Eff", "Precision", "F1", "Threshold"]
-        print(f"\nMetrics for {sig} channel (at bkg_eff=1e-3):")
+        print(f"\nMetrics for {sig} channel (at bkg_eff={DEFAULT_METRICS_BKG_EFF}):")
         print(tabulate(summary_data, headers=headers, tablefmt="grid"))
 
         with (output_dir / f"comprehensive_{sig}.txt").open("w") as f:
-            f.write(f"Metrics for {sig} channel (at bkg_eff=1e-3):\n")
+            f.write(f"Metrics for {sig} channel (at bkg_eff={DEFAULT_METRICS_BKG_EFF}):\n")
             f.write(tabulate(summary_data, headers=headers, tablefmt="grid"))
 
     _create_cross_channel_comparison(results, balance_rules, output_dir)
@@ -1707,6 +1715,29 @@ def _cms_distinct_colors(n: int) -> list[str]:
     return [mpl.colors.rgb2hex(cmap(i / max(n - 1, 1))) for i in range(n)]
 
 
+def _best_metric_per_signal(combined: pd.DataFrame, metric: str) -> pd.DataFrame:
+    """One score per (model, signal) using only the BDT vsAll discriminant row."""
+    expected = combined["signal"].map(bdt_eval_discriminant_vsall)
+    vsall = combined[combined["discriminant"] == expected]
+    return vsall.groupby(["model", "signal"], sort=False)[metric].max().reset_index()
+
+
+def _aggregate_metric_across_signals(best_per_signal: pd.DataFrame, metric: str) -> pd.DataFrame:
+    """Collapse a best-per-signal table to per-model mean / std / min across signals."""
+    return (
+        best_per_signal.groupby("model")[metric]
+        .agg(["mean", "std", "min"])
+        .reset_index()
+        .rename(
+            columns={
+                "mean": f"mean_{metric}",
+                "std": f"std_{metric}",
+                "min": f"min_{metric}",
+            }
+        )
+    )
+
+
 def _extract_hyperparameters(model_tags: list[str]) -> pd.DataFrame | None:
     """Try to load BDT_CONFIG for each model tag and return a DataFrame of HPs.
 
@@ -1741,18 +1772,23 @@ def _extract_hyperparameters(model_tags: list[str]) -> pd.DataFrame | None:
 
 
 def _plot_hp_correlations(
-    ranking: pd.DataFrame,
+    model_metrics: pd.DataFrame,
     hp_df: pd.DataFrame,
     metric_col: str,
     base_out: Path,
+    *,
+    y_metric_label: str | None = None,
+    output_suffix: str = "metric",
 ) -> None:
-    """Scatter-plot each varying hyperparameter against the aggregate metric.
+    """Scatter-plot each varying hyperparameter against one aggregate metric per model.
+
+    *model_metrics* must include ``model`` plus *metric_col* (e.g. mean ROC AUC across signals).
 
     Also saves a Spearman correlation summary CSV.
     """
     from scipy import stats
 
-    merged = ranking.merge(hp_df, on="model", how="inner")
+    merged = model_metrics.merge(hp_df, on="model", how="inner")
     if merged.empty:
         return
 
@@ -1764,6 +1800,7 @@ def _plot_hp_correlations(
         return
 
     hp_dir = _ensure_dir(base_out / "hyperparameters")
+    y_label = y_metric_label if y_metric_label is not None else metric_col.replace("_", " ")
 
     # --- individual scatter plots ----------------------------------------
     n_hp = len(hp_cols)
@@ -1780,7 +1817,7 @@ def _plot_hp_correlations(
 
         rho, pval = stats.spearmanr(x, y)
         ax.set_xlabel(hp, fontsize=14)
-        ax.set_ylabel(metric_col.replace("_", " "), fontsize=14)
+        ax.set_ylabel(y_label, fontsize=14)
         ax.set_title(f"$\\rho_{{S}}$={rho:+.2f}  (p={pval:.2g})", fontsize=12)
         ax.tick_params(labelsize=11)
 
@@ -1789,8 +1826,9 @@ def _plot_hp_correlations(
         axes[idx // ncols][idx % ncols].set_visible(False)
 
     fig.tight_layout()
-    fig.savefig(hp_dir / "hp_vs_metric.pdf", bbox_inches="tight")
-    fig.savefig(hp_dir / "hp_vs_metric.png", dpi=150, bbox_inches="tight")
+    stem = f"hp_vs_metric_{output_suffix}"
+    fig.savefig(hp_dir / f"{stem}.pdf", bbox_inches="tight")
+    fig.savefig(hp_dir / f"{stem}.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     # --- correlation summary CSV -----------------------------------------
@@ -1801,8 +1839,9 @@ def _plot_hp_correlations(
         rho, pval = stats.spearmanr(x, y)
         corr_rows.append({"hyperparameter": hp, "spearman_rho": rho, "p_value": pval})
     corr_df = pd.DataFrame(corr_rows).sort_values("spearman_rho", key=abs, ascending=False)
-    corr_df.to_csv(hp_dir / "hp_correlations.csv", index=False)
-    print(f"  HP correlations saved to {hp_dir / 'hp_correlations.csv'}")
+    corr_path = hp_dir / f"hp_correlations_{output_suffix}.csv"
+    corr_df.to_csv(corr_path, index=False)
+    print(f"  HP correlations saved to {corr_path}")
 
 
 def compare_models_light(
@@ -1820,7 +1859,9 @@ def compare_models_light(
     * CMS-styled bar charts of key metrics
     * An **aggregate ranking** across all signals
     * A **heatmap** of models x signals
-    * Hyperparameter correlation plots (when configs are loadable)
+    * Hyperparameter correlation plots vs mean ROC AUC and vs mean signal efficiency
+      at the benchmark ε_b used for metrics_summary signal_eff (DEFAULT_METRICS_BKG_EFF in rocUtils)
+      when configs are loadable
     * A GP surrogate fit to predict the optimal HP set
 
     Each entry in *inputs* can be a directory that either directly contains a
@@ -1899,10 +1940,9 @@ def compare_models_light(
     # =====================================================================
     # AGGREGATE RANKING across signals
     # =====================================================================
-    # For each model, compute the mean of `ranking_metric` over all signals.
-    # When a model has multiple discriminants per signal (rare with vsAll
-    # filter), we take the best per signal first.
-    best_per_signal = combined.groupby(["model", "signal"])[ranking_metric].max().reset_index()
+    # For each model, compute the mean of `ranking_metric` over all signals
+    # (BDT vsAll discriminant per channel; see ``bdt_eval_discriminant_vsall``).
+    best_per_signal = _best_metric_per_signal(combined, ranking_metric)
     ranking = (
         best_per_signal.groupby("model")[ranking_metric]
         .agg(["mean", "std", "min"])
@@ -2048,9 +2088,34 @@ def compare_models_light(
     # =====================================================================
     hp_df = _extract_hyperparameters(list(models))
     if hp_df is not None and not hp_df.empty:
-        agg_col = f"mean_{ranking_metric}"
         print(f"\n  Loaded hyperparameters for {len(hp_df)} / {len(models)} models.")
-        _plot_hp_correlations(ranking, hp_df, agg_col, base_out)
+        per_sig_roc = _best_metric_per_signal(combined, "roc_auc")
+        per_sig_se = _best_metric_per_signal(combined, "signal_eff")
+        model_metrics_roc = _aggregate_metric_across_signals(per_sig_roc, "roc_auc")[
+            ["model", "mean_roc_auc"]
+        ]
+        model_metrics_se = _aggregate_metric_across_signals(per_sig_se, "signal_eff")[
+            ["model", "mean_signal_eff"]
+        ]
+        _plot_hp_correlations(
+            model_metrics_roc,
+            hp_df,
+            "mean_roc_auc",
+            base_out,
+            y_metric_label="mean ROC AUC (across signals)",
+            output_suffix="mean_roc_auc",
+        )
+        _plot_hp_correlations(
+            model_metrics_se,
+            hp_df,
+            "mean_signal_eff",
+            base_out,
+            y_metric_label=(
+                rf"mean $\epsilon_{{\mathrm{{sig}}}}$ at $\epsilon_{{\mathrm{{b}}}} = {DEFAULT_METRICS_BKG_EFF}$ "
+                r"(across signals)"
+            ),
+            output_suffix="mean_signal_eff_at_benchmark_bkg",
+        )
     else:
         print("\n  Could not load hyperparameters from BDT_CONFIG — skipping HP analysis.")
 

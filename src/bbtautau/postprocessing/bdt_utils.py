@@ -285,6 +285,19 @@ def convert_models_to_ubj(model_dir: Path, modelname: str, n_folds: int = 1) -> 
 
 # Mapping from sample names to BDT column name prefixes
 # This allows flexible naming of background columns
+# ROC evaluation (``BDTTrainer.compute_rocs``): spaced discriminant ``name`` strings.
+BDT_ROC_VSALL_SUFFIX = "vsAll"
+
+
+def bdt_eval_discriminant_vsall(signal_channel: str) -> str:
+    """ROCAnalyzer discriminant label for BDT vs all backgrounds.
+
+    Must match ``custom_name`` for the full-background background group in
+    :meth:`bbtautau.postprocessing.bdt.BDTTrainer.compute_rocs`.
+    """
+    return f"BDT {signal_channel}{BDT_ROC_VSALL_SUFFIX}"
+
+
 BKG_COLUMN_NAMES = {
     "dyjets": "BDTDY",
     "qcd": "BDTQCD",
