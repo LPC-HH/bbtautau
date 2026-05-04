@@ -31,6 +31,9 @@ from bbtautau.postprocessing.bbtautau_types import LoadedSample
 from bbtautau.postprocessing.plotting import plotting
 from bbtautau.postprocessing.Samples import SAMPLES
 
+# Target background efficiency for threshold-based metrics in metrics_summary (signal_eff, F1, …).
+DEFAULT_METRICS_BKG_EFF = 3e-4
+
 
 @dataclass
 class ROC:
@@ -186,7 +189,7 @@ class Discriminant:
         self.roc = roc
         return roc
 
-    def compute_metrics(self, bkg_eff=1e-3):
+    def compute_metrics(self, bkg_eff=DEFAULT_METRICS_BKG_EFF):
         """
         Compute performance metrics for the discriminant at fixed background efficiency.
 
@@ -743,7 +746,9 @@ class ROCAnalyzer:
                 background_names,
             )
 
-    def compute_rocs(self, verbose=True, compute_metrics=False, bkg_eff=1e-3, parallel=False):
+    def compute_rocs(
+        self, verbose=True, compute_metrics=False, bkg_eff=DEFAULT_METRICS_BKG_EFF, parallel=False
+    ):
         """
         Compute ROC curves for all discriminants (and optionally metrics).
 
