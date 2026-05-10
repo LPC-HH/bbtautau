@@ -48,7 +48,7 @@ def path_dict(path: str, path_2022: str = None):
             "bg": Path(path),
             "signal": Path(path),
         },
-                "2024": {
+        "2024": {
             "data": Path(path),
             "bg": Path(path),
             "signal": Path(path),
