@@ -308,8 +308,10 @@ class Analyser:
 
                 for j, (var_suffix, mlabel) in enumerate(
                     zip(
-                        ["Msd", "PNetmassLegacy", "ParTmassResApplied", "ParTmassVisApplied"],
-                        ["SoftDrop", "PNetLegacy", "ParT Res", "ParT Vis"],
+                        # ["Msd", "PNetmassLegacy", "ParTmassResApplied", "ParTmassVisApplied", "CAglobalParT_massVisApplied_with_delta_axis_merged", "CAglobalParT_massVisApplied_merged"],
+                        # ["SoftDrop", "PNetLegacy", "ParT Res", "ParT Vis", "CAMass", "CAMass_old"],
+                        ["Msd", "PNetmassLegacy", "ParTmassResApplied", "ParTmassVisApplied", "CAglobalParT_massVisApplied_with_delta_axis_merged"],
+                        ["SoftDrop", "PNetLegacy", "ParT Res", "ParT Vis", "CAMass"],
                     )
                 ):
                     # Use LoadedSample.get_var with jet prefix - it automatically applies masks
@@ -1555,7 +1557,7 @@ Examples:
     data_group.add_argument(
         "--years",
         nargs="+",
-        default=["2022", "2022EE", "2023", "2023BPix"],
+        default=["2022", "2022EE", "2023", "2023BPix", "2024"],
         help="Years to include (default: 2022-2023)",
     )
     data_group.add_argument(

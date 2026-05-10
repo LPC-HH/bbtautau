@@ -61,6 +61,10 @@ _repo_name = _REPO_ROOT.name
 _default_data_dir = (
     "/ceph/cms/store/user/haoyang/bbtautau/skimmer/25Sep23AddVars_v12_private_signal"
 )
+#for 2024:
+_default_data_dir = (
+    "/eos/user/j/jinwa/bbtautau/skimmer/25Sep24QCD_v15_signal"
+)
 DATA_DIR = os.environ.get("BBTAUTAU_DATA_DIR", _default_data_dir)
 DATA_PATHS = path_dict(DATA_DIR)
 

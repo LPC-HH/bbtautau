@@ -109,15 +109,19 @@ def extract_base_signal_key(sig_key_with_channel: str) -> str:
         "vbfbbtthm" -> "vbfbbtt"
     """
     # Check longer names first so "vbfbbtt-k2v0hh" doesn't match "vbfbbtt"
+
+    # todo: (only for 2024) Not all samples have been fully processed yet, so this is temporarily commented out;
+    # If running 2022 + 2023, please uncomment.
+    
     for base_sig in [
-        "ggfbbtt-kl5p00",
-        "ggfbbtt-kl2p45",
-        "ggfbbtt-kl0p00",
+        # "ggfbbtt-kl5p00",
+        # "ggfbbtt-kl2p45",
+        # "ggfbbtt-kl0p00",
         "ggfbbtt",
-        "vbfbbtt-kvm1p6-k2v2p72-klm1p36",
-        "vbfbbtt-kvm0p962-k2v0p959-klm1p43",
-        "vbfbbtt-kvm0p758-k2v1p44-klm19p3",
-        "vbfbbtt-kv1p74-k2v1p37-kl14p4",
+        # "vbfbbtt-kvm1p6-k2v2p72-klm1p36",
+        # "vbfbbtt-kvm0p962-k2v0p959-klm1p43",
+        # "vbfbbtt-kvm0p758-k2v1p44-klm19p3",
+        # "vbfbbtt-kv1p74-k2v1p37-kl14p4",
         "vbfbbtt-k2v0",
         "vbfbbtt",
     ]:
@@ -239,18 +243,32 @@ def get_columns(
             ("ak8FatJetPNetmassLegacy", 3),
             ("ak8FatJetParTmassResApplied", 3),
             ("ak8FatJetParTmassVisApplied", 3),
+            ("ak8FatJetCAglobalParT_massVisApplied_with_delta_axis_merged", 3),
+            ("ak8FatJetCAglobalParT_massVisApplied_merged", 3),
             ("ak8FatJetMsd", 3),
         ]
 
-    if ParT_taggers:
-        for branch in (
-            [f"ak8FatJetParT{key}" for key in Samples.qcdouts + Samples.topouts + Samples.sigouts]
-            + [
-                f"ak8FatJetParT{key}vsQCD" for key in Samples.sigouts
-            ]  # remove exception in muon channel, was only necessary in old ntuples
-            + [f"ak8FatJetParT{key}vsQCDTop" for key in Samples.sigouts]
-        ):
-            columns_data.append((branch, 3))
+    if year == "2024":
+        if ParT_taggers:
+            for branch in (
+                [f"ak8FatJetParT{key}" for key in Samples.qcdouts_v15 + Samples.topouts_v15]
+                + [
+                    f"ak8FatJetParT{key}vsQCD" for key in Samples.sigouts
+                ]  # remove exception in muon channel, was only necessary in old ntuples
+                + [f"ak8FatJetParT{key}vsQCDTop" for key in Samples.sigouts]
+            ):
+                columns_data.append((branch, 3))
+    # 2022+2023, v12, more QCD/Top/ParTs var
+    else:
+        if ParT_taggers:
+            for branch in (
+                [f"ak8FatJetParT{key}" for key in Samples.qcdouts + Samples.topouts + Samples.sigouts]
+                + [
+                    f"ak8FatJetParT{key}vsQCD" for key in Samples.sigouts
+                ]  # remove exception in muon channel, was only necessary in old ntuples
+                + [f"ak8FatJetParT{key}vsQCDTop" for key in Samples.sigouts]
+            ):
+                columns_data.append((branch, 3))
 
     if leptons:
         columns_data += [
@@ -635,6 +653,8 @@ def bbtautau_assignment(
     events_dict: dict[str, pd.DataFrame | LoadedSample],
     channel: Channel = None,
     agnostic: bool = False,
+    # 2024, v15, the ParT score is different from v12
+    is_2024: bool = False,
 ):
     """Assign bb and tautau jets per each event."""
 
@@ -660,16 +680,38 @@ def bbtautau_assignment(
         # assign tautau jet as the one with the highest ParTtautauvsQCD score
         if agnostic:
             sig_labels = [ch.tagger_label for ch in CHANNELS.values()]
-            num = (
-                sample.get_var(f"ak8FatJetParTX{sig_labels[0]}")
-                + sample.get_var(f"ak8FatJetParTX{sig_labels[1]}")
-                + sample.get_var(f"ak8FatJetParTX{sig_labels[2]}")
-            ) / 3
-            denom = num + sample.get_var("ak8FatJetParTQCD")
-            combined_score = np.divide(
-                num, denom, out=np.zeros_like(num), where=((num != PAD_VAL) & (denom != 0))
-            )
-            tautau_pick = np.argmax(combined_score, axis=1)
+            # 2024, v15, the ParT score is different from v12
+            print(sig_labels)
+            if is_2024:
+                num = (
+                    (sample.get_var(f"ak8FatJetParTX{sig_labels[0]}vsQCD")
+                    * sample.get_var("ak8FatJetParTQCD"))
+                    / (1-sample.get_var(f"ak8FatJetParTX{sig_labels[0]}vsQCD"))
+                    + 
+                    (sample.get_var(f"ak8FatJetParTX{sig_labels[1]}vsQCD")
+                    * sample.get_var("ak8FatJetParTQCD"))
+                    / (1-sample.get_var(f"ak8FatJetParTX{sig_labels[1]}vsQCD"))
+                    + 
+                    (sample.get_var(f"ak8FatJetParTX{sig_labels[1]}vsQCD")
+                    * sample.get_var("ak8FatJetParTQCD"))
+                    / (1-sample.get_var(f"ak8FatJetParTX{sig_labels[1]}vsQCD"))
+                ) / 3
+                denom = num + sample.get_var("ak8FatJetParTQCD")
+                combined_score = np.divide(
+                    num, denom, out=np.zeros_like(num), where=((num != PAD_VAL) & (denom != 0))
+                )
+                tautau_pick = np.argmax(combined_score, axis=1)
+            else:
+                num = (
+                    sample.get_var(f"ak8FatJetParTX{sig_labels[0]}")
+                    + sample.get_var(f"ak8FatJetParTX{sig_labels[1]}")
+                    + sample.get_var(f"ak8FatJetParTX{sig_labels[2]}")
+                ) / 3
+                denom = num + sample.get_var("ak8FatJetParTQCD")
+                combined_score = np.divide(
+                    num, denom, out=np.zeros_like(num), where=((num != PAD_VAL) & (denom != 0))
+                )
+                tautau_pick = np.argmax(combined_score, axis=1)
         else:
             tautau_pick = np.argmax(
                 sample.get_var(f"ak8FatJetParTX{channel.tagger_label}vsQCD"), axis=1
@@ -1024,7 +1066,15 @@ def load_data_channel(
         delete_columns(events_dict[year], year, channels=[channel])
 
         derive_variables(events_dict[year])
-        bbtautau_assignment(events_dict[year], agnostic=True)
+
+        # 2024, v15, the ParT score is different from v12
+        if(year == "2024"):
+            bbtautau_assignment(events_dict[year], agnostic=True, is_2024=True)
+        else:
+            bbtautau_assignment(events_dict[year], agnostic=True, is_2024=False)
+
+
+        # bbtautau_assignment(events_dict[year], agnostic=True)
         leptons_assignment(events_dict[year], dR_cut=1.5)
         derive_lepton_variables(events_dict[year])
 
