@@ -48,6 +48,11 @@ def path_dict(path: str, path_2022: str = None):
             "bg": Path(path),
             "signal": Path(path),
         },
+                "2024": {
+            "data": Path(path),
+            "bg": Path(path),
+            "signal": Path(path),
+        },
     }
 
 
@@ -62,9 +67,12 @@ _default_data_dir = (
     "/ceph/cms/store/user/haoyang/bbtautau/skimmer/25Sep23AddVars_v12_private_signal"
 )
 #for 2024:
-_default_data_dir = (
-    "/eos/user/j/jinwa/bbtautau/skimmer/25Sep24QCD_v15_signal"
-)
+# _default_data_dir = (
+#     "/eos/user/j/jinwa/bbtautau/skimmer/25Sep24QCD_v15_signal"
+# )
+# _default_data_dir = (
+#     "/eos/user/j/jinwa/a_2024_small_par"
+# )
 DATA_DIR = os.environ.get("BBTAUTAU_DATA_DIR", _default_data_dir)
 DATA_PATHS = path_dict(DATA_DIR)
 
