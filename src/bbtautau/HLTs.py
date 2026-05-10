@@ -1,5 +1,4 @@
 """HLTs for bbtautau analysis."""
-"""Added triggers for 2024 v15, by Jin, 202604"""
 
 from __future__ import annotations
 
