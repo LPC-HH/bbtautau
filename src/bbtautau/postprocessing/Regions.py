@@ -144,6 +144,9 @@ def get_selection_regions(
     use_ParT: bool = False,
     do_vbf: bool = False,
     bb_disc: str = "ak8FatJetParTXbbvsQCDTop",
+    # The following args are used to obtain the correct csv file for the cuts
+    # ---------------
+    # Combined signals refers to whether the optimization includes the total SM signal for all regions or just the ggf signal for ggf regions and vbf signal for vbf regions. At this stage it is only to get the right csv file directory. The separate signal is the default right now.
     combined_signals: str = "separate_signals",
     test_mode: bool = False,
     tt_pres: bool = False,
