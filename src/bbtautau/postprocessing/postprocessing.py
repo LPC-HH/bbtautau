@@ -297,6 +297,11 @@ def main(args: argparse.Namespace):
                     "use_ParT": args.use_ParT,
                     "do_vbf": args.do_vbf,
                     "bb_disc": args.bb_disc,
+                    "test_mode": args.test_mode,
+                    "tt_pres": args.tt_pres,
+                    "overlapping_channels": args.overlapping_channels,
+                    "sensitivity_disc_tag": args.sensitivity_disc_tag,
+                    "ggf_modelname": args.ggf_modelname,
                 },
             )
 
@@ -1023,9 +1028,33 @@ def parse_args(parser=None):
 
     parser.add_argument(
         "--sensitivity-dir",
-        help="Path to the sensitivity study's output directory that has a csv file under {dir}/full_presel/grid/{do_vbf}/sm_signals/orthogonal_channels/{signal}/{channel}. The TXbb/Txtt cuts will be extracted/ If not provided, the script will use the ones in Samples.py",
+        help=(
+            "Directory ``.../plots/SensitivityStudy/<date>/`` (parent of ``tt_pres`` / ``full_presel`` / "
+            "``test``). CSV is read from "
+            "``<dir>/<presel>/<disc>/<do_vbf|ggf_only>/<combined_signals>/<orthogonal|overlapping>_channels/"
+            "<signal>/<channel>/*_opt_results_*.csv``. Presel follows ``--tt-pres`` / ``--test-mode``. "
+            "Disc folder is ``--sensitivity-disc-tag`` if set, else ParT / ``--ggf-modelname`` / ``BDT``. "
+            "If not set, cuts from Samples.py are used."
+        ),
         default=None,
         type=str,
+    )
+
+    parser.add_argument(
+        "--sensitivity-disc-tag",
+        default=None,
+        type=str,
+        help=(
+            "Subfolder under the presel directory for optimized cuts (must match ``SensitivityStudy`` "
+            "output, e.g. May4_optimized_ggf). Overrides ``--ggf-modelname`` for the path only when set."
+        ),
+    )
+
+    add_bool_arg(
+        parser,
+        "overlapping-channels",
+        "Sensitivity study used overlapping (not orthogonal) channel regions; use overlapping_channels in CSV path",
+        default=False,
     )
 
     parser.add_argument(

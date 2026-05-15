@@ -21,13 +21,13 @@
 
 years=("2022" "2022EE" "2023" "2023BPix")
 channels=("hh" "hm" "he")
-bmin_values=(5 10 12)  # Can be overridden with --bmin
+bmin_values=(5 9 10 11 12)  # Can be overridden with --bmin
 
 # Repo root (parent of src/); works for any user/checkout path
 MAIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 SCRIPT_DIR="${MAIN_DIR}/src/bbtautau/postprocessing"
 DATA_DIR="/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
-SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2026-02-16/"
+SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2026-05-08/"
 COMBINED_SIGNALS="separate_signals"
 TAG=""
 USE_PART=0
@@ -35,9 +35,9 @@ DO_VBF=0
 USE_SENSITIVITY_DIR=1  # Flag to control --sensitivity-dir argument (default: on)
 TEST_MODE=0
 TT_PRES=0
-GGF_MODEL="11Feb26Full"
+GGF_MODEL="May4_optimized_ggf"
 #"19oct25_ak4away_ggfbbtt"
-VBF_MODEL="11Feb26Full"
+VBF_MODEL="May4_optimized_vbfk2v0"
 #"19oct25_ak4away_vbfbbtt"
 
 # Function to display help
@@ -225,8 +225,8 @@ do
             cmd+=(--tt-pres)
         fi
 
-        # Add --combined-signals if enabled
-        if [[ $COMBINED_SIGNALS -eq 1 ]]; then
+        # Add --combined-signals when set (non-empty string)
+        if [[ -n "$COMBINED_SIGNALS" ]]; then
             cmd+=(--combined-signals "$COMBINED_SIGNALS")
         fi
 

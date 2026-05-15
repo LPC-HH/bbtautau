@@ -45,7 +45,9 @@ hep.style.use("CMS")
 TODAY = date.today()  # to name output folder
 
 # Default B_min values for optimization
-DEFAULT_BMIN_VALUES = [1, 5, 10, 12]
+DEFAULT_BMIN_VALUES = [1, 5, 9, 10, 11, 12, 15, 18, 25]
+# Needs to be a subset of DEFAULT_BMIN_VALUES
+PLOT_BMIN = [1, 5, 10, 12]
 
 # Define discriminant names
 # BB_DISC_NAME = "bbFatJetParTXbbvsQCDTop" #Define in args for now
@@ -1096,14 +1098,12 @@ class Analyser:
         )
 
         # Save results to CSV files
-        successful_b_min_vals = []
         saved_files = []
         for fom in foms:
             bmin_dfs = []
             for B_min in b_min_vals:
                 optimum_result = results.get(fom.name, {}).get(f"Bmin={B_min}")
                 if optimum_result:
-                    successful_b_min_vals.append(B_min)
                     bmin_df = self.as_df(optimum_result, self.years, label=f"Bmin={B_min}")
                     bmin_dfs.append(bmin_df)
 
@@ -1151,14 +1151,16 @@ class Analyser:
             print(f"Saved passing events to: {output_json}")
 
         if plot:
-            while len(successful_b_min_vals) > 4:
-                successful_b_min_vals = successful_b_min_vals[::2]
+            primary_fom = foms[0].name
+            plot_b_min_vals = [
+                b for b in PLOT_BMIN if results.get(primary_fom, {}).get(f"Bmin={b}") is not None
+            ]
 
             if use_thresholds:
                 plot_optimization_thresholds(
                     results=results,
                     years=self.years,
-                    b_min_vals=successful_b_min_vals,
+                    b_min_vals=plot_b_min_vals,
                     foms=foms,
                     channel=self.channel,
                     save_path=self.plot_dir / f"{'_'.join(self.years)}_thresholds",
@@ -1172,7 +1174,7 @@ class Analyser:
                 plot_optimization_sig_eff(
                     results=results,
                     years=self.years,
-                    b_min_vals=successful_b_min_vals,
+                    b_min_vals=plot_b_min_vals,
                     foms=foms,
                     channel=self.channel,
                     save_path=self.plot_dir / f"{'_'.join(self.years)}_sigeff",
@@ -1185,7 +1187,7 @@ class Analyser:
                 plot_optimization_sig_eff(
                     results=results,
                     years=self.years,
-                    b_min_vals=successful_b_min_vals,
+                    b_min_vals=plot_b_min_vals,
                     foms=foms,
                     channel=self.channel,
                     save_path=self.plot_dir / f"{'_'.join(self.years)}_sigeff_log",
@@ -1312,9 +1314,15 @@ class Analyser:
         limits["Cut_Xtt"] = optimum.get("TXtt_opt", 0)
 
         # Add all evaluated quantities at optimum (they are stored directly, not nested)
-        # Skip internal grid arrays and non-scalar values
-        skip_keys = {"BBcut_sig_eff", "TTcut_sig_eff", "fom_map", "sel_B_min", "passing_events"}
-        # {"BBcut_sig_eff", "TTcut_sig_eff", "fom_map", "TXbb_opt", "TXtt_opt", "sig_eff_cuts"}
+        skip_keys = {
+            "BBcut_sig_eff",
+            "TTcut_sig_eff",
+            "fom_map",
+            "sel_B_min",
+            "passing_events",
+            "TXbb_opt",
+            "TXtt_opt",
+        }
         for k, v in optimum.items():
             if k not in skip_keys:
                 limits[k] = v
@@ -1687,13 +1695,13 @@ Examples:
     )
     disc_group.add_argument(
         "--ggf-modelname",
-        default="3Apr26_prod",  # 3Apr26_prod
+        default="May4_optimized_ggf",
         help="BDT model name for ggF",
     )
     disc_group.add_argument(
         "--vbf-modelname",
         type=str,
-        default="3Apr26_prod",
+        default="May4_optimized_vbf",
         help="BDT model name for VBF",
     )
     disc_group.add_argument(

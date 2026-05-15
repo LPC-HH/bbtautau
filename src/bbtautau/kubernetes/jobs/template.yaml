@@ -28,11 +28,11 @@ spec:
         resources:
           limits:
             memory: ${memory}Gi
-            cpu: "2.4"
+            cpu: "16"
             nvidia.com/gpu: "1"
           requests:
             memory: ${memory}Gi
-            cpu: "2"
+            cpu: "14"
             nvidia.com/gpu: "1"
       volumes:
       - name: bbtautauvol
@@ -48,5 +48,9 @@ spec:
                     values:
                       - service-02.nrp.mghpcc.org
                       - clu-fiona2.ucmerced.edu
+                  - key: nvidia.com/gpu.memory
+                    operator: Gt
+                    values:
+                      - "${min_gpu_mem}"
       restartPolicy: Never
   backoffLimit: 0

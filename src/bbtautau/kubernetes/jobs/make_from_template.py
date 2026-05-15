@@ -103,6 +103,8 @@ def main(args):
                 args.job_name = args.modelname.replace("-", "_")
 
     args.job_name = "_".join(args.job_name.split("-")).lower()
+    if getattr(args, "tt_preselection", False):
+        args.job_name += "_tt_pre"
     run_tag = "_".join(str(run_tag).split("-")).lower()
 
     # Path: bdt_trainings/{job_type}/{presel}/{run_tag}/{job_name}.yml
@@ -180,7 +182,7 @@ def main(args):
         output_dir = str(BDT_DIR / job_type / presel / run_tag / f"compare_{compare_tag}")
 
         years_str = " ".join(args.years)
-        memory = 25 if getattr(args, "tt_preselection", False) else 90
+        memory = 25 if getattr(args, "tt_preselection", False) else 100
         args_dict = {
             "job_name": "-".join(args.job_name.split("_")),
             "output_dir": output_dir,
@@ -201,6 +203,7 @@ def main(args):
             "args": extra_args,
             "datapath": str(PVC / args.datapath),
             "memory": memory,
+            "min_gpu_mem": str(args.min_gpu_mem),
         }
     else:
         # Training mode arguments are passed through $model_args.
@@ -214,6 +217,7 @@ def main(args):
             "datapath": str(PVC / args.datapath),
             "memory": memory,
             "config_bootstrap": config_bootstrap,
+            "min_gpu_mem": str(args.min_gpu_mem),
         }
 
     with Path.open(file_name, "w") as f:
@@ -312,6 +316,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="apply tt preselection",
         type=bool,
         action=BooleanOptionalAction,
+    )
+
+    parser.add_argument(
+        "--min-gpu-mem",
+        default=20000,
+        help=(
+            "Minimum GPU memory in MiB (Gt threshold on the nvidia.com/gpu.memory node label). "
+            "Default 20000 keeps jobs on cards with >=24GB VRAM and avoids OOM during fold "
+            "checkpointing on small GPUs. Use e.g. 40000 for >=40GB (A100), 79000 for 80GB."
+        ),
+        type=int,
     )
 
     parser.add_argument(
