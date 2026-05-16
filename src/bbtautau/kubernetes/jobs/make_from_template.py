@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import os
 import sys
 from argparse import BooleanOptionalAction
@@ -10,6 +11,8 @@ from string import Template
 kubernetes_dir = Path("/home/users/lumori/bbtautau/src/bbtautau/kubernetes")
 templ_file = kubernetes_dir / "jobs" / "template.yaml"
 templ_compare_file = kubernetes_dir / "jobs" / "template_compare.yaml"
+templ_rescaling_file = kubernetes_dir / "jobs" / "template_rescaling.yaml"
+templ_compare_light_file = kubernetes_dir / "jobs" / "template_compare_light.yaml"
 
 PVC = Path("/bbtautauvol")
 BDT_DIR = PVC / "bdt"
@@ -20,6 +23,26 @@ class objectview:
 
     def __init__(self, d):
         self.__dict__ = d
+
+
+def _build_config_bootstrap(config_file: str | None) -> tuple[str, str]:
+    """Return shell fragments to materialize an explicit config in the pod."""
+    if not config_file:
+        return "", ""
+
+    config_path = Path(config_file).resolve()
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    runtime_path = Path("/tmp/bbtautau-configs") / config_path.name
+    config_b64 = base64.b64encode(config_path.read_bytes()).decode("ascii")
+    bootstrap = (
+        "mkdir -p /tmp/bbtautau-configs && "
+        "python -c "
+        '"from pathlib import Path; import base64; '
+        f"Path('{runtime_path}').write_bytes(base64.b64decode('{config_b64}'))\" && "
+    )
+    return bootstrap, f" --config-file {runtime_path}"
 
 
 def from_json(args):
@@ -43,20 +66,51 @@ def from_json(args):
 
 def main(args):
 
+    # Presel is independent of --tag, derived from --tt-preselection
+    presel = "tt_presel" if getattr(args, "tt_preselection", False) else "no_presel"
+
     if args.from_json != "":
         args = from_json(args)
+        job_type = getattr(args, "job_type", "training")
+        default_tag = getattr(args, "model_name", getattr(args, "modelname", "default"))
+        run_tag = getattr(args, "tag", None) or default_tag
     else:
+        # Job type and default run_tag for path grouping
+        if args.compare_models or args.compare_light:
+            job_type = "comparisons"
+            default_tag = (
+                args.compare_tag or "-".join(Path(i).name for i in args.inputs)
+                if args.inputs
+                else "models"
+            )
+        elif args.study_rescaling:
+            job_type = "rescaling"
+            default_tag = args.modelname
+        else:
+            job_type = "training"
+            default_tag = args.modelname
+
+        run_tag = args.tag if args.tag else default_tag
+
         if args.job_name == "":
-            if args.compare_models:
-                models_key = "-".join(args.models) if args.models else "models"
-                args.job_name = "cmp_" + args.tag + "_" + models_key + "_" + args.signal_key
+            if args.compare_models or args.compare_light:
+                prefix = "cmpl_" if args.compare_light else "cmp_"
+                models_key = default_tag.replace("-", "_")
+                args.job_name = prefix + models_key
+            elif args.study_rescaling:
+                args.job_name = "rescaling_" + args.modelname.replace("-", "_")
             else:
-                args.job_name = "lm_" + args.tag + "_" + args.name + "_" + args.signal_key
+                args.job_name = args.modelname.replace("-", "_")
 
-    args.job_name = "_".join(args.job_name.split("-")).lower()  # hyphens to underscores, lowercase
+    args.job_name = "_".join(args.job_name.split("-")).lower()
+    if getattr(args, "tt_preselection", False):
+        args.job_name += "_tt_pre"
+    run_tag = "_".join(str(run_tag).split("-")).lower()
 
-    Path.mkdir(kubernetes_dir / f"bdt_trainings/{args.tag}", exist_ok=True)
-    file_name = kubernetes_dir / f"bdt_trainings/{args.tag}/{args.job_name}.yml"
+    # Path: bdt_trainings/{job_type}/{presel}/{run_tag}/{job_name}.yml
+    out_dir = kubernetes_dir / "bdt_trainings" / job_type / presel / run_tag
+    Path.mkdir(out_dir, parents=True, exist_ok=True)
+    file_name = out_dir / f"{args.job_name}.yml"
 
     if Path.exists(file_name):
         print(f"Job exists: {file_name}")
@@ -74,7 +128,14 @@ def main(args):
                 sys.exit()
 
     # Choose appropriate template based on mode
-    template_path = templ_compare_file if args.compare_models else templ_file
+    if args.compare_light:
+        template_path = templ_compare_light_file
+    elif args.compare_models:
+        template_path = templ_compare_file
+    elif args.study_rescaling:
+        template_path = templ_rescaling_file
+    else:
+        template_path = templ_file
 
     with Path.open(template_path) as f:
         lines = Template(f.read())
@@ -87,43 +148,76 @@ def main(args):
     if getattr(args, "tt_preselection", False):
         extra_args += (" " if extra_args else "") + "--tt-preselection"
 
-    if args.compare_models:
-        # Validation for comparison mode
-        if not args.models or not args.model_dirs:
-            raise ValueError(
-                "--compare-models requires both --models and --model-dirs to be specified"
-            )
-        if len(args.models) != len(args.model_dirs):
-            raise ValueError("--models and --model-dirs must have the same number of arguments")
-        if len(args.models) < 2:
-            raise ValueError("--compare-models requires at least two models to compare")
+    if args.compare_light:
+        if not args.inputs:
+            raise ValueError("--compare-light requires --inputs")
 
-        # Comparison mode arguments
-        years_str = " ".join(args.years)
-        models_str = " ".join(args.models)
-        model_dirs = " ".join([str(BDT_DIR / model_dir) for model_dir in args.model_dirs])
-        output_dir = (
-            str(BDT_DIR / args.tag / "compare_") + "-".join(args.models) + "_" + args.signal_key
-        )
+        inputs_str = " ".join(str(BDT_DIR / i) for i in args.inputs)
+        compare_args_str = f"--inputs {inputs_str}"
+        if args.disc_filter is not None:
+            compare_args_str += f" --disc-filter {args.disc_filter}"
+
+        compare_tag = args.compare_tag
+        if not compare_tag:
+            compare_tag = "-".join(Path(i).name for i in args.inputs)
+        output_dir = str(BDT_DIR / job_type / presel / run_tag / f"compare_light_{compare_tag}")
+
         args_dict = {
-            "job_name": "-".join(args.job_name.split("_")),  # change underscores to hyphens
-            "signal_key": args.signal_key,
+            "job_name": "-".join(args.job_name.split("_")),
+            "output_dir": output_dir,
+            "args": extra_args,
+            "compare_args": compare_args_str,
+        }
+    elif args.compare_models:
+        if not args.inputs:
+            raise ValueError("--compare-models requires --inputs")
+
+        # Build the compare_args string for the template
+        inputs_str = " ".join(str(BDT_DIR / i) for i in args.inputs)
+        compare_args_str = f"--inputs {inputs_str}"
+
+        compare_tag = args.compare_tag
+        if not compare_tag:
+            compare_tag = "-".join(Path(i).name for i in args.inputs)
+        output_dir = str(BDT_DIR / job_type / presel / run_tag / f"compare_{compare_tag}")
+
+        years_str = " ".join(args.years)
+        memory = 25 if getattr(args, "tt_preselection", False) else 100
+        args_dict = {
+            "job_name": "-".join(args.job_name.split("_")),
             "output_dir": output_dir,
             "args": extra_args,
             "datapath": str(PVC / args.datapath),
             "years": years_str,
-            "models": models_str,
-            "model_dirs": model_dirs,
+            "compare_args": compare_args_str,
+            "memory": memory,
         }
-    else:
-        # Training mode arguments (backward compatible)
+    elif args.study_rescaling:
+        memory = 25 if getattr(args, "tt_preselection", False) else 80
         args_dict = {
-            "job_name": "-".join(args.job_name.split("_")),  # change underscores to hyphens
-            "name": args.name,
-            "signal_key": args.signal_key,
-            "output_dir": str(BDT_DIR / args.tag / args.name) + "_" + args.signal_key,
+            "job_name": "-".join(args.job_name.split("_")),
+            "modelname": args.modelname,
+            "output_dir": str(
+                BDT_DIR / job_type / presel / run_tag / f"rescaling_{args.modelname}"
+            ),
             "args": extra_args,
             "datapath": str(PVC / args.datapath),
+            "memory": memory,
+            "min_gpu_mem": str(args.min_gpu_mem),
+        }
+    else:
+        # Training mode arguments are passed through $model_args.
+        memory = 32 if getattr(args, "tt_preselection", False) else 80
+        config_bootstrap, config_arg = _build_config_bootstrap(getattr(args, "config_file", None))
+        args_dict = {
+            "job_name": "-".join(args.job_name.split("_")),
+            "model_args": f"--model {args.modelname}{config_arg}",
+            "output_dir": str(BDT_DIR / job_type / presel / run_tag / args.modelname),
+            "args": extra_args,
+            "datapath": str(PVC / args.datapath),
+            "memory": memory,
+            "config_bootstrap": config_bootstrap,
+            "min_gpu_mem": str(args.min_gpu_mem),
         }
 
     with Path.open(file_name, "w") as f:
@@ -133,10 +227,21 @@ def main(args):
         os.system(f"kubectl create -f {file_name} -n cms-ml")
 
 
-if __name__ == "__main__":
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--from-json", default="", help="json file to load args from", type=str)
-    parser.add_argument("--name", default="", help="", type=str)
+    parser.add_argument(
+        "--modelname",
+        default="",
+        help="Model name to pass (used for training and base for rescaling study)",
+        type=str,
+    )
+    parser.add_argument(
+        "--config-file",
+        default="",
+        help="Optional local config file to embed in training jobs and pass to bdt.py.",
+        type=str,
+    )
     parser.add_argument("--job-name", default="", help="defaults to name", type=str)
     parser.add_argument(
         "--compare-models",
@@ -146,17 +251,36 @@ if __name__ == "__main__":
         action=BooleanOptionalAction,
     )
     parser.add_argument(
-        "--models",
-        nargs="+",
+        "--compare-light",
+        default=False,
+        help="lightweight comparison using only metrics_summary.csv files (no data loading)",
+        type=bool,
+        action=BooleanOptionalAction,
+    )
+    parser.add_argument(
+        "--disc-filter",
         default=None,
-        help="list of model names to compare when --compare-models is set",
+        help="substring filter for discriminant names in --compare-light (e.g. 'vsAll')",
         type=str,
     )
     parser.add_argument(
-        "--model-dirs",
+        "--study-rescaling",
+        default=False,
+        help="use balance study mode to sweep balance strategies",
+        type=bool,
+        action=BooleanOptionalAction,
+    )
+    parser.add_argument(
+        "--inputs",
         nargs="+",
         default=None,
-        help="list of model directories to compare when --compare-models is set",
+        help="model JSON files and/or directories to compare (paths relative to BDT_DIR or absolute)",
+        type=str,
+    )
+    parser.add_argument(
+        "--compare-tag",
+        default=None,
+        help="tag for the comparison output directory (defaults to model/folder names)",
         type=str,
     )
     parser.add_argument(
@@ -166,16 +290,13 @@ if __name__ == "__main__":
         help="years to use for comparison/training",
         type=str,
     )
-    parser.add_argument("--tag", default="no_presel", help="tag for job / bdt", type=str)
     parser.add_argument(
-        "--datapath", default="25Sep23AddVars_v12_private_signal", help="", type=str
-    )
-    parser.add_argument(
-        "--signal-key",
-        default="ggfbbtt",
-        help="signal key",
+        "--tag",
+        default="",
+        help="optional custom tag for grouping (default: modelname for training/rescaling, compare_tag or input names for comparisons)",
         type=str,
     )
+    parser.add_argument("--datapath", default="26Mar5All_v12_private_signal", help="", type=str)
     parser.add_argument(
         "--samples",
         nargs="+",
@@ -198,6 +319,17 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--min-gpu-mem",
+        default=20000,
+        help=(
+            "Minimum GPU memory in MiB (Gt threshold on the nvidia.com/gpu.memory node label). "
+            "Default 20000 keeps jobs on cards with >=24GB VRAM and avoids OOM during fold "
+            "checkpointing on small GPUs. Use e.g. 40000 for >=40GB (A100), 79000 for 80GB."
+        ),
+        type=int,
+    )
+
+    parser.add_argument(
         "--overwrite",
         default=False,
         help="overwrite old job",
@@ -212,7 +344,9 @@ if __name__ == "__main__":
         type=bool,
         action=BooleanOptionalAction,
     )
+    return parser
 
-    args = parser.parse_args()
 
+if __name__ == "__main__":
+    args = build_parser().parse_args()
     main(args)

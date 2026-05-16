@@ -211,94 +211,110 @@ Notes:
 
 ### BDT
 
-This script provides a command-line interface to train, load, and evaluate a multiclass Boosted Decision Tree (BDT) model on data from one or more years. It includes options for studying rescaling effects, evaluating BDT predictions, and managing data reloading.
+`src/bbtautau/postprocessing/bdt.py` trains, evaluates, compares, and studies multiclass BDT models. Model settings are normally looked up by name under `src/bbtautau/postprocessing/bdt_configs/`, but training can also be driven by an explicit config file via `--config-file`.
 
-Data paths defined in `Trainer.__init__` in `Trainer.data_path` by year and sample type.
+Basic invocation:
 
+```bash
+python src/bbtautau/postprocessing/bdt.py [mode] --model <modelname>
 ```
-python bdt.py [options]
+
+or, for explicit config injection:
+
+```bash
+python src/bbtautau/postprocessing/bdt.py [mode] --config-file path/to/config_my_model.py
 ```
 
-Options:
+Important flags:
 
-`--years`
-Specify which years of data to store in Trainer object. This establishes which years of data are loaded for training/evaluation.
-Examples: `--years 2022 2022EE 2023BPix` or `--years all`
-`--model`
-Model configuration name (e.g. "test"). Names are keys in /home/users/lumori/bbtautau/src/bbtautau/postprocessing/bdt_config.py configuration dictionaries
-`--save-dir`
-Name to save the trained model and generated plots in `"/home/users/lumori/bbtautau/src/bbtautau/postprocessing/classifier/{model_dir}"`. Defaults to `"/home/users/lumori/bbtautau/src/bbtautau/postprocessing/classifier/trained_models/{self.modelname}_{('-'.join(self.years) if not self.years == hh_vars.years else 'all')}"`
-`--force-reload`
-Force reloading of data, even if cache/files exist.
-`--samples`
-List of sample names to use for training or evaluation. Defaults to [ggf signals, QCD, ttbar, DY]
-`--train`
-Train a new model (mutually exclusive with --load).
-`--load`
-Load a previously trained model (default if neither is specified).
-`--study-rescaling`
-Script to study the impact of different weight and rescaling rules on BDT performance.
-`--eval-bdt-preds`
-Evaluate BDT predictions on the given data samples and years. Outputs are stored in the data directory as .npy files, and can later be handled through `postprocessing.load_bdt_preds`.
-`--compare-models`
-Compare multiple trained models by overlaying ROC curves and writing a CSV of metrics.
-`--models`
-List of model names to compare when `--compare-models` is set.
+- `--years`: years to use, e.g. `--years 2022 2023` or `--years all`
+- `--model`: model configuration name to load from `bdt_configs/`
+- `--config-file`: explicit Python config file defining `CONFIG`; if passed together with `--model`, the two model names must match
+- `--output-dir`: output directory for trained models, plots, comparisons, or prediction files
+- `--data-path`: input data directory key/path
+- `--force-reload`: force reloading the input data
+- `--train` / `--load`: train a new model or load an existing one
+- `--study-rescaling`: run the balance/rescaling study workflow
+- `--eval-bdt-preds`: write BDT predictions for selected samples
+- `--compare-models`: compare trained models using ROC overlays and CSV outputs
+- `--compare-light`: compare trained models using only existing `metrics_summary.csv` files
+- `--inputs`: paths to model JSON files and/or directories for comparison modes
+- `--samples`: samples to evaluate with `--eval-bdt-preds`
 
-**Example: train a new model ``mymodel''**
+One of `--model` or `--config-file` must be provided.
+
+**Example: train a new model by name**
+
+```bash
+python src/bbtautau/postprocessing/bdt.py \
+  --train \
+  --years all \
+  --model 26Mar26_optimized
 ```
-python bdt.py --train --years all --model mymodel
+
+**Example: train from an explicit config file**
+
+```bash
+python src/bbtautau/postprocessing/bdt.py \
+  --train \
+  --years all \
+  --config-file src/bbtautau/postprocessing/bdt_configs/standard/config_26Mar26_optimized.py
 ```
-Models are stored in global `CLASSIFIER_PATH` defined on top of file.
 
 **Evaluate predictions**
+
 ```bash
-python bdt.py \
+python src/bbtautau/postprocessing/bdt.py \
   --eval-bdt-preds \
   --years 2022 \
   --samples dyjets qcd ttbarhad ttbarll ttbarsl \
-  --model 28May25_baseline \
-  --signal-key ggfbbtt \
-  --save-dir /writable/output
+  --model 26Mar26_optimized \
+  --output-dir /writable/output
 ```
-This writes `BDT_predictions/<year>/<sample>/<model>_preds.npy` under `--save-dir` (or the default `DATA_DIR`).
+
+This writes `BDT_predictions/<year>/<sample>/<model>_preds.npy` under `--output-dir` (or the default `DATA_DIR`).
 
 **Compare multiple trained models**
+
 ```bash
-python bdt.py \
+python src/bbtautau/postprocessing/bdt.py \
   --compare-models \
-  --models 28May25_baseline 29July25_loweta_lowreg \
   --years 2022 \
-  --signal-key ggfbbtt \
-  --samples dyjets qcd ttbarhad ttbarll ttbarsl \
-  --save-dir comparison_out
+  --inputs \
+    /bbtautauvol/bdt/training/no_presel/model_a \
+    /bbtautauvol/bdt/training/no_presel/model_b \
+  --output-dir comparison_out
 ```
+
 This produces:
 - Overlay ROC plots per signal in `comparison_out/rocs/`
 - A consolidated CSV `comparison_out/comparison_metrics.csv`
 - An index JSON `comparison_out/comparison_index.json`
 
 Notes:
-- Headless/containers: plotting uses a non-interactive backend (Agg), so no display server is needed.
-- If Python cannot resolve internal modules like `Samples`, set `PYTHONPATH` to the repo root, e.g. `export PYTHONPATH=$(pwd):$PYTHONPATH` before running the commands.
+- Headless/containers: plotting uses a non-interactive backend (`Agg`), so no display server is needed.
+- The model config determines the signal setup (`signals` field); that is no longer configured via a separate CLI flag.
+- If Python cannot resolve internal modules, run from the repo root inside the project environment.
 
 
 ### Kubernetes: generate BDT jobs from templates
 
-Use `src/bbtautau/kubernetes/jobs/make_from_template.py` to generate Kubernetes job YAMLs for training or model comparison. It fills either `template.yaml` (training) or `template_compare.yaml` (comparison) and writes into `src/bbtautau/kubernetes/bdt_trainings/<tag>/<job_name>.yml`.
+Use `src/bbtautau/kubernetes/jobs/make_from_template.py` to generate Kubernetes job YAMLs for training, comparison, lightweight comparison, or rescaling studies. It fills one of the templates in `src/bbtautau/kubernetes/jobs/` and writes YAMLs under `src/bbtautau/kubernetes/bdt_trainings/<job_type>/<presel>/<tag>/<job_name>.yml`.
 
 Key flags:
+- `--modelname`: training or rescaling model name
+- `--config-file`: optional local config file to embed into a training job and pass to `bdt.py --config-file`
 - `--compare-models`: switch to comparison mode (uses `template_compare.yaml`)
-- `--models`: list of model names to compare (required with `--compare-models`)
-- `--model-dirs`: list of per-model output directories mounted under the PVC (e.g. `/bbtautauvol/bdt/<dir>`), same order as `--models`
+- `--compare-light`: switch to lightweight metrics-only comparison mode
+- `--study-rescaling`: switch to rescaling-study mode
+- `--inputs`: model JSON files and/or directories to compare
 - `--years`: years to use for training/comparison (space-separated)
-- `--signal-key`: signal key (e.g. `ggfbbtt`)
-- `--samples`: background sample names to include (space-separated)
+- `--samples`: samples to use in comparison/evaluation
 - `--datapath`: data subdirectory on the PVC (joined to `/bbtautauvol`)
 - `--train-args`: extra CLI args forwarded to `bdt.py` (quote this string)
 - `--tt-preselection`: append flag into `train-args`
 - `--job-name`: override auto-generated name (auto-generated names are lowercased)
-- `--tag`: folder under `kubernetes/bdt_trainings/` for output YAMLs
+- `--tag`: grouping tag used in the output path
 - `--overwrite`: allow overwriting an existing YAML
 - `--submit`: immediately `kubectl create -f <yaml>` in namespace `cms-ml`
 - `--from-json`: load all args from a JSON file (keys match the CLI flags)
@@ -306,36 +322,43 @@ Key flags:
 Training mode example:
 ```bash
 python src/bbtautau/kubernetes/jobs/make_from_template.py \
-  --name 29July25_loweta_lowreg \
-  --tag no_presel \
-  --signal-key ggfbbtt \
-  --samples dyjets qcd ttbarhad ttbarll ttbarsl \
-  --datapath 25Sep23AddVars_v12_private_signal \
-  --train-args "--years 2022 2023 --model 29July25_loweta_lowreg" \
+  --modelname 26Mar26_optimized \
+  --config-file src/bbtautau/postprocessing/bdt_configs/standard/config_26Mar26_optimized.py \
+  --tag kfold5 \
+  --datapath 26Mar5All_v12_private_signal \
+  --train-args "--years 2022 2023" \
   --submit
 ```
-This writes `kubernetes/bdt_trainings/no_presel/lm_no_presel_29july25_loweta_lowreg_ggfbbtt.yml` (unless `--job-name` is provided) and submits it. Logs and artifacts are stored under `/bbtautauvol/bdt/<save_dir>`.
+This writes a training job YAML under `src/bbtautau/kubernetes/bdt_trainings/training/no_presel/kfold5/` and submits it. When `--config-file` is provided, the config is embedded in the generated job and passed to `bdt.py` inside the pod, so the config does not need to exist in the cloned repo checkout.
 
 Comparison mode example:
 ```bash
-python make_from_template.py \
+python src/bbtautau/kubernetes/jobs/make_from_template.py \
   --compare-models \
-  --models 20aug25_loweta_lowreg 29july25-loweta-lowreg \
-  --model-dirs 20aug25_loweta_lowreg_ggfbbtt 29july25-loweta-lowreg_ggfbbtt \
-  --signal-key ggfbbtt \
-  --job-name lm_cmp_ggf_july_aug_nopresel
+  --inputs \
+    training/no_presel/model_a \
+    training/no_presel/model_b \
+  --compare-tag july_vs_aug \
+  --job-name cmp_july_aug_nopresel \
   --submit
 ```
 The script auto-generates `job_name` when not provided:
-- Training: `lm_<tag>_<name>_<signal_key>` (lowercased, hyphens -> underscores for the YAML filename)
-- Comparison: `cmp_<tag>_<model1>-<model2>-..._<signal_key>` (lowercased)
-Hyphens are normalized to underscores in file names; for Kubernetes object names they are converted back to hyphens.
+- Training: based on `modelname`
+- Comparison/light comparison: based on the compared input names or `compare_tag`
+- Rescaling: `rescaling_<modelname>`
+
+Generated YAMLs are grouped by job type and preselection state:
+
+- `training/no_presel/<tag>/...`
+- `training/tt_presel/<tag>/...`
+- `comparisons/no_presel/<tag>/...`
+- `rescaling/no_presel/<tag>/...`
 
 You can also place all arguments in a JSON file and run:
 ```bash
 python src/bbtautau/kubernetes/jobs/make_from_template.py --from-json my_job.json --submit
 ```
-Where `my_job.json` can contain fields like `compare-models`, `models`, `model-dirs`, `years`, `tag`, `signal_key`, `samples`, `datapath`, `train_args`, etc.
+Where `my_job.json` can contain fields matching the CLI flags, such as `modelname`, `config_file`, `inputs`, `compare_models`, `compare_light`, `study_rescaling`, `years`, `tag`, `samples`, `datapath`, and `train_args`.
 
 
 ### Templates

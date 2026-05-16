@@ -1,9 +1,17 @@
+"""
+BDT training and inference script for the bbtautau package.
+
+Authors: Ludovico Mori
+"""
+
 from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import ClassVar
@@ -13,53 +21,68 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from boostedhh import hh_vars, plotting
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from tabulate import tabulate
 
 from bbtautau.postprocessing.bbtautau_types import LoadedSample
-from bbtautau.postprocessing.bdt_config import bdt_config
-from bbtautau.postprocessing.bdt_utils import _ensure_dir
-from bbtautau.postprocessing.rocUtils import ROCAnalyzer, multiclass_confusion_matrix
-from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES
+from bbtautau.postprocessing.bdt_config import BDT_CONFIG
+from bbtautau.postprocessing.bdt_utils import (
+    DEFAULT_BKG_ORDER,
+    bdt_eval_discriminant_vsall,
+    bin_features,
+    get_expected_sample_order,
+    predict_bdt,
+    save_training_wps,
+)
+from bbtautau.postprocessing.rocUtils import (
+    DEFAULT_METRICS_BKG_EFF,
+    ROCAnalyzer,
+    multiclass_confusion_matrix,
+)
+from bbtautau.postprocessing.Samples import (
+    CHANNELS,
+    SAMPLES,
+    sig_keys_ggf,
+    sig_keys_vbf,
+)
 from bbtautau.postprocessing.utils import (
+    _ensure_dir,
     base_filter,
     bbtautau_assignment,
     delete_columns,
     derive_lepton_variables,
     derive_variables,
+    derive_vbf_variables,
     get_columns,
     label_transform,
     leptons_assignment,
     load_samples,
     tt_filters,
 )
-from bbtautau.userConfig import CLASSIFIER_DIR, DATA_PATHS, MODEL_DIR, path_dict
+from bbtautau.userConfig import DATA_PATHS, MODEL_DIR, WPS_TTPART, path_dict
 
 # Use non-interactive backend for containerized/CLI environments
 mpl.use("Agg")
 plt = mpl.pyplot
-
-# TODO
-# - k-fold cross validation
 
 # Some global variables
 DATA_DIR = Path(
     "/ceph/cms/store/user/lumori/bbtautau"
 )  # default directory for saving BDT predictions
 
+CAP_WEIGHTS = False
+
 
 class Trainer:
 
     loaded_dmatrix = False
 
-    # Default samples for training / evaluation
-    bkg_sample_names: ClassVar[list[str]] = ["dyjets", "qcd", "ttbarhad", "ttbarll", "ttbarsl"]
+    # Background samples for training (defined once in bdt_utils.py)
+    bkg_sample_names: ClassVar[list[str]] = DEFAULT_BKG_ORDER
 
     def __init__(
         self,
         years: list[str],
-        signal_key: str,
-        bkg_sample_names: list[str] = None,
         modelname: str = None,
         data_path: str = None,
         output_dir: str = None,
@@ -72,34 +95,78 @@ class Trainer:
             years = list(years)
         self.years = years
 
-        self.signal_key = signal_key
-        if bkg_sample_names is not None:
-            self.bkg_sample_names = bkg_sample_names
-
-        # need to load signal before splitting into channels
-        self.samples = {name: SAMPLES[name] for name in [self.signal_key] + self.bkg_sample_names}
-
         # ensure backwards compatibility. Choice of default data paths is done in userConfig.py
         self.data_paths = path_dict(data_path) if data_path is not None else DATA_PATHS
 
         self.modelname = modelname
-        self.bdt_config = bdt_config
+        self.bdt_config = BDT_CONFIG
         self.tt_preselection = tt_preselection
-        self.train_vars = self.bdt_config[self.modelname]["train_vars"]
-        self.hyperpars = self.bdt_config[self.modelname]["hyperpars"]
-        self.feats = [feat for cat in self.train_vars for feat in self.train_vars[cat]]
 
-        self.events_dict = {year: {} for year in self.years}
-
+        # Set output_dir early (needed for resolving n_folds from saved metadata)
         if output_dir is not None:
             output_dir_path = Path(output_dir)
-            # If absolute, use as-is; otherwise resolve under CLASSIFIER_DIR
+            # If absolute, use as-is; otherwise resolve under classifier/ (MODEL_DIR parent)
             self.output_dir = (
-                output_dir_path if output_dir_path.is_absolute() else CLASSIFIER_DIR / output_dir
+                output_dir_path if output_dir_path.is_absolute() else MODEL_DIR.parent / output_dir
             )
         else:
             self.output_dir = MODEL_DIR / self.modelname
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # n_folds from config (default: 1)
+        self.n_folds = self.bdt_config[self.modelname].get("n_folds", 1)
+        self.use_kfold = self.n_folds > 1
+        print(f"Using n_folds={self.n_folds}")
+
+        # Read signals from config (must be specified in config)
+        if "signals" not in self.bdt_config[self.modelname]:
+            raise ValueError(
+                f"Model '{self.modelname}' must specify 'signals' in config. "
+                f"Expected: signals: ['signal1'] or signals: ['signal1', 'signal2']"
+            )
+
+        config_signals = self.bdt_config[self.modelname]["signals"]
+        if not isinstance(config_signals, list) or len(config_signals) not in [1, 2]:
+            raise ValueError(
+                f"Model '{self.modelname}' has invalid 'signals' in config: {config_signals}. "
+                f"Must be a list with 1 or 2 elements."
+            )
+
+        # Use signals from config
+        self.signal_keys = list(config_signals)
+
+        # Infer model_type from number of signals
+        if len(self.signal_keys) == 1:
+            self.model_type = "single_signal"
+        elif len(self.signal_keys) == 2:
+            self.model_type = "unified"
+        else:
+            raise ValueError(
+                f"signals must contain 1 or 2 signals, got {len(self.signal_keys)}: {self.signal_keys}"
+            )
+
+        # Build samples dict: signals + backgrounds
+        self.samples = {name: SAMPLES[name] for name in self.signal_keys + self.bkg_sample_names}
+
+        self.train_vars = self.bdt_config[self.modelname]["train_vars"]
+        self.hyperpars = self.bdt_config[self.modelname]["hyperpars"]
+        self.feats = [feat for cat in self.train_vars for feat in self.train_vars[cat]]
+
+        # Validate num_class matches number of signals and backgrounds
+        # Each signal has 3 channels (he, hh, hm), backgrounds are fixed
+        num_signal_classes = len(self.signal_keys) * 3
+        num_bkg_classes = len(self.bkg_sample_names)
+        expected_num_class = num_signal_classes + num_bkg_classes
+        if self.hyperpars.get("num_class") != expected_num_class:
+            raise ValueError(
+                f"Model '{self.modelname}' has num_class={self.hyperpars.get('num_class')} "
+                f"but {len(self.signal_keys)} signal(s) * 3 channels + {num_bkg_classes} backgrounds "
+                f"requires num_class={expected_num_class}. signals={self.signal_keys}, "
+                f"bkg_samples={self.bkg_sample_names}"
+            )
+
+        self.cap_weights = CAP_WEIGHTS
+        self.events_dict = {year: {} for year in self.years}
 
     def load_data(self, force_reload=False):
         # Check if data buffer file exists
@@ -123,7 +190,9 @@ class Trainer:
                 # filters_dict = bb_filters(filters_dict, num_fatjets=3, bb_cut=0.3) # not needed, events are already filtered by skimmer
                 if self.tt_preselection:
                     filters_dict = tt_filters(
-                        channel=None, in_filters=filters_dict, num_fatjets=3, tt_cut=0.3
+                        channel=None,
+                        in_filters=filters_dict,
+                        num_fatjets=3,
                     )
 
                 columns = get_columns(year)
@@ -131,7 +200,7 @@ class Trainer:
                 self.events_dict[year] = load_samples(
                     year=year,
                     paths=self.data_paths[year],
-                    signals=[self.signal_key],
+                    signals=self.signal_keys,
                     channels=list(CHANNELS.values()),
                     samples=self.samples,
                     filters_dict=filters_dict,
@@ -141,21 +210,31 @@ class Trainer:
                     loaded_samples=True,
                     multithread=True,
                 )
+
+                # Need to check this!
+                # apply_triggers(self.events_dict[year], year, channel=None)
+
                 self.events_dict[year] = delete_columns(
                     self.events_dict[year], year, channels=list(CHANNELS.values())
                 )
 
                 derive_variables(self.events_dict[year])
-                bbtautau_assignment(self.events_dict[year], agnostic=True)
+                bbtautau_assignment(self.events_dict[year])
                 leptons_assignment(self.events_dict[year], dR_cut=1.5)
                 derive_lepton_variables(self.events_dict[year])
+                derive_vbf_variables(self.events_dict[year])
 
-        for ch in CHANNELS:
-            self.samples[f"{self.signal_key}{ch}"] = SAMPLES[f"{self.signal_key}{ch}"]
-        del self.samples[self.signal_key]
+        # Build sample_names using the order defined in bdt_utils. Here order counts!
+        self.sample_names = get_expected_sample_order(self.signal_keys)
 
-        # define sample list as signals + bkg samples
-        self.sample_names = [f"{self.signal_key}{ch}" for ch in CHANNELS] + self.bkg_sample_names
+        # Update samples dict to include all signal channels and remove base signal keys; these do not need to be ordered
+        for signal_key in self.signal_keys:
+            for ch in CHANNELS:
+                channel_key = f"{signal_key}{ch}"
+                self.samples[channel_key] = SAMPLES[channel_key]
+            # Remove base signal key from samples dict
+            if signal_key in self.samples:
+                del self.samples[signal_key]
 
     @staticmethod
     def save_stats(stats, filename):
@@ -165,385 +244,802 @@ class Trainer:
             writer.writeheader()
             writer.writerows(stats)
 
-    def prepare_training_set(
-        self, save_buffer=False, scale_rule="signal", balance="bysample_clip_1to10"
-    ):
-        """Prepare features and labels using LabelEncoder for multiclass classification.
+    @staticmethod
+    def _get_sample_group(sample_name):
+        """Determine which physics group a sample belongs to: 'ggf', 'vbf', or 'bkg'."""
+        for key in sig_keys_ggf:
+            if sample_name.startswith(key):
+                return "ggf"
+        for key in sig_keys_vbf:
+            if sample_name.startswith(key):
+                return "vbf"
+        return "bkg"
+
+    def _process_samples_for_training(self, balance="bysample"):
+        """Process samples and compute weights for training.
+
+        This is the common data processing logic used by prepare_training_set().
+        Extracts features and computes rescaled weights for all samples.
 
         Args:
-            train (bool, optional): Whether to prepare data for training. If true, will save a buffer file with training and eval files for quicker loading. Defaults to False.
-            scale_rule (str, optional): Rule for global scaling weights. Can be 'signal' (average signal event weight = 1), 'signal_1e-1', or 'signal_1e-2'. Defaults to 'signal'.
-            balance (str, optional): Rule for balancing samples. Can be
-            - 'bysample' : each of 8 samples has same weight, 1/4 of signal weight
-            - 'bysample_clip_1to10' : like bysample but clip min avg weight to 1/10 of signal avg
-            - 'bysample_clip_1to20' : like bysample but clip min avg weight to 1/20 of signal avg
-            - 'grouped_physics' : balance by physics groups (signal, ttbar, other_bkg) equally
-            - 'sqrt_scaling' : total weight proportional to sqrt(number of events)
-            - 'ens_weighting' : effective number of samples weighting (beta=0.999)
-            Defaults to 'bysample_clip_1to10'.
-            Total weight = 8*tot_sig
+            balance: Strategy for balancing sample weights. Options:
+                - 'bysample': each sample gets equal total weight
+                - 'equal_groups': equal total weight per physics group (ggF, VBF, bkg),
+                  distributed proportionally to n_events within each group
+                - 'equal_groups_equal_channels': like equal_groups, but within signal
+                  groups each channel gets equal total weight; within backgrounds
+                  weight is distributed proportionally to n_events
+
+        Returns:
+            tuple: (X, y, weights, weights_rescaled) - processed data arrays
         """
-
-        if scale_rule not in ["signal", "signal_3e-1", "signal_3"]:
-            raise ValueError(f"Invalid scale rule: {scale_rule}")
-
         if balance not in [
             "bysample",
-            "bysample_clip_1to10",
-            "bysample_clip_1to20",
-            "grouped_physics",
-            "sqrt_scaling",
-            "ens_weighting",
+            "equal_groups",
+            "equal_groups_equal_channels",
         ]:
             raise ValueError(f"Invalid balance rule: {balance}")
 
-        # Initialize lists for features, labels, and weights
+        # Initialize lists for features, labels, weights, and masks
         X_list = []
         weights_list = []
         weights_rescaled_list = []
-        sample_names_labels = []  # Store sample names for each event
-
-        if self.loaded_dmatrix:
-            # legacy way to handle this case, used to have to execute some code.
-            return
-
-        # Store weight statistics aggregated across all years
+        sample_names_labels = []
+        event_ids_list = []  # List of (luminosityBlock, event) tuples
+        masks_list = {"tt_mask": [], "bb_mask": [], "m_mask": [], "e_mask": []}
         weight_stats_by_stage_sample = {}
 
         # Process each sample
         for year in self.years:
-
-            # Store weights for rescaling purposes
-            total_signal_weight = np.concatenate(
-                [
-                    np.abs(self.events_dict[year][sig_sample].get_var("finalWeight"))
-                    for sig_sample in self.samples
-                    if self.samples[sig_sample].isSignal
-                ]
-            ).sum()
+            total_weight_rescaled = 0
+            N_events = 0
 
             len_signal = sum(
-                [
-                    len(self.events_dict[year][sig_sample].events)
-                    for sig_sample in self.samples
-                    if self.samples[sig_sample].isSignal
-                ]
+                len(self.events_dict[year][sig_sample].events)
+                for sig_sample in self.samples
+                if self.samples[sig_sample].isSignal
             )
 
             len_signal_per_channel = len_signal / len(
                 [sample for sample in self.samples if self.samples[sample].isSignal]
             )
 
-            avg_signal_weight = total_signal_weight / len_signal
+            # Pre-compute per-group statistics for group-based balancing
+            group_stats = {
+                "ggf": {"n_events": 0, "n_channels": 0},
+                "vbf": {"n_events": 0, "n_channels": 0},
+                "bkg": {"n_events": 0, "n_channels": 0},
+            }
+            for sname in self.events_dict[year]:
+                grp = self._get_sample_group(sname)
+                group_stats[grp]["n_events"] += len(self.events_dict[year][sname].events)
+                group_stats[grp]["n_channels"] += 1
+
+            year_start_idx = len(weights_rescaled_list)
 
             for sample_name, sample in self.events_dict[year].items():
-
                 X_sample = pd.DataFrame({feat: sample.get_var(feat) for feat in self.feats})
+                weights = np.abs(sample.get_var("finalWeight"))
+                weights_rescaled = weights
 
-                weights = np.abs(sample.get_var("finalWeight").copy())
-                weights_rescaled = weights.copy()
-
-                # Aggregate for multi-year stats
                 key = ("Initial", sample.sample.label)
                 if key not in weight_stats_by_stage_sample:
                     weight_stats_by_stage_sample[key] = []
                 weight_stats_by_stage_sample[key].append(weights_rescaled)
 
-                global_scale_factor = {
-                    "signal": 1.0,
-                    "signal_3e-1": 3e-1,
-                    "signal_3": 3,
-                }
-
-                # rescale by average signal weight, so average signal event has weight 1, .3 or 3
-                weights_rescaled = (
-                    weights_rescaled / avg_signal_weight * global_scale_factor[scale_rule]
+                # Apply balance rescaling directly on abs(finalWeight)
+                weights_rescaled = self._apply_balance_rescaling(
+                    weights_rescaled=weights_rescaled,
+                    balance=balance,
+                    sample_name=sample_name,
+                    len_signal=len_signal,
+                    len_signal_per_channel=len_signal_per_channel,
+                    group_stats=group_stats,
                 )
 
-                # now total_signal_weight = len_signal * global_scale_factor[scale_rule]
-
-                # Aggregate for multi-year stats
-                key = ("Global rescaling", sample.sample.label)
-                if key not in weight_stats_by_stage_sample:
-                    weight_stats_by_stage_sample[key] = []
-                weight_stats_by_stage_sample[key].append(weights_rescaled)
-
-                # Rescale each different sample.
-                if (
-                    balance == "bysample"
-                ):  # each of 8 samples has same weight, equal to signal weight per channel
-                    weights_rescaled = (
-                        weights_rescaled / np.sum(weights_rescaled) * len_signal_per_channel
-                    )
-                elif balance == "bysample_clip_1to10":
-                    n_events = len(sample.events)
-                    # Set the initial target total weight for this sample to be equal to that of the average signal samples
-                    target_total_weight = len_signal_per_channel * global_scale_factor[scale_rule]
-
-                    # Calculate what the average weight of this sample would become
-                    avg_weight_if_scaled = target_total_weight / n_events
-
-                    # Define the clipping threshold: 1/10th of the average signal weight
-                    min_avg_weight = global_scale_factor[scale_rule] / 10.0
-
-                    # If the potential average weight is too small, cap the target total weight
-                    if avg_weight_if_scaled < min_avg_weight:
-                        target_total_weight = min_avg_weight * n_events
-
-                    # Calculate the final scaling factor and apply it
-                    scaling_factor = target_total_weight / np.sum(weights_rescaled)
-                    weights_rescaled = weights_rescaled * scaling_factor
-
-                elif balance == "bysample_clip_1to20":
-                    n_events = len(sample.events)
-                    # Set the initial target total weight for this sample to be equal to other samples
-                    target_total_weight = len_signal_per_channel * global_scale_factor[scale_rule]
-
-                    # Calculate what the average weight of this sample would become
-                    avg_weight_if_scaled = target_total_weight / n_events
-
-                    # Define the clipping threshold: 1/20th of the average signal weight
-                    min_avg_weight = global_scale_factor[scale_rule] / 20.0
-
-                    # If the potential average weight is too small, cap the target total weight
-                    if avg_weight_if_scaled < min_avg_weight:
-                        target_total_weight = min_avg_weight * n_events
-
-                    # Calculate the final scaling factor and apply it
-                    scaling_factor = target_total_weight / np.sum(weights_rescaled)
-                    weights_rescaled = weights_rescaled * scaling_factor
-
-                elif balance == "grouped_physics":
-                    # Group samples by physics process for balanced reweighting
-                    # Calculate group-wise scaling factors
-                    if sample.sample.isSignal:
-                        # Each signal sample gets weight equal to len_signal_per_channel
-                        target_total_weight = (
-                            len_signal_per_channel * global_scale_factor[scale_rule]
-                        )
-                    elif "ttbar" in sample_name:
-                        # TTbar group: calculate total events in ttbar group
-                        ttbar_total_events = sum(
-                            [
-                                len(self.events_dict[year][s].events)
-                                for s in self.samples
-                                if "ttbar" in s and s in self.events_dict[year]
-                            ]
-                        )
-                        ttbar_fraction = len(sample.events) / ttbar_total_events
-                        # TTbar group gets same total weight as one signal sample, distributed proportionally
-                        target_total_weight = (
-                            len_signal_per_channel * global_scale_factor[scale_rule]
-                        ) * ttbar_fraction
-                    else:
-                        # Other backgrounds group
-                        other_total_events = sum(
-                            [
-                                len(self.events_dict[year][s].events)
-                                for s in self.samples
-                                if not self.samples[s].isSignal
-                                and "ttbar" not in s
-                                and s in self.events_dict[year]
-                            ]
-                        )
-                        other_fraction = (
-                            len(sample.events) / other_total_events
-                            if other_total_events > 0
-                            else 1.0
-                        )
-                        # Other bkg group gets same total weight as one signal sample, distributed proportionally
-                        target_total_weight = (
-                            len_signal_per_channel * global_scale_factor[scale_rule]
-                        ) * other_fraction
-
-                    scaling_factor = target_total_weight / np.sum(weights_rescaled)
-                    weights_rescaled = weights_rescaled * scaling_factor
-
-                elif balance == "sqrt_scaling":
-                    # Scale total weight proportional to sqrt(number of events)
-                    n_events = len(sample.events)
-                    sqrt_factor = np.sqrt(n_events)
-                    # Normalize: signal samples should get len_signal_per_channel weight
-                    # Other samples get weight proportional to sqrt(events) relative to sqrt(len_signal_per_channel)
-                    target_total_weight = (
-                        sqrt_factor
-                        * np.sqrt(len_signal_per_channel)
-                        * global_scale_factor[scale_rule]
-                    )
-                    scaling_factor = target_total_weight / np.sum(weights_rescaled)
-                    weights_rescaled = weights_rescaled * scaling_factor
-
-                elif balance == "ens_weighting":
-                    # Effective Number of Samples weighting with beta=0.999
-                    n_events = len(sample.events)
-                    beta = 0.999
-                    # Weight inversely proportional to ENS (class-balanced loss approach)
-                    cb_weight = (1 - beta) / (1 - beta**n_events)
-                    # Normalize: signal samples should get len_signal_per_channel weight
-                    # Other samples get weight proportional to their CB weight relative to signal CB weight
-                    signal_cb_weight = (1 - beta) / (1 - beta**len_signal_per_channel)
-                    target_total_weight = (
-                        (cb_weight / signal_cb_weight)
-                        * len_signal_per_channel
-                        * global_scale_factor[scale_rule]
-                    )
-                    scaling_factor = target_total_weight / np.sum(weights_rescaled)
-                    weights_rescaled = weights_rescaled * scaling_factor
-
-                # Aggregate for multi-year stats
                 key = ("Balance rescaling", sample.sample.label)
                 if key not in weight_stats_by_stage_sample:
                     weight_stats_by_stage_sample[key] = []
                 weight_stats_by_stage_sample[key].append(weights_rescaled)
 
+                if self.cap_weights:
+                    median_w = np.median(weights_rescaled)
+                    cap = 10.0 * max(median_w, 1e-12)
+                    n_capped = np.sum(weights_rescaled > cap)
+                    if n_capped > 0:
+                        weight_before = np.sum(weights_rescaled)
+                        weights_rescaled = np.minimum(weights_rescaled, cap)
+                        print(
+                            f"  {sample.sample.label}: capped {n_capped}/{len(weights_rescaled)} "
+                            f"events at {cap:.4g} (total weight {weight_before:.1f} -> "
+                            f"{np.sum(weights_rescaled):.1f})"
+                        )
+
+                    key = ("Weight capping", sample.sample.label)
+                    if key not in weight_stats_by_stage_sample:
+                        weight_stats_by_stage_sample[key] = []
+                    weight_stats_by_stage_sample[key].append(weights_rescaled)
+
                 X_list.append(X_sample)
                 weights_list.append(weights)
                 weights_rescaled_list.append(weights_rescaled)
-
                 sample_names_labels.extend([sample_name] * len(sample.events))
 
-        # Create aggregated stats across all years
+                # Extract event identifiers (luminosityBlock, event) tuples
+                luminosity_block = sample.get_var("luminosityBlock")
+                event = sample.get_var("event")
+                event_ids = list(zip(luminosity_block, event))
+                event_ids_list.extend(event_ids)
+
+                # Collect masks
+                for mask_name in masks_list:
+                    mask = getattr(sample, mask_name, None)
+                    if mask is not None:
+                        masks_list[mask_name].append(mask)
+
+                total_weight_rescaled += np.sum(weights_rescaled)
+                N_events += len(weights_rescaled)
+
+            # Normalize so the average weight across all samples in this year is 1
+            global_rescale_factor = total_weight_rescaled / N_events
+            print(f"\nYear {year}: global rescale factor = {global_rescale_factor:.4g}")
+            for i, sample in enumerate(self.events_dict[year].values()):
+                idx = year_start_idx + i
+                weights_rescaled_list[idx] = weights_rescaled_list[idx] / global_rescale_factor
+                key = ("Global rescaling", sample.sample.label)
+                if key not in weight_stats_by_stage_sample:
+                    weight_stats_by_stage_sample[key] = []
+                weight_stats_by_stage_sample[key].append(weights_rescaled_list[idx])
+
+        # Save weight statistics
         weight_stats = []
-        for (stage, sample), weights_for_sample in weight_stats_by_stage_sample.items():
-            # Concatenate weights from all years for this stage and sample
+        for (stage, sample_label), weights_for_sample in weight_stats_by_stage_sample.items():
             all_weights = np.concatenate(weights_for_sample)
             weight_stats.append(
                 {
                     "stage": stage,
-                    "sample": sample,
+                    "sample": sample_label,
                     "n_events": len(all_weights),
                     "total_weight": np.sum(all_weights),
                     "average_weight": np.mean(all_weights),
                     "std_weight": np.std(all_weights),
                 }
             )
-
-        # Save only the aggregated stats
         self.save_stats(weight_stats, self.output_dir / "weight_stats.csv")
 
         # Combine all samples
-        X = pd.concat(X_list, axis=0)
+        X = pd.concat(X_list, axis=0).reset_index(drop=True)
         weights = np.concatenate(weights_list)
         weights_rescaled = np.concatenate(weights_rescaled_list)
+        y = np.array(label_transform(self.sample_names, sample_names_labels))
 
-        y = label_transform(self.sample_names, sample_names_labels)
+        # Concatenate masks (only if all samples had them)
+        masks = {}
+        for mask_name, mask_arrays in masks_list.items():
+            if mask_arrays and len(mask_arrays) == len(X_list):
+                masks[mask_name] = np.concatenate(mask_arrays, axis=0)
+            else:
+                masks[mask_name] = None
+
+        # Apply feature binning if configured
+        bin_feats = self.bdt_config[self.modelname].get("bin_features", None)
+        self._wps_used = {}
+        self._unbinned_glopart = None
+        if bin_feats:
+            # Resolve WPS: config 'wps_ttpart' overrides runtime userConfig.WPS_TTPART
+            config_wps = self.bdt_config[self.modelname].get("wps_ttpart", None)
+            if config_wps is not None:
+                wps = {k: np.array(v) for k, v in config_wps.items()}
+                print("\nUsing WPS from model config for feature binning")
+            else:
+                wps = dict(WPS_TTPART)
+                print("\nUsing runtime WPS_TTPART from userConfig for feature binning")
+
+            bin_edges = {f: wps[f] for f in bin_feats if f in wps}
+
+            if bin_edges:
+                print(f"  Binning features: {list(bin_edges.keys())}")
+                cols_to_save = [f for f in bin_edges if f in X.columns]
+                if cols_to_save:
+                    self._unbinned_glopart = X[cols_to_save].copy()
+                skipped = [f for f in bin_feats if f not in bin_edges]
+                if skipped:
+                    print(f"  Skipping {len(skipped)} features (no bin edges found): {skipped}")
+            else:
+                print(f"  No bin edges found for features: {bin_feats}")
+
+            X = bin_features(X, bin_feats, bin_edges_dict=bin_edges, inplace=True)
+            self._wps_used = bin_edges
+
+        # # Downcast float64 feature columns to float32. XGBoost histogram method
+        # # internally works in float32 anyway, and this halves the DataFrame
+        # # footprint (and the DMatrix internalized copy made for each fold).
+        # # Skips any non-float column (e.g. integer-valued binned features).
+        # f64_cols = [c for c in X.columns if X[c].dtype == np.float64]
+        # if f64_cols:
+        #     print(f"  Downcasting {len(f64_cols)} feature columns from float64 to float32")
+        #     X[f64_cols] = X[f64_cols].astype(np.float32, copy=False)
+        # weights_rescaled = weights_rescaled.astype(np.float32, copy=False)
 
         # Print class mapping
         print("\nClass mapping:")
         for i, class_name in enumerate(self.sample_names):
             print(f"Class {i}: {class_name}")
 
-        # Split into training and validation sets for training and training evaluation
-        X_train, X_val, y_train, y_val, weights_train, weights_val = train_test_split(
-            X,
-            y,
-            weights_rescaled,
-            test_size=self.bdt_config[self.modelname]["test_size"],
-            random_state=self.bdt_config[self.modelname]["random_seed"],
-            stratify=y,
-        )
+        return X, y, weights, weights_rescaled, masks, event_ids_list, sample_names_labels
 
-        print(f"X_train.shape: {X_train.shape}, X_val.shape: {X_val.shape}")
+    def _apply_balance_rescaling(
+        self,
+        weights_rescaled,
+        balance,
+        sample_name,
+        len_signal,
+        len_signal_per_channel,
+        group_stats,
+    ):
+        """Apply balance rescaling to weights based on the chosen strategy.
 
-        # Create DMatrix objects
-        self.dtrain_rescaled = xgb.DMatrix(X_train, label=y_train, weight=weights_train, nthread=8)
-        self.dval_rescaled = xgb.DMatrix(X_val, label=y_val, weight=weights_val, nthread=8)
+        Args:
+            weights_rescaled: Current rescaled weights (abs finalWeight)
+            balance: Balance strategy name
+            sample_name: Name of the sample
+            len_signal: Total signal events across all signal channels
+            len_signal_per_channel: Average signal events per channel
+            group_stats: Dict with per-group n_events and n_channels
 
-        # Split into training and validation sets for all other purposes, e.g. computing rocs
-        X_train, X_val, y_train, y_val, weights_train, weights_val = train_test_split(
+        Returns:
+            Rescaled weights array
+        """
+        n_events = len(weights_rescaled)
+        current_sum = np.sum(weights_rescaled)
+
+        if balance == "bysample":
+            target = len_signal_per_channel
+
+        elif balance in ("equal_groups", "equal_groups_equal_channels"):
+            group = self._get_sample_group(sample_name)
+            group_budget = len_signal / 3.0
+
+            if balance == "equal_groups":
+                target = group_budget * (n_events / group_stats[group]["n_events"])
+            else:  # equal_groups_equal_channels
+                if group in ("ggf", "vbf"):
+                    target = group_budget / group_stats[group]["n_channels"]
+                else:
+                    target = group_budget * (n_events / group_stats[group]["n_events"])
+
+        scaling_factor = target / current_sum
+        return weights_rescaled * scaling_factor
+
+    def prepare_training_set(
+        self,
+        save_buffer=False,
+        balance="bysample",
+        prediction_only=False,
+    ):
+        """Prepare features and labels for training with k-fold cross-validation.
+
+        This unified method handles both single-split (n_folds=1) and k-fold (n_folds>1) cases.
+        The data is stored in self.fold_data.
+
+        For n_folds=1: Uses train_test_split for a single train/validation split.
+        For n_folds>1: Uses StratifiedKFold to create k stratified folds.
+
+        Args:
+            save_buffer: Whether to save DMatrix buffer files for quicker loading
+            balance: Strategy for balancing sample weights
+            prediction_only: If True, only create validation DMatrices (dval) and skip
+                training DMatrices to save memory. Used by compare_models.
+        """
+        if self.loaded_dmatrix:
+            return
+
+        # Process samples (common logic)
+        (
             X,
             y,
             weights,
-            test_size=self.bdt_config[self.modelname]["test_size"],
-            random_state=self.bdt_config[self.modelname]["random_seed"],
-            stratify=y,
+            weights_rescaled,
+            masks,
+            event_ids_list,
+            sample_names_labels,
+        ) = self._process_samples_for_training(balance=balance)
+
+        print(f"\nPreparing training sets with n_folds={self.n_folds}...")
+        print(f"Total samples: {len(y)}")
+
+        # Initialize unified fold data structure
+        self.fold_data = {
+            "X": X,
+            "y": y,
+            "weights": weights,
+            "weights_rescaled": weights_rescaled,
+            "masks": masks,  # Dict of mask arrays (tt_mask, bb_mask, m_mask, e_mask)
+            "X_unbinned_glopart": self._unbinned_glopart,
+            "fold_indices": [],  # List of (train_idx, val_idx) tuples
+            "dtrain_rescaled": [],  # DMatrix for training (rescaled weights)
+            "dval_rescaled": [],  # DMatrix for validation (rescaled weights)
+            "dtrain": [],  # DMatrix with original weights (for ROC computation)
+            "dval": [],  # DMatrix with original weights (for ROC computation)
+        }
+
+        # Create fold splits
+        if self.n_folds == 1:
+            # Single train/test split (original behavior)
+            indices = np.arange(len(y))
+            train_idx, val_idx = train_test_split(
+                indices,
+                test_size=self.bdt_config[self.modelname]["test_size"],
+                random_state=self.bdt_config[self.modelname]["random_seed"],
+                stratify=y,
+            )
+            fold_splits = [(train_idx, val_idx)]
+            print(f"Single split: {len(train_idx)} train, {len(val_idx)} val")
+        else:
+            # K-fold stratified splits
+            skf = StratifiedKFold(
+                n_splits=self.n_folds,
+                shuffle=True,
+                random_state=self.bdt_config[self.modelname]["random_seed"],
+            )
+            fold_splits = list(skf.split(X, y))
+            for fold_idx, (train_idx, val_idx) in enumerate(fold_splits):
+                print(f"Fold {fold_idx}: {len(train_idx)} train, {len(val_idx)} val")
+
+        # DMatrix construction strategy (memory):
+        #   - n_folds == 1, training:        build all 4 DMatrices (used by compute_rocs).
+        #   - n_folds == 1, prediction_only: build only dval (used by compare_models).
+        #   - n_folds  > 1, prediction_only: build only dval per fold (compare_models).
+        #   - n_folds  > 1, training:        DEFER all DMatrix construction to
+        #     train_model so each fold's DMatrices are freed right after that
+        #     fold's xgb.train returns. Otherwise the 4 * n_folds DMatrices
+        #     (CPU data + GPU histogram caches) live concurrently and dominate
+        #     peak memory near the end of training.
+        defer_dmatrices = self.n_folds > 1 and not prediction_only
+
+        for train_idx, val_idx in fold_splits:
+            self.fold_data["fold_indices"].append((train_idx, val_idx))
+
+            if defer_dmatrices:
+                continue
+
+            if not prediction_only:
+                # DMatrix with rescaled weights (for training)
+                dtrain_rescaled = xgb.DMatrix(
+                    X.iloc[train_idx],
+                    label=y[train_idx],
+                    weight=weights_rescaled[train_idx],
+                    nthread=8,
+                )
+                dval_rescaled = xgb.DMatrix(
+                    X.iloc[val_idx], label=y[val_idx], weight=weights_rescaled[val_idx], nthread=8
+                )
+                self.fold_data["dtrain_rescaled"].append(dtrain_rescaled)
+                self.fold_data["dval_rescaled"].append(dval_rescaled)
+
+                # DMatrix with original weights (for training-side ROC)
+                dtrain = xgb.DMatrix(
+                    X.iloc[train_idx], label=y[train_idx], weight=weights[train_idx], nthread=8
+                )
+                self.fold_data["dtrain"].append(dtrain)
+
+            # Validation DMatrix (always needed)
+            dval = xgb.DMatrix(
+                X.iloc[val_idx], label=y[val_idx], weight=weights[val_idx], nthread=8
+            )
+            self.fold_data["dval"].append(dval)
+
+        # For backward compatibility, also set single-fold attributes
+        if self.n_folds == 1:
+            if not prediction_only:
+                self.dtrain_rescaled = self.fold_data["dtrain_rescaled"][0]
+                self.dval_rescaled = self.fold_data["dval_rescaled"][0]
+                self.dtrain = self.fold_data["dtrain"][0]
+            self.dval = self.fold_data["dval"][0]
+
+        # Extract GloParT comparison tagger columns for ROC plotting.
+        # Stored separately so they don't pollute the training feature matrix.
+        comparison_taggers = {}
+        if not prediction_only:
+            for ch in CHANNELS.values():
+                col = f"ttFatJetParTX{ch.tagger_label}vsQCDTop"
+                if col not in X.columns:
+                    try:
+                        vals = []
+                        for year in self.years:
+                            for sample in self.events_dict[year].values():
+                                vals.append(sample.get_var(col))
+                        comparison_taggers[col] = np.concatenate(vals)
+                    except Exception:
+                        pass
+        self.fold_data["X_comparison_taggers"] = (
+            pd.DataFrame(comparison_taggers, index=X.index) if comparison_taggers else None
         )
 
-        # Create DMatrix objects
-        self.dtrain = xgb.DMatrix(X_train, label=y_train, weight=weights_train, nthread=8)
-        self.dval = xgb.DMatrix(X_val, label=y_val, weight=weights_val, nthread=8)
+        if prediction_only:
+            # Free arrays that DMatrix has already internalized
+            self.fold_data["X"] = None
+            self.fold_data["weights_rescaled"] = None
+            self.fold_data["masks"] = None
+            self.fold_data["X_unbinned_glopart"] = None
+            self.fold_data["X_comparison_taggers"] = None
+            del X, weights_rescaled, masks
+            return
 
-        # save buffer for quicker loading
-        if save_buffer:
+        # Save fold indices (useful for k-fold inference on MC)
+        if self.n_folds > 1:
+            fold_indices_path = self.output_dir / "fold_indices.npz"
+
+            # Create event-to-fold mapping using (luminosityBlock, event) tuples
+            event_fold_assignment = np.full(len(y), -1, dtype=int)
+            for fold_idx, (_, val_idx) in enumerate(self.fold_data["fold_indices"]):
+                event_fold_assignment[val_idx] = fold_idx
+
+            print("Cross check: ", np.sum(event_fold_assignment == -1)), "has to be zero "
+
+            # Persist compact numeric arrays instead of a large JSON dict with string keys.
+            lumi_values = np.asarray([lumi for lumi, _ in event_ids_list], dtype=np.int32)
+            event_values = np.asarray([event for _, event in event_ids_list], dtype=np.int64)
+            np.savez_compressed(
+                fold_indices_path,
+                n_folds=np.array([self.n_folds], dtype=np.int16),
+                random_seed=np.array(
+                    [self.bdt_config[self.modelname]["random_seed"]], dtype=np.int32
+                ),
+                luminosityBlock=lumi_values,
+                event=event_values,
+                fold=event_fold_assignment.astype(np.int16),
+            )
+            print(f"Fold indices saved to {fold_indices_path}")
+        else:
+            # Persist training event IDs (per-sample) so downstream inference (e.g.
+            # SensitivityStudy) can exclude training events from MC evaluation and
+            # rescale the remaining validation-event weights to preserve total
+            # sample normalization. Only needed for n_folds=1; k-fold models get
+            # unbiased evaluation via OOF predictions.
+            train_event_ids_path = self.output_dir / "train_event_ids.npz"
+            train_idx_all = self.fold_data["fold_indices"][0][0]
+
+            sample_names_arr = np.asarray(sample_names_labels)
+            lumi_values = np.asarray([lumi for lumi, _ in event_ids_list], dtype=np.int64)
+            event_values = np.asarray([event for _, event in event_ids_list], dtype=np.int64)
+
+            np.savez_compressed(
+                train_event_ids_path,
+                sample_names=sample_names_arr[train_idx_all].astype("U64"),
+                luminosityBlock=lumi_values[train_idx_all],
+                event=event_values[train_idx_all],
+                test_size=np.array(
+                    [self.bdt_config[self.modelname]["test_size"]], dtype=np.float32
+                ),
+                random_seed=np.array(
+                    [self.bdt_config[self.modelname]["random_seed"]], dtype=np.int32
+                ),
+            )
+            print(
+                f"Training event IDs ({len(train_idx_all)} events across "
+                f"{len(np.unique(sample_names_arr[train_idx_all]))} samples) saved to "
+                f"{train_event_ids_path}"
+            )
+
+        # Save WPS bin edges used for feature binning (if any)
+        if self._wps_used:
+            save_training_wps(self.output_dir, self._wps_used)
+
+        # Save buffer for quicker loading (single-fold only for backward compat)
+        if save_buffer and self.n_folds == 1:
             self.dtrain.save_binary(self.output_dir / "dtrain.buffer")
             self.dval.save_binary(self.output_dir / "dval.buffer")
             self.dtrain_rescaled.save_binary(self.output_dir / "dtrain_rescaled.buffer")
             self.dval_rescaled.save_binary(self.output_dir / "dval_rescaled.buffer")
 
-    def train_model(self, save=True, early_stopping_rounds=5):
-        """Train model using configured hyperparameters and evaluation sets."""
+    def get_oof_predictions(self):
+        """Get out-of-fold predictions for training data evaluation.
 
-        evals_result = {}
+        For each event, this returns the prediction from the model that was
+        trained WITHOUT that event (i.e., the event was in the validation fold).
 
-        evallist = [(self.dtrain_rescaled, "train"), (self.dval_rescaled, "eval")]
-        self.bst = xgb.train(
-            self.hyperpars,
-            self.dtrain_rescaled,
-            self.bdt_config[self.modelname]["num_rounds"],
-            evals=evallist,
-            evals_result=evals_result,
-            early_stopping_rounds=early_stopping_rounds,
+        This is the key for unbiased MC evaluation - each event is scored by
+        a BDT that never saw it during training.
+
+        For n_folds=1: Returns validation set predictions (single fold).
+        For n_folds>1: Returns combined out-of-fold predictions from all folds.
+
+        Note: This method is used during training when fold_data is in memory.
+        For inference on new data, use predict_bdt() from bdt_utils instead.
+
+        Returns:
+            tuple: (oof_predictions, oof_weights, oof_labels) arrays
+        """
+        if not hasattr(self, "fold_data") or not hasattr(self, "boosters"):
+            raise ValueError("Fold data and models not available. Train first.")
+
+        # Build fold assignments array from fold_data
+        n_events = len(self.fold_data["y"])
+        fold_assignments = np.full(n_events, -1, dtype=int)
+        for fold_idx, (_, val_idx) in enumerate(self.fold_data["fold_indices"]):
+            fold_assignments[val_idx] = fold_idx
+
+        # Use unified predict_bdt for predictions
+        oof_predictions = predict_bdt(
+            features=self.fold_data["X"].values,
+            boosters=self.boosters,
+            feature_names=list(self.fold_data["X"].columns),
+            fold_assignments=fold_assignments,
+            is_data=False,
         )
-        if save:
-            self.bst.save_model(self.output_dir / f"{self.modelname}.json")
+
+        # Gather weights from all folds
+        oof_weights = self.fold_data["weights"].copy()
+
+        return oof_predictions, oof_weights, self.fold_data["y"]
+
+    def train_model(self, save=True, early_stopping_rounds=5):
+        """Train model(s) using configured hyperparameters and evaluation sets.
+
+        This unified method handles both n_folds=1 (single model) and n_folds>1 (k models).
+
+        For n_folds=1: Trains one model, saves as {modelname}.ubj
+        For n_folds>1: Trains k models, saves as {modelname}_fold{i}.ubj
+
+        Args:
+            save: Whether to save the trained models
+            early_stopping_rounds: Early stopping rounds for XGBoost
+
+        Returns:
+            For n_folds=1: Single booster (also stored as self.bst)
+            For n_folds>1: List of boosters
+        """
+        if not hasattr(self, "fold_data"):
+            raise ValueError("Fold data not prepared. Call prepare_training_set first.")
+
+        self.boosters = []
+        self.evals_results = []
+
+        # k-fold path defers DMatrix construction here to keep peak memory bounded:
+        # only the current fold's DMatrices live during training, then are freed.
+        build_lazy = self.n_folds > 1 and not self.fold_data["dtrain_rescaled"]
+
+        for fold_idx in range(self.n_folds):
+            if self.n_folds > 1:
+                print(f"\n{'='*60}")
+                print(f"Training fold {fold_idx + 1}/{self.n_folds}")
+                print(f"{'='*60}")
+
+            if build_lazy:
+                X = self.fold_data["X"]
+                y = self.fold_data["y"]
+                weights_rescaled = self.fold_data["weights_rescaled"]
+                train_idx, val_idx = self.fold_data["fold_indices"][fold_idx]
+                dtrain_rescaled = xgb.DMatrix(
+                    X.iloc[train_idx],
+                    label=y[train_idx],
+                    weight=weights_rescaled[train_idx],
+                    nthread=8,
+                )
+                dval_rescaled = xgb.DMatrix(
+                    X.iloc[val_idx],
+                    label=y[val_idx],
+                    weight=weights_rescaled[val_idx],
+                    nthread=8,
+                )
+            else:
+                dtrain_rescaled = self.fold_data["dtrain_rescaled"][fold_idx]
+                dval_rescaled = self.fold_data["dval_rescaled"][fold_idx]
+
+            evals_result = {}
+            evallist = [(dtrain_rescaled, "train"), (dval_rescaled, "eval")]
+
+            bst = xgb.train(
+                self.hyperpars,
+                dtrain_rescaled,
+                self.bdt_config[self.modelname]["num_rounds"],
+                evals=evallist,
+                evals_result=evals_result,
+                early_stopping_rounds=early_stopping_rounds,
+            )
+
+            self.evals_results.append(evals_result)
+
+            model_path = None
+            if save:
+                if self.n_folds == 1:
+                    model_path = self.output_dir / f"{self.modelname}.ubj"
+                else:
+                    model_path = self.output_dir / f"{self.modelname}_fold{fold_idx}.ubj"
+                bst.save_model(model_path)
+                print(f"Model saved to {model_path}")
+
+            # XGBoost <=2.x retains GPU working memory (caches, histograms) inside
+            # the booster even after training finishes. Since we already wrote the
+            # model to disk above, drop the in-memory booster and reload from
+            # disk -- avoids the transient CPU memory doubling that save_raw()
+            # to a bytes buffer would cause.
+            # See: https://github.com/dmlc/xgboost/issues/4668
+            if self.n_folds > 1 and save and model_path is not None:
+                del bst
+                gc.collect()
+                bst = xgb.Booster()
+                bst.load_model(str(model_path))
+
+            self.boosters.append(bst)
+
+            # Free per-fold DMatrices (CPU data + GPU histogram caches) before the
+            # next fold begins. compute_rocs in k-fold mode uses OOF predictions
+            # via predict_bdt(features=X.values, ...) and never needs them again.
+            if build_lazy:
+                del dtrain_rescaled, dval_rescaled
+                gc.collect()
 
         # Save evaluation results as JSON
-        with (self.output_dir / "evals_result.json").open("w") as f:
-            json.dump(evals_result, f, indent=2)
+        evals_filename = "evals_result.json"
+        evals_data = self.evals_results[0] if self.n_folds == 1 else self.evals_results
+        with (self.output_dir / evals_filename).open("w") as f:
+            json.dump(evals_data, f, indent=2)
 
-        return
+        # Rescaled weights are only used during training; downstream evaluation
+        # (compute_rocs, get_oof_predictions) uses fold_data["weights"] only.
+        if self.n_folds > 1:
+            self.fold_data["weights_rescaled"] = None
+            gc.collect()
+
+        # For backward compatibility with n_folds=1
+        if self.n_folds == 1:
+            self.bst = self.boosters[0]
+            return self.bst
+
+        return self.boosters
 
     def load_model(self):
-        self.bst = xgb.Booster()
-        print(f"loading model {self.modelname}")
-        try:
-            self.bst.load_model(self.output_dir / f"{self.modelname}.json")
-            print("loading successful")
-        except Exception as e:
-            print(e)
-        return self.bst
+        """Load trained model(s) from disk.
+
+        This unified method handles both n_folds=1 (single model) and n_folds>1 (k models).
+
+        Returns:
+            For n_folds=1: Single booster (also stored as self.bst)
+            For n_folds>1: List of boosters
+        """
+        self.boosters = []
+
+        for fold_idx in range(self.n_folds):
+            if self.n_folds == 1:
+                model_base = self.output_dir / self.modelname
+            else:
+                model_base = self.output_dir / f"{self.modelname}_fold{fold_idx}"
+            candidate_paths = [model_base.with_suffix(".ubj"), model_base.with_suffix(".json")]
+            model_path = next((p for p in candidate_paths if p.exists()), None)
+
+            if model_path is None:
+                attempted = ", ".join(str(p) for p in candidate_paths)
+                raise FileNotFoundError(f"Model not found. Tried: {attempted}")
+
+            bst = xgb.Booster()
+            bst.load_model(model_path)
+            self.boosters.append(bst)
+            print(f"Loaded model from {model_path}")
+
+        # For backward compatibility with n_folds=1
+        if self.n_folds == 1:
+            self.bst = self.boosters[0]
+            return self.bst
+
+        return self.boosters
 
     def evaluate_training(self, savedir=None):
-        """Plot training curves and feature importances from saved eval results."""
-        # Load evaluation results from JSON
-        with (self.output_dir / "evals_result.json").open("r") as f:
-            evals_result = json.load(f)
+        """Plot training curves and feature importances from saved eval results.
 
+        This unified method handles both n_folds=1 and n_folds>1 cases.
+        For n_folds>1, plots all folds overlaid and averages feature importance.
+        """
         savedir = self.output_dir if savedir is None else Path(savedir)
         savedir.mkdir(parents=True, exist_ok=True)
 
-        plt.figure(figsize=(10, 8))
-        plt.plot(evals_result["train"][self.hyperpars["eval_metric"]], label="Train")
-        plt.plot(evals_result["eval"][self.hyperpars["eval_metric"]], label="Validation")
-        plt.xlabel("Iteration")
-        plt.ylabel(self.hyperpars["eval_metric"])
-        plt.tight_layout()
-        plt.legend()
-        plt.savefig(savedir / "training_history.pdf")
-        plt.savefig(savedir / "training_history.png")
-        plt.close()
+        # Load evaluation results - try both naming conventions
+        if not hasattr(self, "evals_results"):
+            evals_filename = "evals_result.json" if self.n_folds == 1 else "evals_results.json"
+            evals_path = self.output_dir / evals_filename
+            if evals_path.exists():
+                with evals_path.open("r") as f:
+                    loaded_data = json.load(f)
+                # Normalize to list format
+                self.evals_results = [loaded_data] if self.n_folds == 1 else loaded_data
+            else:
+                raise ValueError(f"Evaluation results not found at {evals_path}")
 
-        # Create triple plot for feature importance
+        # Plot training curves
+        if self.n_folds == 1:
+            # Single fold: simple plot
+            plt.figure(figsize=(10, 8))
+            evals_result = self.evals_results[0]
+            plt.plot(evals_result["train"][self.hyperpars["eval_metric"]], label="Train")
+            plt.plot(evals_result["eval"][self.hyperpars["eval_metric"]], label="Validation")
+            plt.xlabel("Iteration")
+            plt.ylabel(self.hyperpars["eval_metric"])
+            plt.title("Training History")
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(savedir / "training_history.pdf")
+            plt.savefig(savedir / "training_history.png")
+            plt.close()
+        else:
+            # Multi-fold: overlay all folds
+            plt.figure(figsize=(12, 8))
+            colors = plt.cm.tab10(np.linspace(0, 1, self.n_folds))
+
+            for fold_idx, evals_result in enumerate(self.evals_results):
+                plt.plot(
+                    evals_result["train"][self.hyperpars["eval_metric"]],
+                    label=f"Fold {fold_idx} Train",
+                    color=colors[fold_idx],
+                    linestyle="-",
+                )
+                plt.plot(
+                    evals_result["eval"][self.hyperpars["eval_metric"]],
+                    label=f"Fold {fold_idx} Val",
+                    color=colors[fold_idx],
+                    linestyle="--",
+                )
+
+            plt.xlabel("Iteration")
+            plt.ylabel(self.hyperpars["eval_metric"])
+            plt.title(f"{self.n_folds}-Fold Cross-Validation Training History")
+            plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
+            plt.tight_layout()
+            plt.savefig(savedir / "training_history.pdf")
+            plt.savefig(savedir / "training_history.png")
+            plt.close()
+
+        # Plot feature importance
         importance_types = ["weight", "gain", "total_gain"]
-        titles = [
-            "Feature Importance (Weight)",
-            "Feature Importance (Gain)",
-            "Feature Importance (Total Gain)",
-        ]
 
         try:
-            for imp_type, title in zip(importance_types, titles):
-                plt.figure(figsize=(10, 8))
-                ax = plt.gca()
-                xgb.plot_importance(
-                    self.bst, importance_type=imp_type, ax=ax, values_format="{v:.2f}"
-                )
-                ax.set_title(title)
+            if self.n_folds == 1:
+                # Single fold: use xgb built-in plotting
+                titles = [
+                    "Feature Importance (Weight)",
+                    "Feature Importance (Gain)",
+                    "Feature Importance (Total Gain)",
+                ]
+                for imp_type, title in zip(importance_types, titles):
+                    plt.figure(figsize=(14, 12))
+                    ax = plt.gca()
+                    xgb.plot_importance(
+                        self.boosters[0], importance_type=imp_type, ax=ax, values_format="{v:.2f}"
+                    )
+                    ax.set_title(title)
+                    plt.tight_layout()
+                    plt.savefig(savedir / f"feature_importance_{imp_type}.pdf")
+                    plt.savefig(savedir / f"feature_importance_{imp_type}.png")
+                    plt.close()
+            else:
+                # Multi-fold: average importance across folds
+                for imp_type in importance_types:
+                    all_importances = {}
+                    for bst in self.boosters:
+                        imp = bst.get_score(importance_type=imp_type)
+                        for feat, score in imp.items():
+                            if feat not in all_importances:
+                                all_importances[feat] = []
+                            all_importances[feat].append(score)
 
-                plt.tight_layout()
-                plt.savefig(savedir / f"feature_importance_{imp_type}.pdf")
-                plt.savefig(savedir / f"feature_importance_{imp_type}.png")
-                plt.close()
+                    # Compute mean importance
+                    mean_importance = {
+                        feat: np.mean(scores) for feat, scores in all_importances.items()
+                    }
+
+                    # Sort and plot
+                    sorted_feats = sorted(mean_importance.items(), key=lambda x: x[1])
+                    if sorted_feats:
+                        feats, scores = zip(*sorted_feats)
+                        plt.figure(figsize=(12, max(10, len(feats) * 0.3)))
+                        plt.barh(range(len(feats)), scores)
+                        plt.yticks(range(len(feats)), feats)
+                        plt.xlabel(f"Mean {imp_type} across {self.n_folds} folds")
+                        plt.title(f"Feature Importance ({imp_type}) - {self.n_folds}-Fold Average")
+                        plt.tight_layout()
+                        plt.savefig(savedir / f"feature_importance_{imp_type}.pdf")
+                        plt.savefig(savedir / f"feature_importance_{imp_type}.png")
+                        plt.close()
 
         except Exception as e:
             print(f"Error plotting feature importance: {e}")
@@ -567,21 +1063,54 @@ class Trainer:
         self.compute_rocs()
 
     def compute_rocs(self, discs=None, savedir=None):
-        """Compute and plot ROCs and summary metrics for the validation set."""
+        """Compute and plot ROCs and summary metrics for the validation set.
 
+        This unified method handles both n_folds=1 and n_folds>1 cases.
+        For n_folds=1: Uses validation set predictions.
+        For n_folds>1: Uses out-of-fold predictions for unbiased evaluation.
+
+        Metrics are computed at fixed background efficiency (DEFAULT_METRICS_BKG_EFF in rocUtils).
+        """
         time_start = time.time()
-
-        y_pred = self.bst.predict(self.dval)
-
-        time_end = time.time()
-        print(f"Time taken to predict: {time_end - time_start} seconds")
 
         savedir = self.output_dir if savedir is None else Path(savedir)
         savedir.mkdir(parents=True, exist_ok=True)
         (savedir / "rocs").mkdir(parents=True, exist_ok=True)
         (savedir / "outputs").mkdir(parents=True, exist_ok=True)
 
-        # "taggers" just indicates the branch names in the event df, and here they are the sample names
+        # Get predictions and labels based on n_folds
+        masks = self.fold_data.get("masks", {})
+        X_unbinned_full = self.fold_data.get("X_unbinned_glopart", None)
+        X_comp_full = self.fold_data.get("X_comparison_taggers", None)
+        if self.n_folds == 1:
+            # Single fold: predict on validation set
+            y_pred = self.boosters[0].predict(self.dval)
+            y_labels = self.dval.get_label()
+            weights = self.dval.get_weight()
+            val_idx = self.fold_data["fold_indices"][0][1]  # validation indices
+            X_eval = self.fold_data["X"].iloc[val_idx]
+            X_unbinned_eval = X_unbinned_full.iloc[val_idx] if X_unbinned_full is not None else None
+            if X_comp_full is not None:
+                X_eval = pd.concat([X_eval, X_comp_full.iloc[val_idx]], axis=1)
+            # Filter masks to validation indices
+            masks_val = {k: v[val_idx] if v is not None else None for k, v in masks.items()}
+            title_suffix = ""
+        else:
+            # Multi-fold: use out-of-fold predictions
+            y_pred, weights, y_labels = self.get_oof_predictions()
+            X_eval = self.fold_data["X"]
+            if X_comp_full is not None:
+                X_eval = pd.concat([X_eval, X_comp_full], axis=1)
+            X_unbinned_eval = X_unbinned_full
+            masks_val = masks  # Use all masks for OOF
+            title_suffix = f" ({self.n_folds}-fold OOF)"
+            print(f"\nComputing ROCs with {self.n_folds}-fold out-of-fold predictions...")
+            print(f"Total samples: {len(y_labels)}")
+
+        time_end = time.time()
+        print(f"Time taken to get predictions: {time_end - time_start:.2f} seconds")
+
+        # Setup signal and background names
         signal_names = [sig_name for sig_name in self.samples if self.samples[sig_name].isSignal]
         background_names = [
             bkg_name for bkg_name in self.samples if not self.samples[bkg_name].isSignal
@@ -590,27 +1119,63 @@ class Trainer:
         print("signal_names", signal_names)
         print("background_names", background_names)
 
-        event_filters = {
-            name: self.dval.get_label() == i for i, name in enumerate(self.sample_names)
-        }
-        dval_df = pd.DataFrame(self.dval.get_data().toarray(), columns=self.feats)
+        # Keep only the non-BDT columns needed downstream by fill_discriminants.
+        comparison_tagger_cols = []
+        for sig_tagger in signal_names:
+            taukey = CHANNELS[sig_tagger[-2:]].tagger_label
+            disc_name = f"ttFatJetParTX{taukey}vsQCDTop"
+            if disc_name in X_eval.columns:
+                comparison_tagger_cols.append(disc_name)
+            else:
+                print(f"Warning: required discriminant column '{disc_name}' not found in X")
+        comparison_tagger_cols = sorted(set(comparison_tagger_cols))
 
+        # Map binned column names -> unbinned column names (only when binning was applied)
+        unbinned_col_map = {}
+        if X_unbinned_eval is not None:
+            for col in comparison_tagger_cols:
+                if col in X_unbinned_eval.columns:
+                    unbinned_col_map[col] = f"{col}_unbinned"
+
+        # Create event filters based on labels
+        event_filters = {name: y_labels == i for i, name in enumerate(self.sample_names)}
+
+        # Build preds_dict for ROCAnalyzer
         preds_dict = {}
         for class_name in self.sample_names:
-            events = {}
-            for i, pred_class_name in enumerate(self.sample_names):
-                events[pred_class_name] = y_pred[event_filters[class_name], i]
-            events["finalWeight"] = self.dval.get_weight()[event_filters[class_name]]
-            events = pd.DataFrame(events)
+            class_filter = event_filters[class_name]
+            class_indices = np.flatnonzero(class_filter)
 
-            events = pd.concat(
-                [
-                    dval_df[event_filters[class_name]].reset_index(drop=True),
-                    events.reset_index(drop=True),
-                ],
-                axis=1,
+            # Start from model outputs + event weights (always needed).
+            events = pd.DataFrame(y_pred[class_filter], columns=self.sample_names)
+            events["finalWeight"] = weights[class_filter]
+
+            # Add only required non-BDT discriminant columns (instead of all training features).
+            if comparison_tagger_cols:
+                feature_subset = X_eval.iloc[class_indices][comparison_tagger_cols].reset_index(
+                    drop=True
+                )
+                events = pd.concat([feature_subset, events], axis=1)
+
+            # Add unbinned GloParT columns for fair ROC comparison
+            if unbinned_col_map and X_unbinned_eval is not None:
+                for orig_col, unbinned_col in unbinned_col_map.items():
+                    unbinned_vals = X_unbinned_eval.iloc[class_indices][orig_col]
+                    events[unbinned_col] = unbinned_vals.reset_index(drop=True).to_numpy()
+
+            # Filter masks for this class
+            class_masks = {
+                k: v[class_filter] if v is not None else None for k, v in masks_val.items()
+            }
+
+            preds_dict[class_name] = LoadedSample(
+                sample=self.samples[class_name],
+                events=events,
+                tt_mask=class_masks.get("tt_mask"),
+                bb_mask=class_masks.get("bb_mask"),
+                m_mask=class_masks.get("m_mask"),
+                e_mask=class_masks.get("e_mask"),
             )
-            preds_dict[class_name] = LoadedSample(sample=self.samples[class_name], events=events)
 
         multiclass_confusion_matrix(preds_dict, plot_dir=savedir)
 
@@ -624,20 +1189,23 @@ class Trainer:
         #########################################################
         # This part configures what background outputs to put in the taggers
 
-        # First do ParT taggers
-        parT_bkg_taggers = [["ttFatJetParTQCD", "ttFatJetParTTop"]]  # ["ttFatJetParTQCD"],
-
+        # GloParT discriminants: fill unbinned version when available (fair
+        # comparison against continuous BDT output), otherwise fall back to
+        # the (possibly binned) original column.
         for sig_tagger in signal_names:
             taukey = CHANNELS[sig_tagger[-2:]].tagger_label
-            parT_sig = f"ttFatJetParTX{taukey}"
-            for bkg_taggers in parT_bkg_taggers:
-                rocAnalyzer.process_discriminant(
-                    signal_name=sig_tagger,
-                    background_names=background_names,
-                    signal_tagger=parT_sig,
-                    background_taggers=bkg_taggers,
-                    custom_name=f"ParT {sig_tagger[-2:]}vsQCDTop",
-                )
+            disc_name = f"ttFatJetParTX{taukey}vsQCDTop"
+            if disc_name not in comparison_tagger_cols:
+                continue
+            disc_names_to_fill = [disc_name]
+            unbinned_name = unbinned_col_map.get(disc_name)
+            if unbinned_name:
+                disc_names_to_fill.append(unbinned_name)
+            rocAnalyzer.fill_discriminants(
+                discriminant_names=disc_names_to_fill,
+                signal_name=sig_tagger,
+                background_names=background_names,
+            )
 
         # Then do BDT taggers
         bkg_tagger_groups = (
@@ -650,10 +1218,11 @@ class Trainer:
 
         for sig_tagger in signal_names:
             for bkg_taggers in bkg_tagger_groups:
+                # Include full signal name to avoid ggf/vbf collision
                 name = (
-                    f"BDT {sig_tagger[-2:]}vsAll"
+                    bdt_eval_discriminant_vsall(sig_tagger)
                     if len(bkg_taggers) == 5
-                    else f"BDT {sig_tagger[-2:]}vsQCDTop"
+                    else f"BDT {sig_tagger}vsQCDTop"
                 )
                 rocAnalyzer.process_discriminant(
                     signal_name=sig_tagger,
@@ -672,7 +1241,7 @@ class Trainer:
             for sig in signal_names
         }
 
-        rocAnalyzer.compute_rocs()
+        rocAnalyzer.compute_rocs(compute_metrics=True)
 
         # Initialize results structure
         eval_results = {"metrics": {}}
@@ -680,15 +1249,21 @@ class Trainer:
         for sig, discs in discs_by_sig.items():
             disc_names = [disc.name for disc in discs]
             print("Plotting ROCs for", disc_names)
-            print(discs)
-            rocAnalyzer.plot_rocs(title=f"BDT {sig}", disc_names=disc_names, plot_dir=savedir)
+            rocAnalyzer.plot_rocs(
+                title=f"BDT {sig}{title_suffix}",
+                disc_names=disc_names,
+                plot_dir=savedir,
+                signal_name=sig,
+            )
 
             for disc in discs:
                 rocAnalyzer.plot_disc_scores(
-                    disc.name, [[bkg] for bkg in background_names], savedir
+                    disc.name, [[bkg] for bkg in background_names], savedir, signal_name=sig
                 )
                 try:
-                    rocAnalyzer.compute_confusion_matrix(disc.name, plot_dir=savedir)
+                    rocAnalyzer.compute_confusion_matrix(
+                        disc.name, plot_dir=savedir, signal_name=sig
+                    )
                 except Exception as e:
                     print(f"Error computing confusion matrix for {disc.name}: {e}")
 
@@ -698,33 +1273,26 @@ class Trainer:
                 print(f"No discriminant found for {sig} with background {background_names}")
                 continue
 
-            main_disc = disc_bkgall[0]
+            main_disc = next((d for d in discs if d.name == bdt_eval_discriminant_vsall(sig)), None)
 
             # Store comprehensive metrics
-            if hasattr(main_disc, "metrics"):
+            if main_disc and hasattr(main_disc, "metrics"):
                 eval_results["metrics"][sig] = main_disc.get_metrics(as_dict=True)
             else:
-                print(f"Warning: Metrics not computed for {main_disc.name}")
+                print(f"Warning: Metrics not computed for {sig} vs All")
                 eval_results["metrics"][sig] = {}
 
             # Plot BDT output score distributions
-            weights_all = self.dval.get_weight()
             for i, sample in enumerate(self.sample_names):
                 plotting.plot_hist(
-                    [
-                        y_pred[self.dval.get_label() == i, _s]
-                        for _s in range(len(self.sample_names))
-                    ],
+                    [y_pred[y_labels == i, _s] for _s in range(len(self.sample_names))],
                     [
                         self.samples[self.sample_names[_s]].label
                         for _s in range(len(self.sample_names))
                     ],
                     nbins=100,
                     xlim=(0, 1),
-                    weights=[
-                        weights_all[self.dval.get_label() == i]
-                        for _s in range(len(self.sample_names))
-                    ],
+                    weights=[weights[y_labels == i] for _s in range(len(self.sample_names))],
                     xlabel=f"BDT output score on {sample}",
                     lumi=f"{np.sum([hh_vars.LUMI[year] for year in self.years]) / 1000:.1f}",
                     density=True,
@@ -751,17 +1319,14 @@ class Trainer:
             print("No metrics to display")
             return
 
-        # Prepare data for table
+        # Prepare data for table (metrics at fixed background efficiency)
         headers = [
             "Signal",
             "ROC AUC",
             "PR AUC",
-            "F1 (opt)",
-            "Precision (opt)",
-            "Recall (opt)",
-            "F1 (0.5)",
-            "Balanced Acc",
-            "MCC",
+            "Signal Eff",
+            "Precision",
+            "F1",
             "Threshold",
         ]
 
@@ -774,94 +1339,97 @@ class Trainer:
                 signal,
                 f"{metrics.get('roc_auc', 0):.3f}",
                 f"{metrics.get('pr_auc', 0):.3f}",
-                f"{metrics.get('f1_score', 0):.3f}",
+                f"{metrics.get('signal_eff', 0):.3f}",
                 f"{metrics.get('precision', 0):.3f}",
-                f"{metrics.get('recall', 0):.3f}",
-                f"{metrics.get('f1_score_05', 0):.3f}",
-                f"{metrics.get('balanced_accuracy', 0):.3f}",
-                f"{metrics.get('matthews_corr', 0):.3f}",
-                f"{metrics.get('optimal_threshold', 0.5):.3f}",
+                f"{metrics.get('f1_score', 0):.3f}",
+                f"{metrics.get('threshold', 0):.3f}",
             ]
             rows.append(row)
 
-        print("\n" + "=" * 80)
-        print("COMPREHENSIVE METRICS SUMMARY")
-        print("=" * 80)
+        print("\n" + "=" * 70)
+        print(f"METRICS SUMMARY (at bkg_eff={DEFAULT_METRICS_BKG_EFF})")
+        print("=" * 70)
         print(tabulate(rows, headers=headers, tablefmt="grid"))
-        print("\nLegend:")
-        print("- (opt): Metrics at optimal threshold (maximizing F1)")
-        print("- (0.5): Metrics at fixed 0.5 threshold")
-        print("- MCC: Matthews Correlation Coefficient")
-        print("=" * 80)
+        print(
+            f"\nSignal Eff = signal efficiency at benchmark background efficiency "
+            f"({DEFAULT_METRICS_BKG_EFF:.0e})"
+        )
+        print("=" * 70)
 
 
-def study_rescaling(output_dir: str = "rescaling_study", importance_only=False) -> dict:
-    """Study the impact of different rescaling rules on BDT performance.
-    For now give little flexibility, but is not meant to be customized too much.
+def study_rescaling(
+    years: list[str] = None,
+    modelname: str = "24feb26_weak_base",
+    output_dir: str | None = None,
+    data_path: str | None = None,
+    tt_preselection: bool = False,
+    importance_only: bool = False,
+) -> dict:
+    """Study the impact of different balance strategies on BDT performance.
+
+    Trains the same model architecture with each balance strategy,
+    then produces comparison tables.
 
     Args:
-        output_dir: Directory to save study results
+        years: Year(s) of data to use (defaults to all years)
+        modelname: Model config name (must exist in BDT_CONFIG)
+        output_dir: Root directory for the study; each balance strategy
+            gets its own subdirectory.
+        data_path: Path to input data directories
+        tt_preselection: Apply tt preselection
+        importance_only: Only load existing models and compute feature importance
 
     Returns:
-        Dictionary containing study results for each rescaling rule
+        Dictionary containing study results for each balance strategy
     """
-    # Create output directory
-    trainer = Trainer(years=["2022"], modelname="29July25_loweta_lowreg", output_dir=output_dir)
+    if years is None:
+        years = ["all"]
+
+    trainer = Trainer(
+        years=years,
+        modelname=modelname,
+        output_dir=output_dir,
+        data_path=data_path,
+        tt_preselection=tt_preselection,
+    )
 
     print(f"importance_only: {importance_only}")
     if not importance_only:
         trainer.load_data(force_reload=True)
 
-    # Define rescaling rules to study
-    scale_rules = ["signal", "signal_3e-1", "signal_3"]
     balance_rules = [
         "bysample",
-        "bysample_clip_1to10",
-        "bysample_clip_1to20",
-        "grouped_physics",
-        "sqrt_scaling",
-        "ens_weighting",
+        "equal_groups",
+        "equal_groups_equal_channels",
     ]
 
     results = {}
-
-    # Store the original study directory
     study_dir = trainer.output_dir
 
-    # Train models with different rescaling rules
-    for scale_rule in scale_rules:
-        if scale_rule not in results:
-            results[scale_rule] = {}
-        for balance_rule in balance_rules:
-            try:
-                print(f"\nTraining with scale_rule={scale_rule}, balance_rule={balance_rule}")
+    for balance_rule in balance_rules:
+        try:
+            print(f"\nTraining with balance_rule={balance_rule}")
 
-                # Create subdirectory for this configuration
-                current_test_dir = study_dir / f"{scale_rule}_{balance_rule}"
-                current_test_dir.mkdir(exist_ok=True)
+            current_test_dir = study_dir / balance_rule
+            current_test_dir.mkdir(parents=True, exist_ok=True)
 
-                # Override output_dir to save in subdirectory
-                trainer.output_dir = current_test_dir
+            trainer.output_dir = current_test_dir
 
-                if importance_only:
-                    trainer.load_model()
-                else:
-                    # Force reload data and train new model
-                    trainer.prepare_training_set(
-                        save_buffer=False, scale_rule=scale_rule, balance=balance_rule
-                    )
-                    trainer.train_model()
-                    results[scale_rule][balance_rule] = trainer.compute_rocs(
-                        savedir=current_test_dir
-                    )
+            if importance_only:
+                trainer.load_model()
+            else:
+                trainer.prepare_training_set(save_buffer=False, balance=balance_rule)
+                trainer.train_model()
+                results[balance_rule] = trainer.compute_rocs(savedir=current_test_dir)
 
-                trainer.evaluate_training(savedir=current_test_dir)
+            trainer.evaluate_training(savedir=current_test_dir)
 
-            except Exception as e:
-                print(
-                    f"Error training with scale_rule={scale_rule}, balance_rule={balance_rule}: {e}"
-                )
-                continue
+        except Exception as e:
+            print(f"Error training with balance_rule={balance_rule}: {e}")
+            import traceback
+
+            traceback.print_exc()
+            continue
 
     if not importance_only:
         _rescaling_comparison(results, study_dir)
@@ -870,131 +1438,93 @@ def study_rescaling(output_dir: str = "rescaling_study", importance_only=False) 
 
 
 def _rescaling_comparison(results: dict, output_dir: Path) -> None:
-    """Enhanced comparison of different rescaling rules with comprehensive metrics.
+    """Comparison of different balance strategies with comprehensive metrics.
 
     Args:
-        results: Dictionary containing study results with comprehensive metrics
+        results: Dictionary mapping balance_rule -> study results
         output_dir: Directory to save comparison plots and tables
     """
-    # Safety check in debugging
     if not isinstance(output_dir, Path):
-        print(f"output_dir is not a Path, converting to Path: {output_dir}")
         output_dir = Path(output_dir)
 
-    # Get unique scale and balance rules
-    scale_rules = list(results.keys())
-    balance_rules = list(results[scale_rules[0]].keys())
+    balance_rules = list(results.keys())
 
-    # Define metrics to analyze
     metrics = {
         "roc_auc": "ROC AUC",
         "pr_auc": "PR AUC",
-        "f1_score": "F1 (optimal)",
-        "precision": "Precision (optimal)",
-        "recall": "Recall (optimal)",
-        "f1_score_05": "F1 (0.5)",
-        "balanced_accuracy": "Balanced Accuracy",
-        "matthews_corr": "Matthews Corr",
+        "signal_eff": "Signal Eff",
+        "precision": "Precision",
+        "f1_score": "F1",
     }
 
-    for sig in ["hh", "he", "hm"]:
-        # Create individual metric tables
+    for sig in list(results[balance_rules[0]]["metrics"].keys()):
         for metric_key, metric_name in metrics.items():
             table_data = []
-            for scale_rule in scale_rules:
-                row = [scale_rule]
-                for balance_rule in balance_rules:
-                    try:
-                        metric_value = results[scale_rule][balance_rule]["metrics"][sig].get(
-                            metric_key, 0
-                        )
-                        row.append(f"{metric_value:.3f}")
-                    except (KeyError, TypeError):
-                        row.append("-")
-                table_data.append(row)
+            for balance_rule in balance_rules:
+                try:
+                    metric_value = results[balance_rule]["metrics"][sig].get(metric_key, 0)
+                    table_data.append([balance_rule, f"{metric_value:.3f}"])
+                except (KeyError, TypeError):
+                    table_data.append([balance_rule, "-"])
 
-            # Print and save individual metric table
             print(f"\n{metric_name} for {sig} channel:")
-            print(tabulate(table_data, headers=["Scale"] + balance_rules, tablefmt="grid"))
+            print(tabulate(table_data, headers=["Balance", metric_name], tablefmt="grid"))
 
             with (output_dir / f"{metric_key}_{sig}.txt").open("w") as f:
                 f.write(f"{metric_name} for {sig} channel:\n")
-                f.write(tabulate(table_data, headers=["Scale"] + balance_rules, tablefmt="grid"))
+                f.write(tabulate(table_data, headers=["Balance", metric_name], tablefmt="grid"))
 
-        # Create comprehensive summary table for this signal
         summary_data = []
-        for scale_rule in scale_rules:
-            for balance_rule in balance_rules:
-                try:
-                    metrics_dict = results[scale_rule][balance_rule]["metrics"][sig]
-                    summary_data.append(
-                        [
-                            scale_rule,
-                            balance_rule,
-                            f"{metrics_dict.get('roc_auc', 0):.3f}",
-                            f"{metrics_dict.get('pr_auc', 0):.3f}",
-                            f"{metrics_dict.get('f1_score', 0):.3f}",
-                            f"{metrics_dict.get('precision', 0):.3f}",
-                            f"{metrics_dict.get('recall', 0):.3f}",
-                            f"{metrics_dict.get('f1_score_05', 0):.3f}",
-                            f"{metrics_dict.get('balanced_accuracy', 0):.3f}",
-                            f"{metrics_dict.get('matthews_corr', 0):.3f}",
-                            f"{metrics_dict.get('optimal_threshold', 0.5):.3f}",
-                        ]
-                    )
-                except (KeyError, TypeError):
-                    summary_data.append([scale_rule, balance_rule] + ["-"] * 9)
+        for balance_rule in balance_rules:
+            try:
+                metrics_dict = results[balance_rule]["metrics"][sig]
+                summary_data.append(
+                    [
+                        balance_rule,
+                        f"{metrics_dict.get('roc_auc', 0):.3f}",
+                        f"{metrics_dict.get('pr_auc', 0):.3f}",
+                        f"{metrics_dict.get('signal_eff', 0):.3f}",
+                        f"{metrics_dict.get('precision', 0):.3f}",
+                        f"{metrics_dict.get('f1_score', 0):.3f}",
+                        f"{metrics_dict.get('threshold', 0):.3f}",
+                    ]
+                )
+            except (KeyError, TypeError):
+                summary_data.append([balance_rule] + ["-"] * 6)
 
-        # Print and save comprehensive summary
-        headers = [
-            "Scale",
-            "Balance",
-            "ROC AUC",
-            "PR AUC",
-            "F1 (opt)",
-            "Prec (opt)",
-            "Rec (opt)",
-            "F1 (0.5)",
-            "Bal Acc",
-            "MCC",
-            "Threshold",
-        ]
-        print(f"\nComprehensive metrics for {sig} channel:")
+        headers = ["Balance", "ROC AUC", "PR AUC", "Sig Eff", "Precision", "F1", "Threshold"]
+        print(f"\nMetrics for {sig} channel (at bkg_eff={DEFAULT_METRICS_BKG_EFF}):")
         print(tabulate(summary_data, headers=headers, tablefmt="grid"))
 
         with (output_dir / f"comprehensive_{sig}.txt").open("w") as f:
-            f.write(f"Comprehensive metrics for {sig} channel:\n")
+            f.write(f"Metrics for {sig} channel (at bkg_eff={DEFAULT_METRICS_BKG_EFF}):\n")
             f.write(tabulate(summary_data, headers=headers, tablefmt="grid"))
 
-    # Create cross-channel comparison for key metrics
-    _create_cross_channel_comparison(results, scale_rules, balance_rules, output_dir)
+    _create_cross_channel_comparison(results, balance_rules, output_dir)
 
 
-def _create_cross_channel_comparison(results, scale_rules, balance_rules, output_dir):
+def _create_cross_channel_comparison(results, balance_rules, output_dir):
     """Create comparison tables across all channels for key metrics."""
-    key_metrics = ["roc_auc", "f1_score", "precision", "recall"]
-    channels = ["hh", "he", "hm"]
+    key_metrics = ["roc_auc", "signal_eff", "precision", "f1_score"]
+    sigs = list(results[balance_rules[0]]["metrics"].keys())
 
     for metric in key_metrics:
         print(f"\nCross-channel comparison: {metric.upper()}")
 
-        # Create table with channels as columns
         table_data = []
-        for scale_rule in scale_rules:
-            for balance_rule in balance_rules:
-                row = [f"{scale_rule}_{balance_rule}"]
-                for sig in channels:
-                    try:
-                        value = results[scale_rule][balance_rule]["metrics"][sig].get(metric, 0)
-                        row.append(f"{value:.3f}")
-                    except (KeyError, TypeError):
-                        row.append("-")
-                table_data.append(row)
+        for balance_rule in balance_rules:
+            row = [balance_rule]
+            for sig in sigs:
+                try:
+                    value = results[balance_rule]["metrics"][sig].get(metric, 0)
+                    row.append(f"{value:.3f}")
+                except (KeyError, TypeError):
+                    row.append("-")
+            table_data.append(row)
 
-        headers = ["Method"] + channels
+        headers = ["Balance"] + sigs
         print(tabulate(table_data, headers=headers, tablefmt="grid"))
 
-        # Save to file
         with (output_dir / f"cross_channel_{metric}.txt").open("w") as f:
             f.write(f"Cross-channel comparison: {metric.upper()}\n")
             f.write(tabulate(table_data, headers=headers, tablefmt="grid"))
@@ -1004,7 +1534,6 @@ def eval_bdt_preds(
     years: list[str],
     samples: list[str],
     model: str,
-    signal_key: str,
     save: bool = True,
     output_dir: str | None = None,
     data_path: str | None = None,
@@ -1014,7 +1543,7 @@ def eval_bdt_preds(
 
     Args:
         eval_samples: List of sample names to evaluate
-        model: Name of model to use for predictions
+        model: Name of model to use for predictions (signals are read from model config)
 
     One day to be made more flexible (here only integrated with the data you already train on)
     """
@@ -1035,8 +1564,6 @@ def eval_bdt_preds(
     # Load model globally for all years, evaluate by year to reduce memory usage
     bst = Trainer(
         years=years,
-        signal_key=signal_key,
-        bkg_sample_names=samples,
         modelname=model,
         data_path=data_path,
         tt_preselection=tt_preselection,
@@ -1049,8 +1576,6 @@ def eval_bdt_preds(
         # To reduce memory usage, load data once for each year
         trainer = Trainer(
             years=[year],
-            signal_key=signal_key,
-            bkg_sample_names=samples,
             modelname=model,
             data_path=data_path,
             tt_preselection=tt_preselection,
@@ -1085,181 +1610,748 @@ def eval_bdt_preds(
     return evals
 
 
+_NON_MODEL_JSON = {
+    "evals_result",
+    "wps_ttpart",
+    "fold_indices",
+}
+
+
+def _discover_models_in_folder(folder: str | Path) -> list[tuple[str, str]]:
+    """Discover trained BDT models in a directory tree.
+
+    Scans *folder* and its immediate subdirectories for XGBoost model files
+    (``{modelname}.ubj``/``{modelname}.json`` or
+    ``{modelname}_fold{i}.ubj``/``{modelname}_fold{i}.json``).
+
+    Returns:
+        List of ``(model_name, model_dir)`` tuples.
+    """
+    folder = Path(folder)
+    if not folder.is_dir():
+        raise ValueError(f"Not a directory: {folder}")
+
+    discovered: list[tuple[str, str]] = []
+    search_dirs = [folder] + sorted(d for d in folder.iterdir() if d.is_dir())
+
+    for search_dir in search_dirs:
+        seen_models: set[str] = set()
+        model_files = sorted(list(search_dir.glob("*.ubj")) + list(search_dir.glob("*.json")))
+        for model_file in model_files:
+            stem = model_file.stem
+            if stem in _NON_MODEL_JSON:
+                continue
+            model_name = re.sub(r"_fold\d+$", "", stem)
+            if model_name not in seen_models:
+                seen_models.add(model_name)
+                discovered.append((model_name, str(search_dir)))
+
+    return discovered
+
+
+def _resolve_model_inputs(inputs: list[str | Path]) -> list[tuple[str, str, str]]:
+    """Resolve a mixed list of paths into ``(model_name, model_dir, tag)`` triples.
+
+    Each input can be:
+
+    - A path to a ``.ubj`` or ``.json`` model file (absolute or relative): the model name
+      is derived from the file stem (``_fold{i}`` suffixes are stripped) and
+      the parent directory is used as *model_dir*.
+    - A directory path: scanned for model files via
+      :func:`_discover_models_in_folder`.
+
+    Duplicate ``(model_name, model_dir)`` pairs are silently dropped.
+    Each discovered model name is validated against :data:`BDT_CONFIG`; a
+    ``ValueError`` is raised if no matching config file exists.
+
+    Returns:
+        Deduplicated list of ``(model_name, model_dir, tag)`` tuples.
+    """
+    result: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(model_name: str, model_dir: str, tag: str, source: str) -> None:
+        key = (model_name, model_dir)
+        if key in seen:
+            return
+        if model_name not in BDT_CONFIG:
+            raise ValueError(
+                f"Model '{model_name}' (found via {source}) has no BDT config. "
+                f"Expected: bdt_configs/config_{model_name}.py"
+            )
+        seen.add(key)
+        result.append((model_name, model_dir, tag))
+
+    for item in inputs:
+        p = Path(item)
+        if p.suffix in {".ubj", ".json"}:
+            if not p.is_file():
+                raise ValueError(f"Model file not found: {p}")
+            model_name = re.sub(r"_fold\d+$", "", p.stem)
+            tag = p.parent.name
+            if tag == model_name:
+                tag = p.parent.parent.name
+            _add(model_name, str(p.parent), tag, str(p))
+        elif p.is_dir():
+            tag = p.name
+            discovered = _discover_models_in_folder(p)
+            if not discovered:
+                raise ValueError(f"No models found in directory: {p}")
+            print(
+                f"Discovered {len(discovered)} model(s) in {p}: "
+                + ", ".join(n for n, _ in discovered)
+            )
+            for name, mdir in discovered:
+                _add(name, mdir, tag, str(p))
+        else:
+            raise ValueError(f"Input '{item}' is neither a .ubj/.json model file nor a directory")
+
+    return result
+
+
+def _cms_distinct_colors(n: int) -> list[str]:
+    """Return *n* visually distinct colours using the ``tab20`` colormap."""
+    cmap = mpl.colormaps["tab20"]
+    return [mpl.colors.rgb2hex(cmap(i / max(n - 1, 1))) for i in range(n)]
+
+
+def _best_metric_per_signal(combined: pd.DataFrame, metric: str) -> pd.DataFrame:
+    """One score per (model, signal) using only the BDT vsAll discriminant row."""
+    expected = combined["signal"].map(bdt_eval_discriminant_vsall)
+    vsall = combined[combined["discriminant"] == expected]
+    return vsall.groupby(["model", "signal"], sort=False)[metric].max().reset_index()
+
+
+def _aggregate_metric_across_signals(best_per_signal: pd.DataFrame, metric: str) -> pd.DataFrame:
+    """Collapse a best-per-signal table to per-model mean / std / min across signals."""
+    return (
+        best_per_signal.groupby("model")[metric]
+        .agg(["mean", "std", "min"])
+        .reset_index()
+        .rename(
+            columns={
+                "mean": f"mean_{metric}",
+                "std": f"std_{metric}",
+                "min": f"min_{metric}",
+            }
+        )
+    )
+
+
+def _extract_hyperparameters(model_tags: list[str]) -> pd.DataFrame | None:
+    """Try to load BDT_CONFIG for each model tag and return a DataFrame of HPs.
+
+    Returns None if no config can be loaded for any model.
+    """
+    rows = []
+    hp_keys_of_interest = [
+        "max_depth",
+        "eta",
+        "subsample",
+        "colsample_bytree",
+        "num_parallel_tree",
+        "alpha",
+        "gamma",
+        "lambda",
+    ]
+    for tag in model_tags:
+        try:
+            cfg = BDT_CONFIG[tag]
+        except (KeyError, ValueError):
+            continue
+        hp = cfg.get("hyperpars", {})
+        row = {"model": tag}
+        for k in hp_keys_of_interest:
+            if k in hp:
+                row[k] = hp[k]
+        row["num_rounds"] = cfg.get("num_rounds")
+        row["n_folds"] = cfg.get("n_folds")
+        if len(row) > 1:
+            rows.append(row)
+    return pd.DataFrame(rows) if rows else None
+
+
+def _plot_hp_correlations(
+    model_metrics: pd.DataFrame,
+    hp_df: pd.DataFrame,
+    metric_col: str,
+    base_out: Path,
+    *,
+    y_metric_label: str | None = None,
+    output_suffix: str = "metric",
+) -> None:
+    """Scatter-plot each varying hyperparameter against one aggregate metric per model.
+
+    *model_metrics* must include ``model`` plus *metric_col* (e.g. mean ROC AUC across signals).
+
+    Also saves a Spearman correlation summary CSV.
+    """
+    from scipy import stats
+
+    merged = model_metrics.merge(hp_df, on="model", how="inner")
+    if merged.empty:
+        return
+
+    hp_cols = [c for c in hp_df.columns if c != "model"]
+    # Keep only HPs that actually vary across models
+    hp_cols = [c for c in hp_cols if len(merged[c].unique()) > 1]
+    if not hp_cols:
+        print("  All hyperparameters are constant across models — skipping HP plots.")
+        return
+
+    hp_dir = _ensure_dir(base_out / "hyperparameters")
+    y_label = y_metric_label if y_metric_label is not None else metric_col.replace("_", " ")
+
+    # --- individual scatter plots ----------------------------------------
+    n_hp = len(hp_cols)
+    ncols = min(n_hp, 3)
+    nrows = (n_hp + ncols - 1) // ncols
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 5 * nrows), squeeze=False)
+
+    for idx, hp in enumerate(hp_cols):
+        ax = axes[idx // ncols][idx % ncols]
+        x = merged[hp].astype(float)
+        y = merged[metric_col].astype(float)
+        ax.scatter(x, y, s=60, zorder=5, edgecolors="black", linewidths=0.5)
+
+        rho, pval = stats.spearmanr(x, y)
+        ax.set_xlabel(hp, fontsize=14)
+        ax.set_ylabel(y_label, fontsize=14)
+        ax.set_title(f"$\\rho_{{S}}$={rho:+.2f}  (p={pval:.2g})", fontsize=12)
+        ax.tick_params(labelsize=11)
+
+    # hide unused subplots
+    for idx in range(n_hp, nrows * ncols):
+        axes[idx // ncols][idx % ncols].set_visible(False)
+
+    fig.tight_layout()
+    stem = f"hp_vs_metric_{output_suffix}"
+    fig.savefig(hp_dir / f"{stem}.pdf", bbox_inches="tight")
+    fig.savefig(hp_dir / f"{stem}.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # --- correlation summary CSV -----------------------------------------
+    corr_rows = []
+    for hp in hp_cols:
+        x = merged[hp].astype(float)
+        y = merged[metric_col].astype(float)
+        rho, pval = stats.spearmanr(x, y)
+        corr_rows.append({"hyperparameter": hp, "spearman_rho": rho, "p_value": pval})
+    corr_df = pd.DataFrame(corr_rows).sort_values("spearman_rho", key=abs, ascending=False)
+    corr_path = hp_dir / f"hp_correlations_{output_suffix}.csv"
+    corr_df.to_csv(corr_path, index=False)
+    print(f"  HP correlations saved to {corr_path}")
+
+
+def compare_models_light(
+    inputs: list[str | Path],
+    output_dir: str | None = None,
+    discriminant_filter: str | None = "vsAll",
+    ranking_metric: str = "roc_auc",
+) -> pd.DataFrame:
+    """Light comparison of trained models using only metrics_summary.csv files.
+
+    Reads pre-computed metrics from each model's output directory without
+    reloading data or recomputing predictions.  Produces:
+
+    * Per-signal summary tables (console)
+    * CMS-styled bar charts of key metrics
+    * An **aggregate ranking** across all signals
+    * A **heatmap** of models x signals
+    * Hyperparameter correlation plots vs mean ROC AUC and vs mean signal efficiency
+      at the benchmark ε_b used for metrics_summary signal_eff (DEFAULT_METRICS_BKG_EFF in rocUtils)
+      when configs are loadable
+    * A GP surrogate fit to predict the optimal HP set
+
+    Each entry in *inputs* can be a directory that either directly contains a
+    ``metrics_summary.csv`` file or has subdirectories that do.  The folder
+    name is used as the model tag.
+
+    Args:
+        inputs: Directories containing trained models with metrics_summary.csv.
+        output_dir: Where to save comparison outputs (default: ``comparison_light``).
+        discriminant_filter: Only include discriminants whose name contains this
+            substring.  Default ``"vsAll"`` keeps the BDT-vs-all-backgrounds
+            discriminants.  Set to ``None`` to include everything.
+        ranking_metric: Metric to use for aggregate ranking across signals.
+            Default ``"roc_auc"``.
+
+    Returns:
+        Combined ``DataFrame`` with metrics from all input models.
+    """
+    import mplhep as hep
+
+    plt.style.use(hep.style.CMS)
+    hep.style.use("CMS")
+
+    base_out = Path(output_dir) if output_dir else Path("comparison_light")
+    _ensure_dir(base_out)
+
+    # -- collect metrics_summary.csv files --------------------------------
+    csv_frames: list[pd.DataFrame] = []
+    for item in inputs:
+        p = Path(item)
+        if not p.is_dir():
+            raise ValueError(f"Input '{item}' is not a directory")
+
+        csvs = list(p.rglob("metrics_summary.csv"))
+        if not csvs:
+            raise FileNotFoundError(f"No metrics_summary.csv found under {p}")
+
+        for csv_path in sorted(csvs):
+            tag = csv_path.parent.name
+            summary = pd.read_csv(csv_path)
+            summary.insert(0, "model", tag)
+            csv_frames.append(summary)
+
+    combined = pd.concat(csv_frames, ignore_index=True)
+
+    if discriminant_filter:
+        combined = combined[
+            combined["discriminant"].str.contains(discriminant_filter, na=False)
+        ].reset_index(drop=True)
+
+    if combined.empty:
+        print("No metrics matched the discriminant filter — nothing to compare.")
+        return combined
+
+    key_metrics = ["roc_auc", "pr_auc", "signal_eff", "precision", "f1_score", "threshold"]
+    signals = sorted(combined["signal"].unique())
+    models = combined["model"].unique()
+
+    # -- per-signal summary tables ----------------------------------------
+    for sig in signals:
+        rows = []
+        for model_tag in models:
+            sub = combined[(combined["signal"] == sig) & (combined["model"] == model_tag)]
+            if sub.empty:
+                continue
+            for _, r in sub.iterrows():
+                rows.append(
+                    [model_tag, r["discriminant"]] + [f"{r.get(m, 0):.4f}" for m in key_metrics]
+                )
+        headers = ["Model", "Discriminant"] + [m.replace("_", " ").title() for m in key_metrics]
+        print(f"\n{'='*80}")
+        print(f"  Signal: {sig}")
+        print(f"{'='*80}")
+        print(tabulate(rows, headers=headers, tablefmt="grid"))
+
+    # =====================================================================
+    # AGGREGATE RANKING across signals
+    # =====================================================================
+    # For each model, compute the mean of `ranking_metric` over all signals
+    # (BDT vsAll discriminant per channel; see ``bdt_eval_discriminant_vsall``).
+    best_per_signal = _best_metric_per_signal(combined, ranking_metric)
+    ranking = (
+        best_per_signal.groupby("model")[ranking_metric]
+        .agg(["mean", "std", "min"])
+        .reset_index()
+        .rename(
+            columns={
+                "mean": f"mean_{ranking_metric}",
+                "std": f"std_{ranking_metric}",
+                "min": f"min_{ranking_metric}",
+            }
+        )
+        .sort_values(f"mean_{ranking_metric}", ascending=False)
+    )
+    ranking["rank"] = range(1, len(ranking) + 1)
+
+    print(f"\n{'='*80}")
+    print(f"  AGGREGATE RANKING  (metric: mean {ranking_metric} across {len(signals)} signals)")
+    print(f"{'='*80}")
+    rank_headers = ["Rank", "Model", f"Mean {ranking_metric}", "Std", "Worst-signal"]
+    rank_rows = [
+        [
+            r["rank"],
+            r["model"],
+            f"{r[f'mean_{ranking_metric}']:.5f}",
+            f"{r[f'std_{ranking_metric}']:.5f}" if pd.notna(r[f"std_{ranking_metric}"]) else "—",
+            f"{r[f'min_{ranking_metric}']:.5f}",
+        ]
+        for _, r in ranking.iterrows()
+    ]
+    print(tabulate(rank_rows, headers=rank_headers, tablefmt="grid"))
+    ranking.to_csv(base_out / "ranking.csv", index=False)
+
+    # =====================================================================
+    # CMS-styled bar charts (one subplot per signal)
+    # =====================================================================
+    n_models = len(models)
+    colors = _cms_distinct_colors(n_models)
+    model_color = {m: colors[i] for i, m in enumerate(models)}
+
+    plot_metrics = ["roc_auc", "signal_eff", "f1_score"]
+    plot_labels = {
+        "roc_auc": "ROC AUC",
+        "signal_eff": r"Signal efficiency ($\epsilon_{sig}$)",
+        "f1_score": "F1 Score",
+    }
+
+    for metric in plot_metrics:
+        n_sig = len(signals)
+        fig, axes = plt.subplots(
+            1,
+            n_sig,
+            figsize=(max(6, 4 * n_sig), max(5, 0.45 * n_models + 2)),
+            squeeze=False,
+            sharey=True,
+        )
+
+        for ax, sig in zip(axes[0], signals):
+            sub = combined[combined["signal"] == sig].sort_values(metric, ascending=True)
+            if sub.empty:
+                continue
+            labels = sub["model"].tolist()
+            values = sub[metric].astype(float).to_numpy()
+            bar_colors = [model_color[m] for m in labels]
+
+            bars = ax.barh(
+                range(len(values)),
+                values,
+                color=bar_colors,
+                edgecolor="black",
+                linewidth=0.4,
+                height=0.7,
+            )
+            ax.set_yticks(range(len(values)))
+            ax.set_yticklabels(labels, fontsize=9)
+            ax.set_xlabel(plot_labels[metric], fontsize=13)
+            ax.set_title(sig, fontsize=13, fontweight="bold")
+
+            for bar, val in zip(bars, values):
+                ax.text(
+                    bar.get_width() + 0.001,
+                    bar.get_y() + bar.get_height() / 2,
+                    f"{val:.4f}",
+                    va="center",
+                    fontsize=8,
+                )
+
+            ax.tick_params(axis="both", labelsize=10)
+
+        hep.cms.label(ax=axes[0][0], label="Work in Progress", data=False, fontsize=13, loc=0)
+        fig.tight_layout()
+        fig.savefig(base_out / f"compare_{metric}.pdf", bbox_inches="tight")
+        fig.savefig(base_out / f"compare_{metric}.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    # =====================================================================
+    # HEATMAP: models x signals for the ranking metric
+    # =====================================================================
+    pivot = best_per_signal.pivot_table(index="model", columns="signal", values=ranking_metric)
+    # Sort models by aggregate ranking
+    rank_order = ranking.sort_values("rank")["model"].tolist()
+    pivot = pivot.reindex(rank_order)
+
+    fig, ax = plt.subplots(
+        figsize=(max(6, 1.5 * len(signals) + 2), max(4, 0.45 * len(rank_order) + 2))
+    )
+    im = ax.imshow(
+        pivot.to_numpy(),
+        aspect="auto",
+        cmap="RdYlGn",
+        vmin=pivot.to_numpy().min() - 0.01,
+        vmax=pivot.to_numpy().max() + 0.001,
+    )
+    ax.set_xticks(range(len(signals)))
+    ax.set_xticklabels(signals, rotation=35, ha="right", fontsize=11)
+    ax.set_yticks(range(len(rank_order)))
+    ax.set_yticklabels(rank_order, fontsize=10)
+    ax.set_ylabel("Model (ranked)", fontsize=13)
+
+    for i in range(len(rank_order)):
+        for j in range(len(signals)):
+            val = pivot.iloc[i, j]
+            if pd.notna(val):
+                ax.text(
+                    j,
+                    i,
+                    f"{val:.4f}",
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    color="white" if val < pivot.to_numpy().mean() else "black",
+                )
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label(ranking_metric.replace("_", " ").upper(), fontsize=12)
+    hep.cms.label(ax=ax, label="Work in Progress", data=False, fontsize=13, loc=0)
+    fig.tight_layout()
+    fig.savefig(base_out / "heatmap_models_signals.pdf", bbox_inches="tight")
+    fig.savefig(base_out / "heatmap_models_signals.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # =====================================================================
+    # HYPERPARAMETER ANALYSIS
+    # =====================================================================
+    hp_df = _extract_hyperparameters(list(models))
+    if hp_df is not None and not hp_df.empty:
+        print(f"\n  Loaded hyperparameters for {len(hp_df)} / {len(models)} models.")
+        per_sig_roc = _best_metric_per_signal(combined, "roc_auc")
+        per_sig_se = _best_metric_per_signal(combined, "signal_eff")
+        model_metrics_roc = _aggregate_metric_across_signals(per_sig_roc, "roc_auc")[
+            ["model", "mean_roc_auc"]
+        ]
+        model_metrics_se = _aggregate_metric_across_signals(per_sig_se, "signal_eff")[
+            ["model", "mean_signal_eff"]
+        ]
+        _plot_hp_correlations(
+            model_metrics_roc,
+            hp_df,
+            "mean_roc_auc",
+            base_out,
+            y_metric_label="mean ROC AUC (across signals)",
+            output_suffix="mean_roc_auc",
+        )
+        _plot_hp_correlations(
+            model_metrics_se,
+            hp_df,
+            "mean_signal_eff",
+            base_out,
+            y_metric_label=(
+                rf"mean $\epsilon_{{\mathrm{{sig}}}}$ at $\epsilon_{{\mathrm{{b}}}} = {DEFAULT_METRICS_BKG_EFF}$ "
+                r"(across signals)"
+            ),
+            output_suffix="mean_signal_eff_at_benchmark_bkg",
+        )
+    else:
+        print("\n  Could not load hyperparameters from BDT_CONFIG — skipping HP analysis.")
+
+    # -- save combined csv ------------------------------------------------
+    combined.to_csv(base_out / "combined_metrics.csv", index=False)
+    print(f"\nCombined metrics saved to {base_out / 'combined_metrics.csv'}")
+    print(f"Plots saved to {base_out}")
+
+    return combined
+
+
 def compare_models(
-    models: list[str],
-    model_dirs: list[str],
-    years: list[str],
-    signal_key: str,
-    samples: list[str] | None = None,
+    inputs: list[str | Path],
+    years: list[str] = ("all",),
     data_path: str | None = None,
     tt_preselection: bool = False,
     output_dir: str | None = None,
-) -> dict[str, dict[str, float]]:
-    """Load multiple trained models, evaluate, and produce comparison outputs.
+) -> dict[str, dict[str, dict[str, float]]]:
+    """Compare multiple trained BDT models by computing ROC curves and metrics.
 
-    - Saves per-signal overlay ROC plots across models (when comparable)
-    - Saves a CSV with metrics for each (model, signal)
+    For k-fold models, uses averaged predictions across all folds.
 
-    Returns a nested dict: metrics_by_model[model][signal] -> metrics_dict
+    Each entry in *inputs* can be:
+
+    - An absolute or relative path to a ``.ubj`` or ``.json`` model file.
+    - A directory path, which is scanned for model files.
+
+    Mixed lists are supported. All discovered model names are validated against
+    :data:`BDT_CONFIG` before any data is loaded.
+
+    Args:
+        inputs: Model files and/or directories to scan.
+        years: Years to include in the comparison.
+        data_path: Optional path to data directory.
+        tt_preselection: Whether to apply tt preselection.
+        output_dir: Output directory for results (default: "comparison").
+
+    Returns:
+        Nested dict: metrics_by_model[model][signal] -> metrics_dict
     """
+    resolved = _resolve_model_inputs(inputs)
+    model_names = [m for m, _, _ in resolved]
+    model_dirs = [d for _, d, _ in resolved]
+    labels = [f"{tag}::{name}" for name, _, tag in resolved]
 
-    if samples is None:
-        samples = ["dyjets", "qcd", "ttbarhad", "ttbarll", "ttbarsl"]
+    if len(labels) < 2:
+        raise ValueError("Need at least 2 models to compare")
+    if len(set(labels)) != len(labels):
+        raise ValueError(
+            f"Could not derive unique labels for models: {labels}. "
+            "Ensure model directories have distinct names."
+        )
 
-    # Use a top-level comparison directory
-    base_out = Path(output_dir) if output_dir is not None else Path("comparison")
+    base_out = Path(output_dir) if output_dir else Path("comparison")
     _ensure_dir(base_out)
 
-    # Build a base trainer for data loading and getting sample information
-    base_trainer = Trainer(
+    # Load data once into a reference trainer; share events_dict with others
+    ref_trainer = Trainer(
         years=list(years),
-        signal_key=signal_key,
-        bkg_sample_names=list(samples),
-        modelname=models[0],
+        modelname=model_names[0],
         output_dir=model_dirs[0],
         data_path=data_path,
         tt_preselection=tt_preselection,
     )
-    # Load data only once
-    base_trainer.load_data(force_reload=True)
+    ref_trainer.load_data(force_reload=True)
+    shared_events_dict = ref_trainer.events_dict
+    shared_samples = ref_trainer.samples
+    ref_sample_names = ref_trainer.sample_names
+    ref_years = ref_trainer.years
 
-    # Load boosters and prepare training sets for all models
-    trainers: dict[str, Trainer] = {}
-    for model, model_dir in zip(models, model_dirs):
+    # Process models one at a time to keep memory bounded.
+    weights: np.ndarray | None = None
+    preds_dict: dict[str, LoadedSample] = {}
+    kfold_models: list[str] = []
+    y_labels: np.ndarray | None = None
+    for label, model_name, model_dir in zip(labels, model_names, model_dirs):
+        print(f"\n{'='*60}\nProcessing model: {label}\n{'='*60}")
         tr = Trainer(
             years=list(years),
-            signal_key=signal_key,
-            bkg_sample_names=list(samples),
-            modelname=model,
+            modelname=model_name,
             output_dir=model_dir,
             data_path=data_path,
             tt_preselection=tt_preselection,
         )
-        # Share the loaded raw events data from base_trainer instead of reloading
-        tr.events_dict = base_trainer.events_dict
-        tr.samples = base_trainer.samples
-        tr.sample_names = base_trainer.sample_names
-        # Prepare training set for this specific model (will use its own feature set)
-        tr.prepare_training_set(save_buffer=False)
+        tr.events_dict = shared_events_dict
+        tr.samples = shared_samples
+        tr.sample_names = ref_sample_names
+        tr.prepare_training_set(save_buffer=False, prediction_only=True)
         tr.load_model()
-        trainers[model] = tr
 
-    # Construct combined preds_dict holding per-class events with per-model scores
-    event_filters = {
-        name: base_trainer.dval.get_label() == i for i, name in enumerate(base_trainer.sample_names)
-    }
-
-    preds_dict: dict[str, LoadedSample] = {}
-
-    # Start with weights only; features are not required for ROCAnalyzer
-    for class_name in base_trainer.sample_names:
-        preds_dict[class_name] = LoadedSample(
-            sample=base_trainer.samples[class_name],
-            events=None,
-        )
-
-    # Fill events DataFrames incrementally with model-specific columns
-    for model, tr in trainers.items():
-        # Use the model-specific prepared dval for predictions
-        y_pred = tr.bst.predict(tr.dval)
-        # Sanity check: classifier outputs must match the class set used by base_trainer
-        if y_pred.ndim != 2 or y_pred.shape[1] != len(base_trainer.sample_names):
+        if tr.sample_names != ref_sample_names:
             raise ValueError(
-                f"Model '{model}' produces {y_pred.shape[1] if y_pred.ndim==2 else 'invalid'} classes,"
-                f" but base comparison expects {len(base_trainer.sample_names)}."
-                " Ensure models were trained with the same class set/order (signals per channel + backgrounds)."
+                f"Model '{label}' has sample order {tr.sample_names}, "
+                f"expected {ref_sample_names}"
             )
-        for class_index, class_name in enumerate(base_trainer.sample_names):
-            mask = event_filters[class_name]
-            # Initialize events frame if needed
-            if preds_dict[class_name].events is None:
-                preds_dict[class_name].events = {
-                    "finalWeight": base_trainer.dval.get_weight()[mask],
-                }
-            # Add per-model per-class score column
-            y_pred_class = y_pred[mask, class_index]
-            preds_dict[class_name].events[f"{model}::{class_name}"] = y_pred_class
 
-    # Convert dicts to DataFrames
+        if tr.use_kfold:
+            kfold_models.append(label)
+
+        dval = tr.dval if hasattr(tr, "dval") else tr.fold_data["dval"][0]
+
+        # Extract labels/weights from the first model (same data, same split seed)
+        if y_labels is None:
+            y_labels = dval.get_label()
+            weights = dval.get_weight()
+            for class_idx, class_name in enumerate(ref_sample_names):
+                cls_mask = y_labels == class_idx
+                preds_dict[class_name] = LoadedSample(
+                    sample=shared_samples[class_name],
+                    events={"finalWeight": weights[cls_mask]},
+                )
+
+        # Predict
+        if len(tr.boosters) > 1:
+            y_pred = np.mean([bst.predict(dval) for bst in tr.boosters], axis=0)
+        else:
+            y_pred = tr.boosters[0].predict(dval)
+
+        if y_pred.ndim != 2 or y_pred.shape[1] != len(ref_sample_names):
+            raise ValueError(
+                f"Model '{label}' output shape {y_pred.shape} incompatible with "
+                f"{len(ref_sample_names)} classes"
+            )
+
+        for class_idx, class_name in enumerate(ref_sample_names):
+            mask = y_labels == class_idx
+            for pred_idx, pred_name in enumerate(ref_sample_names):
+                preds_dict[class_name].events[f"{label}::{pred_name}"] = y_pred[mask, pred_idx]
+
+        # Free this trainer's DMatrices, boosters, and fold_data before the next model
+        del tr
+        gc.collect()
+
+    # events_dict no longer needed — predictions are stored in preds_dict
+    ref_trainer.events_dict = {y: {} for y in ref_years}
+    del shared_events_dict
+    gc.collect()
+
+    # Convert to DataFrames
     for class_name in preds_dict:
-        import pandas as pd
-
         preds_dict[class_name].events = pd.DataFrame(preds_dict[class_name].events)
 
-    # Prepare ROC analyzer with all signals and backgrounds
-    signal_names = [
-        sig_name for sig_name in base_trainer.samples if base_trainer.samples[sig_name].isSignal
-    ]
-    background_names = [
-        bkg_name for bkg_name in base_trainer.samples if not base_trainer.samples[bkg_name].isSignal
-    ]
+    # Separate signals and backgrounds
+    signal_names = [n for n in ref_sample_names if shared_samples[n].isSignal]
+    background_names = [n for n in ref_sample_names if not shared_samples[n].isSignal]
 
+    # Set up ROC analyzer
     roc_analyzer = ROCAnalyzer(
-        years=base_trainer.years,
-        signals={sig: preds_dict[sig] for sig in signal_names},
-        backgrounds={bkg: preds_dict[bkg] for bkg in background_names},
+        years=ref_years,
+        signals={s: preds_dict[s] for s in signal_names},
+        backgrounds={b: preds_dict[b] for b in background_names},
     )
 
-    # Register discriminants: for each signal and model, build vsAll background discriminant
+    # Register discriminants for each (label, signal) pair
     for sig_name in signal_names:
-        for model in models:
-            sig_tagger = f"{model}::{sig_name}"
-            bkg_taggers = [f"{model}::{bkg}" for bkg in background_names]
+        for label in labels:
             roc_analyzer.process_discriminant(
                 signal_name=sig_name,
                 background_names=background_names,
-                signal_tagger=sig_tagger,
-                background_taggers=bkg_taggers,
-                custom_name=f"{model} {sig_name[-2:]}vsAll",
+                signal_tagger=f"{label}::{sig_name}",
+                background_taggers=[f"{label}::{bkg}" for bkg in background_names],
+                custom_name=f"{label}_{sig_name}",
             )
 
-    # Compute and plot overlay ROCs per signal
-    roc_analyzer.compute_rocs()
+    roc_analyzer.compute_rocs(compute_metrics=True)
 
-    metrics_by_model: dict[str, dict[str, dict[str, float]]] = {m: {} for m in models}
+    # Plot ROCs and extract metrics
+    label_set = set(labels)
+    metrics_by_model: dict[str, dict[str, dict[str, float]]] = {lab: {} for lab in labels}
+    roc_dir = _ensure_dir(base_out / "rocs")
+
     for sig_name in signal_names:
-        # Collect discriminant names for this signal
         disc_names = [
-            disc.name
-            for disc in roc_analyzer.discriminants.values()
-            if disc.signal_name == sig_name
+            d.name for d in roc_analyzer.discriminants.values() if d.signal_name == sig_name
         ]
-        # Plot overlay
-        out_dir = _ensure_dir(base_out / "rocs")
-        roc_analyzer.plot_rocs(title=f"Compare {sig_name}", disc_names=disc_names, plot_dir=out_dir)
+        roc_analyzer.plot_rocs(
+            title=f"Model Comparison: {sig_name}",
+            disc_names=disc_names,
+            plot_dir=roc_dir,
+            signal_name=sig_name,
+        )
 
-        # Extract per-disc metrics and group by model
-        for disc in [d for d in roc_analyzer.discriminants.values() if d.signal_name == sig_name]:
-            model = disc.name.split()[0] if " " in disc.name else disc.name
-            if hasattr(disc, "get_metrics"):
-                metrics_by_model[model][sig_name] = disc.get_metrics(as_dict=True)
+        for disc in roc_analyzer.discriminants.values():
+            if disc.signal_name != sig_name:
+                continue
+            disc_label = disc.name.rsplit("_", 1)[0]
+            if disc_label in label_set and hasattr(disc, "get_metrics"):
+                metrics_by_model[disc_label][sig_name] = disc.get_metrics(as_dict=True)
 
-    # Save combined metrics CSV
+    # Save metrics CSV
+    metric_keys = ["roc_auc", "pr_auc", "signal_eff", "precision", "f1_score", "threshold"]
     csv_path = base_out / "comparison_metrics.csv"
     with csv_path.open("w") as f:
-        all_metric_keys = [
-            "roc_auc",
-            "pr_auc",
-            "f1_score",
-            "precision",
-            "recall",
-            "f1_score_05",
-            "balanced_accuracy",
-            "matthews_corr",
-            "optimal_threshold",
-        ]
-        header = ["model", "signal"] + all_metric_keys
-        f.write(",".join(header) + "\n")
+        f.write(",".join(["model", "signal"] + metric_keys) + "\n")
         for model, by_signal in metrics_by_model.items():
-            for signal, m in by_signal.items():
-                row = [model, signal] + [f"{m.get(k, 0):.6f}" for k in all_metric_keys]
+            for signal, metrics in by_signal.items():
+                row = [model, signal] + [f"{metrics.get(k, 0):.6f}" for k in metric_keys]
                 f.write(",".join(row) + "\n")
 
-    # Save a JSON index for easy inspection
-    with (base_out / "comparison_index.json").open("w") as jf:
-        json.dump({"models": models, "years": years, "signals": list(signal_names)}, jf, indent=2)
+    # Save metadata
+    with (base_out / "comparison_index.json").open("w") as f:
+        json.dump(
+            {
+                "labels": labels,
+                "model_names": model_names,
+                "model_dirs": [str(d) for d in model_dirs],
+                "years": list(years),
+                "signals": signal_names,
+                "backgrounds": background_names,
+                "kfold_models": kfold_models,
+            },
+            f,
+            indent=2,
+        )
 
+    print(f"Comparison results saved to {base_out}")
     return metrics_by_model
+
+
+def _configure_model_from_args(args, parser) -> str:
+    """Resolve the active model name from CLI args and optional config file."""
+    cli_model = args.model or None
+    if args.config_file:
+        try:
+            resolved_model = BDT_CONFIG.register_from_file(args.config_file, modelname=cli_model)
+        except (FileNotFoundError, KeyError, ValueError) as exc:
+            parser.error(str(exc))
+        args.model = resolved_model
+        print(f"Loaded explicit config for model '{resolved_model}' from {args.config_file}")
+        return resolved_model
+
+    if cli_model is None:
+        parser.error("Either --model or --config-file must be provided.")
+
+    args.model = cli_model
+    return args.model
 
 
 if __name__ == "__main__":
@@ -1276,14 +2368,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="28May25_baseline",
-        help="Name of the model configuration to use",
+        default="",
+        help="Name of the model configuration to use. If omitted with --config-file, "
+        "the model name is read from CONFIG['modelname'].",
     )
     parser.add_argument(
-        "--signal-key",
+        "--config-file",
         type=str,
-        default="ggfbbtt",
-        help="Key for the signal sample",
+        default=None,
+        help="Explicit path to a Python config file defining CONFIG. If passed with "
+        "--model, the two model names must match.",
     )
     parser.add_argument(
         "--tt-preselection",
@@ -1311,7 +2405,7 @@ if __name__ == "__main__":
         "--study-rescaling",
         action="store_true",
         default=False,
-        help="Study the impact of different rescaling rules on BDT performance",
+        help="Study the impact of different balance strategies on BDT performance",
     )
     parser.add_argument(
         "--eval-bdt-preds",
@@ -1326,16 +2420,40 @@ if __name__ == "__main__":
         help="Compare multiple trained models with ROC overlays and CSV metrics",
     )
     parser.add_argument(
-        "--models",
-        nargs="+",
-        default=None,
-        help="List of model names to compare when --compare-models is set",
+        "--compare-light",
+        action="store_true",
+        default=False,
+        help=(
+            "Light comparison using only metrics_summary.csv files already "
+            "produced during training. No data loading or prediction needed."
+        ),
     )
     parser.add_argument(
-        "--model-dirs",
+        "--disc-filter",
+        type=str,
+        default="vsAll",
+        help=(
+            "Substring filter for discriminant names in --compare-light. "
+            "Default 'vsAll' keeps BDT-vs-all-backgrounds discriminants. "
+            "Use '' to include everything."
+        ),
+    )
+    parser.add_argument(
+        "--ranking-metric",
+        type=str,
+        default="roc_auc",
+        choices=["roc_auc", "pr_auc", "signal_eff", "f1_score"],
+        help=("Metric for aggregate model ranking in --compare-light. " "Default 'roc_auc'."),
+    )
+    parser.add_argument(
+        "--inputs",
         nargs="+",
         default=None,
-        help="List of model directories to compare when --compare-models is set",
+        help=(
+            "Model files and/or directories to compare. "
+            "Each entry can be a path to a .ubj/.json model file or a directory "
+            "that will be scanned for model files."
+        ),
     )
     parser.add_argument(
         "--samples", nargs="+", default=None, help="Samples to evaluate BDT predictions on"
@@ -1346,6 +2464,18 @@ if __name__ == "__main__":
         default=False,
         help="Only compute importance of features",
     )
+    parser.add_argument(
+        "--bin-features",
+        action="store_true",
+        default=False,
+        help="Apply feature binning to gloParT tautauvsQCDTop scores (discretize to 0.05 steps)",
+    )
+    parser.add_argument(
+        "--cap-weights",
+        action="store_true",
+        default=False,
+        help="Cap per-event training weights at 10x the sample median after balance rescaling",
+    )
 
     # Add mutually exclusive group for train/load
     group = parser.add_mutually_exclusive_group()
@@ -1353,21 +2483,31 @@ if __name__ == "__main__":
     group.add_argument("--load", action="store_true", default=True, help="Load model from file")
 
     args = parser.parse_args()
+    active_model = None
+
+    if not (args.compare_models or args.compare_light):
+        active_model = _configure_model_from_args(args, parser)
 
     if args.study_rescaling:
-        study_rescaling(importance_only=args.importance_only)
+        study_rescaling(
+            years=args.years,
+            modelname=active_model,
+            output_dir=args.output_dir,
+            data_path=args.data_path,
+            tt_preselection=args.tt_preselection,
+            importance_only=args.importance_only,
+        )
         exit()
 
     if args.eval_bdt_preds:
         if not args.samples:
             parser.error("--eval-bdt-preds requires --samples to be specified.")
         else:
-            print(args.model)
+            print(active_model)
             eval_bdt_preds(
                 years=args.years,
                 samples=args.samples,
-                model=args.model,
-                signal_key=args.signal_key,
+                model=active_model,
                 output_dir=args.output_dir,
                 data_path=args.data_path,
                 tt_preselection=args.tt_preselection,
@@ -1375,49 +2515,67 @@ if __name__ == "__main__":
         exit()
 
     if args.compare_models:
-        if not args.models or len(args.models) < 2 or len(args.models) != len(args.model_dirs):
-            parser.error("--compare-models requires at least two --models")
-        # Validate that provided model directories and model files exist
-        resolved_model_dirs = []
-        for model, model_dir_str in zip(args.models, args.model_dirs):
-            model_dir_path = Path(model_dir_str)
-            resolved_dir = (
-                model_dir_path if model_dir_path.is_absolute() else CLASSIFIER_DIR / model_dir_str
-            )
-            if not resolved_dir.exists():
-                parser.error(f"Model directory does not exist: {resolved_dir}")
-            if not resolved_dir.is_dir():
-                parser.error(f"Model directory is not a directory: {resolved_dir}")
-            model_file = resolved_dir / f"{model}.json"
-            if not model_file.is_file():
-                parser.error(f"Model file not found for '{model}': {model_file}")
-            resolved_model_dirs.append(str(resolved_dir))
-        # Lazy import to avoid circular import issues
-        from bbtautau.postprocessing import bdt_utils as _bdt_utils
+        if not args.inputs:
+            parser.error("--compare-models requires --inputs")
 
-        _bdt_utils.compare_models(
-            models=args.models,
-            model_dirs=resolved_model_dirs,
+        # Resolve relative paths against MODEL_DIR.parent
+        resolved_inputs = []
+        for item in args.inputs:
+            p = Path(item)
+            if not p.is_absolute():
+                p = MODEL_DIR.parent / p
+            resolved_inputs.append(str(p))
+
+        compare_models(
+            inputs=resolved_inputs,
             years=args.years,
-            signal_key=args.signal_key,
-            samples=args.samples,
             data_path=args.data_path,
             tt_preselection=args.tt_preselection,
             output_dir=args.output_dir,
         )
         exit()
 
+    if args.compare_light:
+        if not args.inputs:
+            parser.error("--compare-light requires --inputs")
+
+        resolved_inputs = []
+        for item in args.inputs:
+            p = Path(item)
+            if not p.is_absolute():
+                p = MODEL_DIR.parent / p
+            resolved_inputs.append(str(p))
+
+        disc_filter = args.disc_filter if args.disc_filter else None
+        compare_models_light(
+            inputs=resolved_inputs,
+            output_dir=args.output_dir,
+            discriminant_filter=disc_filter,
+            ranking_metric=args.ranking_metric,
+        )
+        exit()
+
     trainer = Trainer(
         years=args.years,
-        bkg_sample_names=args.samples,
-        modelname=args.model,
+        modelname=active_model,
         output_dir=args.output_dir,
         data_path=args.data_path,
         tt_preselection=args.tt_preselection,
-        signal_key=args.signal_key,
     )
 
+    # Apply feature binning settings from CLI to config
+    if args.bin_features:
+        trainer.bdt_config[active_model]["bin_features"] = WPS_TTPART.keys()
+        print(f"Feature binning enabled for features: {WPS_TTPART.keys()}")
+        print("  Note: Features will only be binned if WP bin edges are provided in WPS_TTPART")
+
+    if args.cap_weights:
+        trainer.cap_weights = True
+        print("Weight capping enabled: per-event weights will be capped at 10x sample median")
+
     if args.train:
+        print("Running in training mode")
         trainer.complete_train(force_reload=args.force_reload)
     else:
+        print("Running in load/evaluate mode")
         trainer.complete_load(force_reload=args.force_reload)

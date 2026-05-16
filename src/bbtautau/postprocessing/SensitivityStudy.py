@@ -28,7 +28,6 @@ from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES, SM_SIGNALS
 from bbtautau.postprocessing.utils import load_data_channel
 from bbtautau.userConfig import (
     CHANNEL_ORDERING,
-    CLASSIFIER_DIR,
     PLOT_DIR,
     PT_CUTS,
     SHAPE_VAR,
@@ -46,7 +45,9 @@ hep.style.use("CMS")
 TODAY = date.today()  # to name output folder
 
 # Default B_min values for optimization
-DEFAULT_BMIN_VALUES = [1, 5, 10, 12]
+DEFAULT_BMIN_VALUES = [1, 5, 9, 10, 11, 12, 15, 18, 25]
+# Needs to be a subset of DEFAULT_BMIN_VALUES
+PLOT_BMIN = [1, 5, 10, 12]
 
 # Define discriminant names
 # BB_DISC_NAME = "bbFatJetParTXbbvsQCDTop" #Define in args for now
@@ -55,14 +56,14 @@ TT_DISC_NAMES_PART = {  # ParT does not distinguish between signals
         channel_key: f"ttFatJetParTX{CHANNELS[channel_key].tagger_label}vsQCDTop"
         for channel_key in CHANNELS
     }
-    for sig_key in SM_SIGNALS
+    for sig_key in SIGNAL_ORDERING
 }
 TT_DISC_NAMES_BDT = {
     sig_key: {
         channel_key: f"BDT{sig_key.removesuffix('tt')}{CHANNELS[channel_key].tagger_label}vsAll"
         for channel_key in CHANNELS
     }
-    for sig_key in SM_SIGNALS
+    for sig_key in SIGNAL_ORDERING
 }
 
 # Non-QCD backgrounds for data minus simulated non-QCD backgrounds ABCD estimation
@@ -128,7 +129,6 @@ class Analyser:
         use_ParT: bool | None = None,
         at_inference=False,
         tt_pres=False,
-        bdt_dir=None,
         plot_dir: Path | None = None,
         llsl_weight=1,
         dataMinusSimABCD=False,
@@ -143,7 +143,6 @@ class Analyser:
         self.tt_pres = tt_pres
         self.at_inference = at_inference
         self.use_ParT = use_ParT
-        self.bdt_dir = bdt_dir
 
         self.llsl_weight = llsl_weight
         self.dataMinusSimABCD = dataMinusSimABCD
@@ -173,26 +172,6 @@ class Analyser:
         self.tt_disc_name_channel = self.tt_disc_name[self.channel.key]
 
         self.plot_dir = plot_dir
-
-    # Can remove in next PR, leave just for record. was only used in plot_mass, but that was updated
-
-    # @staticmethod
-    # def get_jet_vals(vals, mask, nan_to_pad=True):
-
-    #     # TODO: Deprecate this (just need to use get_var properly)
-
-    #     # check if vals is a numpy array
-    #     if not isinstance(vals, np.ndarray):
-    #         vals = vals.to_numpy()
-    #     if len(vals.shape) == 1:
-    #         warnings.warn(
-    #             f"vals is a numpy array of shape {vals.shape}. Ignoring mask.", stacklevel=2
-    #         )
-    #         return vals if not nan_to_pad else np.nan_to_num(vals, nan=PAD_VAL)
-    #     if nan_to_pad:
-    #         return np.nan_to_num(vals[mask], nan=PAD_VAL)
-    #     else:
-    #         return vals[mask]
 
     def compute_and_plot_rocs(self, discs=None):
         years = list(self.events_dict.keys())
@@ -260,18 +239,35 @@ class Analyser:
         self.rocAnalyzer.compute_rocs(compute_metrics=self.compute_ROC_metrics)
 
         # Plot bb discriminants
-        self.rocAnalyzer.plot_rocs(title="bbFatJet", disc_names=discs_bb, plot_dir=self.plot_dir)
+        self.rocAnalyzer.plot_rocs(
+            title="bbFatJet",
+            disc_names=discs_bb,
+            plot_dir=self.plot_dir,
+            signal_name=signal_name_for_fill,
+        )
 
         # Plot tt discriminants
-        self.rocAnalyzer.plot_rocs(title="ttFatJet", disc_names=discs_tt, plot_dir=self.plot_dir)
+        self.rocAnalyzer.plot_rocs(
+            title="ttFatJet",
+            disc_names=discs_tt,
+            plot_dir=self.plot_dir,
+            signal_name=signal_name_for_fill,
+        )
 
         # Plot discriminant scores and confusion matrices
         for disc in discs_all:
-            self.rocAnalyzer.plot_disc_scores(disc, background_names, self.plot_dir)
             self.rocAnalyzer.plot_disc_scores(
-                disc, [[bkg] for bkg in background_names], self.plot_dir
+                disc, background_names, self.plot_dir, signal_name=signal_name_for_fill
             )
-            self.rocAnalyzer.compute_confusion_matrix(disc, plot_dir=self.plot_dir)
+            self.rocAnalyzer.plot_disc_scores(
+                disc,
+                [[bkg] for bkg in background_names],
+                self.plot_dir,
+                signal_name=signal_name_for_fill,
+            )
+            self.rocAnalyzer.compute_confusion_matrix(
+                disc, plot_dir=self.plot_dir, signal_name=signal_name_for_fill
+            )
 
         print(f"ROCs computed and plotted for {signal_name_for_fill} vs backgrounds.")
 
@@ -999,14 +995,16 @@ class Analyser:
                 self.compute_and_plot_rocs()
                 print("ROC analyzer computed and plotted. Continuing with grid search...")
 
-            # Check discriminants exist
-            if self.bb_disc_name not in self.rocAnalyzer.discriminants:
+            # Check discriminants exist (using helper to handle composite keys)
+            bb_disc_key = self.rocAnalyzer._get_discriminant_key(self.bb_disc_name)
+            if bb_disc_key not in self.rocAnalyzer.discriminants:
                 raise ValueError(
-                    f"BB discriminant '{self.bb_disc_name}' not found in ROC analyzer. Available: {list(self.rocAnalyzer.discriminants.keys())}"
+                    f"BB discriminant '{self.bb_disc_name}' (key: '{bb_disc_key}') not found in ROC analyzer. Available: {list(self.rocAnalyzer.discriminants.keys())}"
                 )
-            if self.tt_disc_name_channel not in self.rocAnalyzer.discriminants:
+            tt_disc_key = self.rocAnalyzer._get_discriminant_key(self.tt_disc_name_channel)
+            if tt_disc_key not in self.rocAnalyzer.discriminants:
                 raise ValueError(
-                    f"TT discriminant '{self.tt_disc_name_channel}' not found in ROC analyzer. Available: {list(self.rocAnalyzer.discriminants.keys())}"
+                    f"TT discriminant '{self.tt_disc_name_channel}' (key: '{tt_disc_key}') not found in ROC analyzer. Available: {list(self.rocAnalyzer.discriminants.keys())}"
                 )
 
             # Create signal efficiency grid with separate limits for each axis
@@ -1014,9 +1012,9 @@ class Analyser:
             ttcutSigEff = np.linspace(*gridlims_y, gridsize)
             BBcutSigEff, TTcutSigEff = np.meshgrid(bbcutSigEff, ttcutSigEff)
 
-            # Get discriminant objects for threshold lookup
-            bb_discriminant = self.rocAnalyzer.discriminants[self.bb_disc_name]
-            tt_discriminant = self.rocAnalyzer.discriminants[self.tt_disc_name_channel]
+            # Get discriminant objects for threshold lookup (using keys from previous check)
+            bb_discriminant = self.rocAnalyzer.discriminants[bb_disc_key]
+            tt_discriminant = self.rocAnalyzer.discriminants[tt_disc_key]
 
             # VECTORIZED threshold computation
             bbcut_thresholds = bb_discriminant.get_cut_from_sig_eff(bbcutSigEff)
@@ -1086,8 +1084,8 @@ class Analyser:
             gridlims = (0.3, 1) if use_thresholds else (0.2, 0.9)
             gridsize = 20
         else:
-            gridlims = (0.7, 1) if use_thresholds else (0.25, 0.75)
-            gridsize = 50
+            gridlims = (0.7, 1) if use_thresholds else (0.15, 0.85)
+            gridsize = 80
 
         foms = FOMS_TO_OPTIMIZE
 
@@ -1100,14 +1098,12 @@ class Analyser:
         )
 
         # Save results to CSV files
-        successful_b_min_vals = []
         saved_files = []
         for fom in foms:
             bmin_dfs = []
             for B_min in b_min_vals:
                 optimum_result = results.get(fom.name, {}).get(f"Bmin={B_min}")
                 if optimum_result:
-                    successful_b_min_vals.append(B_min)
                     bmin_df = self.as_df(optimum_result, self.years, label=f"Bmin={B_min}")
                     bmin_dfs.append(bmin_df)
 
@@ -1155,14 +1151,16 @@ class Analyser:
             print(f"Saved passing events to: {output_json}")
 
         if plot:
-            while len(successful_b_min_vals) > 4:
-                successful_b_min_vals = successful_b_min_vals[::2]
+            primary_fom = foms[0].name
+            plot_b_min_vals = [
+                b for b in PLOT_BMIN if results.get(primary_fom, {}).get(f"Bmin={b}") is not None
+            ]
 
             if use_thresholds:
                 plot_optimization_thresholds(
                     results=results,
                     years=self.years,
-                    b_min_vals=successful_b_min_vals,
+                    b_min_vals=plot_b_min_vals,
                     foms=foms,
                     channel=self.channel,
                     save_path=self.plot_dir / f"{'_'.join(self.years)}_thresholds",
@@ -1176,7 +1174,7 @@ class Analyser:
                 plot_optimization_sig_eff(
                     results=results,
                     years=self.years,
-                    b_min_vals=successful_b_min_vals,
+                    b_min_vals=plot_b_min_vals,
                     foms=foms,
                     channel=self.channel,
                     save_path=self.plot_dir / f"{'_'.join(self.years)}_sigeff",
@@ -1189,7 +1187,7 @@ class Analyser:
                 plot_optimization_sig_eff(
                     results=results,
                     years=self.years,
-                    b_min_vals=successful_b_min_vals,
+                    b_min_vals=plot_b_min_vals,
                     foms=foms,
                     channel=self.channel,
                     save_path=self.plot_dir / f"{'_'.join(self.years)}_sigeff_log",
@@ -1316,9 +1314,15 @@ class Analyser:
         limits["Cut_Xtt"] = optimum.get("TXtt_opt", 0)
 
         # Add all evaluated quantities at optimum (they are stored directly, not nested)
-        # Skip internal grid arrays and non-scalar values
-        skip_keys = {"BBcut_sig_eff", "TTcut_sig_eff", "fom_map", "sel_B_min", "passing_events"}
-        # {"BBcut_sig_eff", "TTcut_sig_eff", "fom_map", "TXbb_opt", "TXtt_opt", "sig_eff_cuts"}
+        skip_keys = {
+            "BBcut_sig_eff",
+            "TTcut_sig_eff",
+            "fom_map",
+            "sel_B_min",
+            "passing_events",
+            "TXbb_opt",
+            "TXtt_opt",
+        }
         for k, v in optimum.items():
             if k not in skip_keys:
                 limits[k] = v
@@ -1344,7 +1348,6 @@ def analyse_channel(
     tt_pres=False,
     use_ParT=False,
     at_inference=False,
-    bdt_dir=None,
     plot_dir=None,
     llsl_weight=1,
     cuts_file=None,
@@ -1377,7 +1380,6 @@ def analyse_channel(
         use_ParT=use_ParT,
         at_inference=at_inference,
         llsl_weight=llsl_weight,
-        bdt_dir=bdt_dir,
         plot_dir=plot_dir,
         dataMinusSimABCD=dataMinusSimABCD,
         showNonDataDrivenPortion=showNonDataDrivenPortion,
@@ -1417,6 +1419,7 @@ def get_plot_dir(
     use_sm_signals: bool,
     overlapping_channels: bool,
     sr_config: SRConfig,
+    ggf_modelname: str | None = None,
 ):
 
     if test_mode:
@@ -1426,9 +1429,11 @@ def get_plot_dir(
     else:
         test_dir = "full_presel"
 
-    tag = "ParT/" if use_ParT else "BDT/"
+    disc_tag = "ParT" if use_ParT else ggf_modelname if ggf_modelname else "BDT"
+
+    tag = f"{disc_tag}/"
     tag += "do_vbf/" if do_vbf else "ggf_only/"
-    tag += "sm_signals/" if use_sm_signals else "ggf_only/"
+    tag += "sm_signals/" if use_sm_signals else "separate_signals/"
     tag += "overlapping_channels/" if overlapping_channels else "orthogonal_channels/"
     tag += f"{sr_config.name}/{sr_config.channel}"
 
@@ -1448,7 +1453,13 @@ def main(args):
     # BDT models to load (None if using ParT)
     models = None
     if not args.use_ParT:
+        # Backward compatible:
+        # - Old mode: separate ggf and vbf models -> pass both
+        # - New mode: "extended"/unified model that outputs both ggf+vbf -> user can pass same name for both;
+        #   de-duplicate so we only run it once (model config signals drives which outputs are produced).
         models = [args.ggf_modelname] + ([args.vbf_modelname] if args.do_vbf else [])
+        # preserve order but drop duplicates
+        models = list(dict.fromkeys(models))
 
     # Track optimized regions for vetoes (key = signal_channel, e.g., "ggfbbtthh")
     optimized_regions: dict[str, SRConfig] = {}
@@ -1472,6 +1483,8 @@ def main(args):
             tt_pres=args.tt_pres,
             models=models,
             additional_samples=additional_samples,
+            at_inference=args.at_inference,
+            unbiased_mc_eval=args.unbiased_mc_eval,
         )
 
         channel_regions: list[SRConfig] = []  # within current channel (overlapping mode)
@@ -1502,6 +1515,7 @@ def main(args):
                 args.use_sm_signals,
                 args.overlapping_channels,
                 sr_config,
+                ggf_modelname=args.ggf_modelname,
             )
             plot_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1513,7 +1527,6 @@ def main(args):
                 use_ParT=args.use_ParT,
                 actions=args.actions,
                 at_inference=args.at_inference,
-                bdt_dir=args.bdt_dir,
                 plot_dir=plot_dir,
                 cuts_file=args.cuts_file,
                 eval_bmin=args.eval_bmin,
@@ -1536,7 +1549,7 @@ if __name__ == "__main__":
         epilog="""
 Examples:
   # Run sensitivity optimization with BDT
-  python SensitivityStudy.py --actions sensitivity --channels he hmu
+  python SensitivityStudy.py --actions sensitivity --channels he hm
 
   # Evaluate at specific cuts from a CSV file
   python SensitivityStudy.py --actions evaluate --cuts-file results.csv --eval-bmin 10 --outfile eval.csv
@@ -1630,12 +1643,13 @@ Examples:
         default=False,
         help="Optimize in threshold space (default: signal efficiency space)",
     )
-    sens_group.add_argument(
+    sens_group.add_argument(  # Legacy, never really used but logic kept
         "--dataMinusSimABCD",
         action="store_true",
+        default=True,
         help="Use enhanced ABCD: subtract simulated non-QCD from data",
     )
-    sens_group.add_argument(  # TODO: make sense of this (right now can never be false)
+    sens_group.add_argument(  # See above
         "--showNonDataDrivenPortion",
         action="store_true",
         default=True,
@@ -1648,7 +1662,7 @@ Examples:
     sr_group = parser.add_argument_group(
         "Signal Region Configuration", "Configure signal regions and cross-region vetoes"
     )
-    sr_group.add_argument(
+    sr_group.add_argument(  # TODO: for now only works if --do-vbf is set
         "--use-sm-signals",
         action="store_true",
         default=False,
@@ -1681,26 +1695,32 @@ Examples:
     )
     disc_group.add_argument(
         "--ggf-modelname",
-        default="19oct25_ak4away_ggfbbtt",
-        help="BDT model name for ggF (default: 19oct25_ak4away_ggfbbtt)",
+        default="May4_optimized_ggf",
+        help="BDT model name for ggF",
     )
     disc_group.add_argument(
         "--vbf-modelname",
         type=str,
-        default="19oct25_ak4away_vbfbbtt",
-        help="BDT model name for VBF (default: 19oct25_ak4away_vbfbbtt)",
-    )
-    disc_group.add_argument(
-        "--bdt-dir",
-        type=str,
-        default=CLASSIFIER_DIR,
-        help="Directory containing BDT model files",
+        default="May4_optimized_vbf",
+        help="BDT model name for VBF",
     )
     disc_group.add_argument(
         "--at-inference",
         action="store_true",
         default=False,
         help="Force BDT inference (ignore cached predictions)",
+    )
+    disc_group.add_argument(
+        "--unbiased-mc-eval",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "For n_folds=1 BDT models, drop training events from MC samples and "
+            "rescale validation weights per-sample so total normalization is "
+            "preserved. Requires train_event_ids.npz saved next to the model. "
+            "Data and samples not seen in training are never filtered. "
+            "Use --no-unbiased-mc-eval to disable."
+        ),
     )
     disc_group.add_argument(
         "--llsl-weight",

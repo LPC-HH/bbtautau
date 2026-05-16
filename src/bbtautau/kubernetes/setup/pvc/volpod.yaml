@@ -7,17 +7,17 @@ metadata:
 spec:
   containers:
   - name: container
-    image: gitlab-registry.nrp-nautilus.io/zichunhao/parcel:latest
+    image: gitlab-registry.nrp-nautilus.io/ludomori99/bbtautau-docker:latest #gitlab-registry.nrp-nautilus.io/zichunhao/parcel:latest
     command: ["/bin/bash", "-c", "sleep infinity"]
     resources:
       limits:
         memory: 1Gi
-        cpu: "100m"
-        ephemeral-storage: 512Gi
+        cpu: "1"
+        ephemeral-storage: 128Gi
       requests:
         memory: 1Gi
-        cpu: "100m"
-        ephemeral-storage: 512Gi
+        cpu: "1"
+        ephemeral-storage: 128Gi
     volumeMounts:
     - mountPath: /bbtautauvol
       name: bbtautauvol
