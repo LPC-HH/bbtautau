@@ -17,22 +17,22 @@ import numpy as np
 from boostedhh import hh_vars
 from boostedhh.utils import PAD_VAL
 from joblib import Parallel, delayed
+from scipy.interpolate import UnivariateSpline
 from sklearn.metrics import (
-    accuracy_score,
     auc,
     average_precision_score,
-    balanced_accuracy_score,
     f1_score,
-    matthews_corrcoef,
     precision_score,
     recall_score,
-    roc_auc_score,
     roc_curve,
 )
-from utils import LoadedSample, rename_jetbranch_ak8
 
+from bbtautau.postprocessing.bbtautau_types import LoadedSample
 from bbtautau.postprocessing.plotting import plotting
 from bbtautau.postprocessing.Samples import SAMPLES
+
+# Target background efficiency for threshold-based metrics in metrics_summary (signal_eff, F1, …).
+DEFAULT_METRICS_BKG_EFF = 3e-4
 
 
 @dataclass
@@ -46,28 +46,21 @@ class ROC:
 
 @dataclass
 class Metrics:
-    """Container for comprehensive performance metrics."""
+    """Container for performance metrics at fixed background efficiency."""
 
     # AUC-based metrics
     roc_auc: float
     pr_auc: float
 
-    # Threshold-dependent metrics at optimal point
-    optimal_threshold: float
-    f1_score: float
+    # Threshold at target background efficiency
+    threshold: float
+
+    # Metrics at target background efficiency
+    signal_eff: float  # recall = TPR = signal efficiency
     precision: float
-    recall: float
-    accuracy: float
-    balanced_accuracy: float
-    matthews_corr: float
+    f1_score: float
 
-    # Threshold-dependent metrics at 0.5 threshold
-    f1_score_05: float
-    precision_05: float
-    recall_05: float
-    accuracy_05: float
-
-    # Additional info
+    # Sample statistics
     n_signal: int
     n_background: int
     signal_weight: float
@@ -192,54 +185,33 @@ class Discriminant:
             sample_weight=self.get_weights(),
         )
         roc_auc = auc(fpr, tpr)
-        self.roc = ROC(fpr, tpr, thresholds, rename_jetbranch_ak8(self.get_name()), roc_auc)
+        roc = ROC(fpr, tpr, thresholds, LoadedSample.rename_jetbranch_ak8(self.get_name()), roc_auc)
+        self.roc = roc
+        return roc
 
-    def compute_metrics(self):
+    def compute_metrics(self, bkg_eff=DEFAULT_METRICS_BKG_EFF):
         """
-        Compute comprehensive performance metrics for the discriminant.
+        Compute performance metrics for the discriminant at fixed background efficiency.
+
+        Args:
+            bkg_eff: Target background efficiency (FPR) for threshold selection.
         """
+        # Ensure ROC is computed (reuse if already computed)
+        if not hasattr(self, "roc") or self.roc is None:
+            self.compute_roc()
+
         y_true = self.get_binary_labels()
         y_scores = self.get_discriminant_score()
         weights = self.get_weights()
 
-        # AUC-based metrics
-        roc_auc = roc_auc_score(y_true, y_scores, sample_weight=weights)
+        # Reuse ROC curve data (already computed in compute_roc)
+        fpr = self.roc.fpr
+        tpr = self.roc.tpr
+        thresholds_roc = self.roc.thresholds
+        roc_auc = self.roc.auc  # Reuse AUC from ROC computation
+
+        # PR AUC (still need to compute separately)
         pr_auc = average_precision_score(y_true, y_scores, sample_weight=weights)
-
-        # Find optimal threshold using F1-score
-        thresholds = np.linspace(0, 1, 100)
-        f1_scores = []
-        for thresh in thresholds:
-            y_pred = (y_scores >= thresh).astype(int)
-            try:
-                f1 = f1_score(y_true, y_pred, sample_weight=weights, zero_division=0)
-                f1_scores.append(f1)
-            except:
-                f1_scores.append(0.0)
-
-        optimal_threshold = thresholds[np.argmax(f1_scores)]
-        y_pred_optimal = (y_scores >= optimal_threshold).astype(int)
-        y_pred_05 = (y_scores >= 0.5).astype(int)
-
-        # Compute metrics at optimal threshold
-        f1_optimal = f1_score(y_true, y_pred_optimal, sample_weight=weights, zero_division=0)
-        precision_optimal = precision_score(
-            y_true, y_pred_optimal, sample_weight=weights, zero_division=0
-        )
-        recall_optimal = recall_score(
-            y_true, y_pred_optimal, sample_weight=weights, zero_division=0
-        )
-        accuracy_optimal = accuracy_score(y_true, y_pred_optimal, sample_weight=weights)
-        balanced_acc_optimal = balanced_accuracy_score(
-            y_true, y_pred_optimal, sample_weight=weights
-        )
-        matthews_optimal = matthews_corrcoef(y_true, y_pred_optimal, sample_weight=weights)
-
-        # Compute metrics at 0.5 threshold
-        f1_05 = f1_score(y_true, y_pred_05, sample_weight=weights, zero_division=0)
-        precision_05 = precision_score(y_true, y_pred_05, sample_weight=weights, zero_division=0)
-        recall_05 = recall_score(y_true, y_pred_05, sample_weight=weights, zero_division=0)
-        accuracy_05 = accuracy_score(y_true, y_pred_05, sample_weight=weights)
 
         # Sample statistics
         signal_mask = y_true == 1
@@ -248,25 +220,39 @@ class Discriminant:
         signal_weight = np.sum(weights[signal_mask])
         background_weight = np.sum(weights[~signal_mask])
 
-        self.metrics = Metrics(
+        # Find threshold at target background efficiency using ROC curve
+        # Find threshold where FPR is closest to (but not exceeding) target bkg_eff
+        valid_idx = np.where(fpr <= bkg_eff)[0]
+        idx_at_bkg_eff = valid_idx[-1] if len(valid_idx) > 0 else 0
+        threshold_at_bkg_eff = thresholds_roc[idx_at_bkg_eff]
+        tpr_at_bkg_eff = tpr[idx_at_bkg_eff]  # Signal efficiency at this working point
+        fpr_at_bkg_eff = fpr[idx_at_bkg_eff]  # Actual background efficiency
+
+        # Metrics at fixed background efficiency threshold
+        y_pred = (y_scores >= threshold_at_bkg_eff).astype(int)
+        f1 = f1_score(y_true, y_pred, sample_weight=weights, zero_division=0)
+        precision = precision_score(y_true, y_pred, sample_weight=weights, zero_division=0)
+        recall = recall_score(y_true, y_pred, sample_weight=weights, zero_division=0)
+
+        metrics = Metrics(
             roc_auc=roc_auc,
             pr_auc=pr_auc,
-            optimal_threshold=optimal_threshold,
-            f1_score=f1_optimal,
-            precision=precision_optimal,
-            recall=recall_optimal,
-            accuracy=accuracy_optimal,
-            balanced_accuracy=balanced_acc_optimal,
-            matthews_corr=matthews_optimal,
-            f1_score_05=f1_05,
-            precision_05=precision_05,
-            recall_05=recall_05,
-            accuracy_05=accuracy_05,
+            threshold=threshold_at_bkg_eff,
+            signal_eff=recall,  # Signal efficiency at bkg_eff
+            precision=precision,
+            f1_score=f1,
             n_signal=n_signal,
             n_background=n_background,
             signal_weight=signal_weight,
             background_weight=background_weight,
         )
+
+        self.metrics = metrics
+        # Store additional info for reference
+        self.threshold_at_bkg_eff = threshold_at_bkg_eff
+        self.signal_eff_at_bkg_eff = tpr_at_bkg_eff
+        self.actual_bkg_eff = fpr_at_bkg_eff
+        return metrics
 
     def get_discriminant_score(self):
         return self.disc_scores
@@ -305,7 +291,7 @@ class Discriminant:
             return self.roc
 
     def get_metrics(self, as_dict=False):
-        """Get comprehensive metrics for the discriminant."""
+        """Get metrics for the discriminant at fixed background efficiency."""
         if not hasattr(self, "metrics"):
             print(f"Warning: Metrics not computed for discriminant {self.get_name()}")
             return None
@@ -314,17 +300,10 @@ class Discriminant:
             return {
                 "roc_auc": self.metrics.roc_auc,
                 "pr_auc": self.metrics.pr_auc,
-                "optimal_threshold": self.metrics.optimal_threshold,
-                "f1_score": self.metrics.f1_score,
+                "threshold": self.metrics.threshold,
+                "signal_eff": self.metrics.signal_eff,
                 "precision": self.metrics.precision,
-                "recall": self.metrics.recall,
-                "accuracy": self.metrics.accuracy,
-                "balanced_accuracy": self.metrics.balanced_accuracy,
-                "matthews_corr": self.metrics.matthews_corr,
-                "f1_score_05": self.metrics.f1_score_05,
-                "precision_05": self.metrics.precision_05,
-                "recall_05": self.metrics.recall_05,
-                "accuracy_05": self.metrics.accuracy_05,
+                "f1_score": self.metrics.f1_score,
                 "n_signal": self.metrics.n_signal,
                 "n_background": self.metrics.n_background,
                 "signal_weight": self.metrics.signal_weight,
@@ -332,6 +311,212 @@ class Discriminant:
             }
         else:
             return self.metrics
+
+    def _spline_interpolate_threshold(self, tpr_values, threshold_values, target_tpr):
+        """
+        Interpolate threshold using spline with nearest neighbors around target TPR.
+
+        Args:
+            tpr_values (np.ndarray): Sorted unique TPR values
+            threshold_values (np.ndarray): Corresponding threshold values
+            target_tpr (float): Target TPR to find threshold for
+
+        Returns:
+            float: Interpolated threshold value
+        """
+        n_points = len(tpr_values)
+
+        # Find the index where target_tpr would be inserted to maintain order
+        insert_idx = np.searchsorted(tpr_values, target_tpr)
+
+        # Determine neighborhood around target point
+        # Use at least 4 points for cubic spline, more if available
+        min_points = min(4, n_points)
+        half_points = min_points // 2
+
+        # Calculate start and end indices for neighborhood
+        start_idx = max(0, insert_idx - half_points)
+        end_idx = min(n_points, start_idx + min_points)
+
+        # Adjust start if we hit the end boundary
+        if end_idx - start_idx < min_points:
+            start_idx = max(0, end_idx - min_points)
+
+        # Extract neighborhood points
+        tpr_neighborhood = tpr_values[start_idx:end_idx]
+        threshold_neighborhood = threshold_values[start_idx:end_idx]
+
+        # Handle edge cases
+        if len(tpr_neighborhood) < 2:
+            # Fall back to linear interpolation
+            return np.interp(target_tpr, tpr_values, threshold_values)
+
+        if len(tpr_neighborhood) == 2:
+            # Linear interpolation for 2 points
+            return np.interp(target_tpr, tpr_neighborhood, threshold_neighborhood)
+
+        # Check if target is exactly at a data point
+        exact_match = np.where(tpr_neighborhood == target_tpr)[0]
+        if len(exact_match) > 0:
+            return threshold_neighborhood[exact_match[0]]
+
+        try:
+            # Use cubic spline with smoothing
+            # s=0 for interpolation (passes through all points)
+            # k=min(3, len-1) for cubic or lower order if insufficient points
+            k = min(3, len(tpr_neighborhood) - 1)
+            spline = UnivariateSpline(tpr_neighborhood, threshold_neighborhood, k=k, s=0)
+            interpolated_value = float(spline(target_tpr))
+
+            # Sanity check: ensure result is within reasonable bounds
+            min_thresh = np.min(threshold_neighborhood)
+            max_thresh = np.max(threshold_neighborhood)
+
+            # If spline extrapolates beyond reasonable bounds, fall back to linear
+            if not (min_thresh <= interpolated_value <= max_thresh):
+                return np.interp(target_tpr, tpr_neighborhood, threshold_neighborhood)
+
+            return interpolated_value
+
+        except Exception as e:
+            # Fall back to linear interpolation if spline fails
+            print(f"Warning: Spline interpolation failed ({e}), using linear interpolation")
+            return np.interp(target_tpr, tpr_neighborhood, threshold_neighborhood)
+
+    def _vectorized_spline_interpolate(self, tpr_values, threshold_values, target_tprs):
+        """
+        Vectorized spline interpolation for multiple target TPR values.
+
+        Args:
+            tpr_values (np.ndarray): Sorted unique TPR values from ROC curve
+            threshold_values (np.ndarray): Corresponding threshold values
+            target_tprs (np.ndarray): Array of target TPR values to interpolate
+
+        Returns:
+            np.ndarray: Interpolated threshold values
+        """
+        n_points = len(tpr_values)
+
+        if n_points < 4:
+            # Use linear interpolation for insufficient points
+            return np.interp(target_tprs, tpr_values, threshold_values)
+
+        try:
+            # Create spline once and evaluate at all target points
+            k = min(3, n_points - 1)  # Cubic or lower order
+            # Check for problematic threshold values before spline creation
+            finite_mask = np.isfinite(threshold_values)
+            if not np.all(finite_mask):
+                tpr_values = tpr_values[finite_mask]
+                threshold_values = threshold_values[finite_mask]
+
+                if len(tpr_values) < 2:
+                    return np.full_like(target_tprs, np.nan)
+
+            spline = UnivariateSpline(tpr_values, threshold_values, k=k, s=0)
+
+            # Vectorized evaluation
+            interpolated_values = spline(target_tprs)
+
+            # Sanity check: ensure results are within reasonable bounds
+            min_thresh = np.min(threshold_values)
+            max_thresh = np.max(threshold_values)
+
+            # Check which values are out of bounds
+            out_of_bounds = (interpolated_values < min_thresh) | (interpolated_values > max_thresh)
+
+            if np.any(out_of_bounds):
+                # Fall back to linear interpolation for out-of-bounds values
+                linear_values = np.interp(target_tprs, tpr_values, threshold_values)
+                interpolated_values[out_of_bounds] = linear_values[out_of_bounds]
+
+            return interpolated_values
+
+        except Exception as e:
+            # Fall back to linear interpolation if spline fails
+            print(
+                f"Warning: Vectorized spline interpolation failed ({e}), using linear interpolation"
+            )
+            return np.interp(target_tprs, tpr_values, threshold_values)
+
+    def get_cut_from_sig_eff(self, target_sig_eff):
+        """
+        Get the discriminant threshold that yields a specific signal efficiency.
+
+        Signal efficiency is defined as TPR (True Positive Rate) = TP / (TP + FN).
+        This function interpolates the ROC curve to find the threshold corresponding
+        to the desired signal efficiency.
+
+        Args:
+            target_sig_eff (float or array-like): Desired signal efficiency between 0 and 1.
+                                                 Can be scalar or array for vectorized operation.
+
+        Returns:
+            float or ndarray: Discriminant threshold(s) that yield the target signal efficiency.
+                             Returns np.nan if target efficiency is not achievable or ROC not computed.
+
+        Examples:
+            >>> threshold_90pct = discriminant.get_cut_from_sig_eff(0.9)  # 90% signal efficiency
+            >>> thresholds = discriminant.get_cut_from_sig_eff([0.5, 0.7, 0.9])  # Vectorized
+        """
+        if not hasattr(self, "roc"):
+            print(f"Warning: ROC curve not computed for discriminant {self.get_name()}")
+            return np.nan if np.isscalar(target_sig_eff) else np.full_like(target_sig_eff, np.nan)
+
+        # Handle both scalar and array inputs
+        target_sig_eff = np.asarray(target_sig_eff)
+        is_scalar = target_sig_eff.ndim == 0
+
+        # Ensure we work with arrays for vectorized operations
+        if is_scalar:
+            target_sig_eff = target_sig_eff.reshape(1)
+
+        # Validate input range
+        invalid_mask = (target_sig_eff < 0) | (target_sig_eff > 1)
+        if np.any(invalid_mask):
+            print("Warning: Signal efficiency must be between 0 and 1, got invalid values")
+
+        tpr = self.roc.tpr
+        thresholds = self.roc.thresholds
+
+        # Prepare lookup data (do this once for all target efficiencies)
+        min_eff = np.min(tpr)
+        max_eff = np.max(tpr)
+
+        # Sort by TPR to ensure monotonic interpolation
+        sort_indices = np.argsort(tpr)
+        tpr_sorted = tpr[sort_indices]
+        thresholds_sorted = thresholds[sort_indices]
+
+        # Remove duplicate TPR values to avoid interpolation issues
+        unique_tpr, unique_indices = np.unique(tpr_sorted, return_index=True)
+        unique_thresholds = thresholds_sorted[unique_indices]
+
+        if len(unique_tpr) < 2:
+            print("Warning: Insufficient unique TPR values for interpolation")
+            result = np.full_like(target_sig_eff, thresholds[0], dtype=float)
+            return result[0] if is_scalar else result
+
+        # Vectorized bounds checking and interpolation
+        result = np.full_like(target_sig_eff, np.nan, dtype=float)
+
+        # Handle out-of-bounds cases
+        below_min = target_sig_eff < min_eff
+        above_max = target_sig_eff > max_eff
+        valid = ~below_min & ~above_max & ~invalid_mask
+
+        if np.any(below_min):
+            result[below_min] = thresholds[np.argmin(tpr)]
+        if np.any(above_max):
+            result[above_max] = thresholds[np.argmax(tpr)]
+
+        # Vectorized interpolation for valid points
+        if np.any(valid):
+            result[valid] = self._vectorized_spline_interpolate(
+                unique_tpr, unique_thresholds, target_sig_eff[valid]
+            )
+
+        return result[0] if is_scalar else result
 
 
 class ROCAnalyzer:
@@ -389,6 +574,7 @@ class ROCAnalyzer:
             str
         ],  # names of the background taggers to include in the discriminant
         prefix: str = "",
+        custom_name: str = None,
     ):
         """
         Compute a discriminant from scratch using tagger scores and store it in the discriminants dict.
@@ -438,13 +624,17 @@ class ROCAnalyzer:
             [self.backgrounds[bg].get_var("finalWeight", pad_nan=True) for bg in background_names]
         )
 
-        bg_str = "".join(
-            [
-                SAMPLES[bg].label.replace(" ", "").replace("Multijet", "")
-                for bg in background_taggers
-            ]
-        ).replace("TTHadTTLLTTSL", "Top")
-        disc_name = f"{prefix}{signal_tagger}vs{bg_str}"
+        if custom_name:
+            disc_name = custom_name
+        else:
+            # this disc name works only when the name of the tagger score is also the name of the sample, for now default for the bdt setup
+            bg_str = "".join(
+                [
+                    SAMPLES[bg].label.replace(" ", "").replace("Multijet", "")
+                    for bg in background_taggers
+                ]
+            ).replace("TTHadTTLLTTSL", "Top")
+            disc_name = f"{prefix}{signal_tagger}vs{bg_str}"
 
         # Store the new discriminant object
         self.discriminants[disc_name] = Discriminant.from_raw_scores(
@@ -460,9 +650,38 @@ class ROCAnalyzer:
             background_names,
         )
 
+    def _get_discriminant_key(self, disc_name: str, signal_name: str = None) -> str:
+        """
+        Get the storage key for a discriminant.
+
+        Args:
+            disc_name: Base discriminant name (may already be a composite key)
+            signal_name: Signal name (optional, will try to infer if not provided)
+
+        Returns:
+            Storage key (composite key if signal_name provided, otherwise tries to find matching key)
+        """
+        # First, check if disc_name already exists as-is (handles both simple and composite keys)
+        if disc_name in self.discriminants:
+            return disc_name
+
+        # If signal_name is provided, try constructing composite key
+        if signal_name is not None:
+            composite_key = f"{disc_name}_{signal_name}"
+            if composite_key in self.discriminants:
+                return composite_key
+
+        # Search for a key that starts with disc_name (handles composite keys when signal_name not provided)
+        for key in self.discriminants:
+            if key.startswith(f"{disc_name}_"):
+                return key
+
+        # If no match found, return disc_name (will raise KeyError if doesn't exist)
+        return disc_name
+
     def fill_discriminants(
         self,
-        discriminant_names: list[str],  # name of the discriminants to fill
+        discriminant_names: list[str],  # name of the discriminants to fill (column names in events)
         signal_name: str,  # name of the signal sample
         background_names: list[str],  # names of the background samples
     ):
@@ -470,11 +689,17 @@ class ROCAnalyzer:
         Fill an existing discriminant in the discriminants dict using precomputed scores.
 
         Args:
-            discriminant_names (list[str]): Names of the discriminants to fill.
+            discriminant_names (list[str]): Names of the discriminants to fill (column names).
             signal_name (str): Name of the signal sample.
             background_names (list[str]): Names of the background samples.
+
+        Note:
+            Discriminants are stored with composite key f"{disc_name}_{signal_name}"
+            to ensure uniqueness when the same column is used for multiple signals.
         """
         for disc_name in discriminant_names:
+            # Use composite key to avoid collisions when same column is used for multiple signals
+            storage_key = f"{disc_name}_{signal_name}"
             # Compute and store signal and background scores for the signal samples
             try:
                 disc_sig = self.signals[signal_name].get_var(disc_name, pad_nan=True)
@@ -484,10 +709,10 @@ class ROCAnalyzer:
                         for bg in background_names
                     ]
                 )
-            except:
-                # TODO could do fallback on process_discriminant but needs string interpretation, which could be ambiguous. save for later.
+            except Exception as e:
                 print(
-                    f"\n WARNING: discriminant {disc_name} not found for signal {signal_name} and backgrounds {background_names}\n"
+                    f"\n WARNING: discriminant {disc_name} not found for signal {signal_name} and backgrounds {background_names}"
+                    f"\n  Error: {type(e).__name__}: {e}\n"
                 )
                 continue
 
@@ -509,9 +734,9 @@ class ROCAnalyzer:
                 f"Fraction of background that is padded: {np.sum(disc_bkg==PAD_VAL) / len(disc_bkg)}"
             )
 
-            # Store the new discriminant object
-            self.discriminants[disc_name] = Discriminant.from_disc_scores(
-                disc_name,
+            # Store the new discriminant object with composite key to avoid collisions
+            self.discriminants[storage_key] = Discriminant.from_disc_scores(
+                storage_key,  # Use composite name for unique identification in plots
                 disc_sig,
                 disc_bkg,
                 weights_sig,
@@ -521,20 +746,50 @@ class ROCAnalyzer:
                 background_names,
             )
 
-    def compute_rocs(self, verbose=True):
+    def compute_rocs(
+        self, verbose=True, compute_metrics=False, bkg_eff=DEFAULT_METRICS_BKG_EFF, parallel=False
+    ):
         """
-        Compute the ROC curves for all discriminants in parallel using joblib for speed.
-        Stores the results in self.rocs, by erasing anything already there.
+        Compute ROC curves for all discriminants (and optionally metrics).
+
+        Args:
+            verbose (bool): Whether to print timing info.
+            compute_metrics (bool): If True, also compute metrics at fixed bkg_eff.
+            bkg_eff (float): Target background efficiency for threshold evaluation of metrics.
+            parallel (bool): If True, use joblib to parallelize over discriminants.
         """
         if verbose:
             print("Start computing ROCs...")
             t0 = time.time()
 
-        # Compute both ROCs and comprehensive metrics
-        Parallel(n_jobs=-1, prefer="threads")(
-            delayed(lambda d: (d.compute_roc(), d.compute_metrics()))(disc)
-            for disc in self.discriminants.values()
-        )
+        # Compute ROCs (and optionally metrics)
+        if compute_metrics:
+
+            def _run(disc):
+                return disc.compute_roc(), disc.compute_metrics(bkg_eff=bkg_eff)
+
+        else:
+
+            def _run(disc):
+                return disc.compute_roc(), None
+
+        discs = list(self.discriminants.values())
+
+        if parallel:
+            import os
+
+            # cap workers to avoid oversubscription and needless overhead
+            n_jobs = min(len(discs), os.cpu_count() or 1)
+            results = Parallel(n_jobs=n_jobs, prefer="threads")(
+                delayed(_run)(disc) for disc in discs
+            )
+        else:
+            results = [_run(disc) for disc in discs]
+
+        for disc, (roc, metrics) in zip(discs, results):
+            disc.roc = roc
+            if metrics is not None:
+                disc.metrics = metrics
 
         if verbose:
             t1 = time.time()
@@ -594,6 +849,7 @@ class ROCAnalyzer:
         background_names_groups: list[list[str]],
         plot_dir: Path | str,
         nbins: int = 100,
+        signal_name: str = None,
     ):
         """
         Plot discriminant score distributions for signal and grouped background samples.
@@ -601,18 +857,24 @@ class ROCAnalyzer:
         This method creates a histogram showing the distribution of discriminant scores for signal events and background events grouped according to the provided background_names_groups.
 
         Args:
-            disc (discriminant): discriminant object containing scores, labels, weights, and metadata.
+            disc_name (str): Name of the discriminant to plot.
             background_names_groups (list[list[str]]): List of background sample groups to plot together.
                 Each inner list contains background sample names that will be combined into one histogram.
                 Example: [["qcd", "ttbar"], ["wjets", "zjets"]] creates two background histograms.
             plot_dir (Path): Directory where the plot will be saved. Creates a "scores" subdirectory.
             nbins (int, optional): Number of bins for the histogram. Defaults to 100.
+            signal_name (str, optional): Signal name used to construct composite keys. If None, will try to infer.
 
         Returns:
             None: The plot is saved to plot_dir/scores/ with an automatically generated filename.
         """
 
-        disc = self.discriminants[disc_name]
+        disc_key = self._get_discriminant_key(disc_name, signal_name)
+        if disc_key not in self.discriminants:
+            raise KeyError(
+                f"Discriminant '{disc_name}' (key: '{disc_key}') not found. Available keys: {list(self.discriminants.keys())}"
+            )
+        disc = self.discriminants[disc_key]
 
         # if background_names_groups is a list of strings, convert it to a list of lists
         if isinstance(background_names_groups, list) and not isinstance(
@@ -656,12 +918,6 @@ class ROCAnalyzer:
             for background_group in background_names_groups
         ]
 
-        # print("discs",([sig_disc] + bkg_disc_groups))
-        # print("names",[disc.get_signal_name()] + bkg_names_groups)
-        # print("weights",[disc.get_weights()[disc.get_binary_labels() == 1]]
-        #                 + bkg_weights_groups)
-        # print("\n\n")
-
         plotting.plot_hist(
             [sig_disc] + bkg_disc_groups,
             [disc.get_signal_name()] + bkg_names_groups,
@@ -676,35 +932,47 @@ class ROCAnalyzer:
             name=f"{disc_name}_{'_'.join(''.join(background_group) for background_group in background_names_groups)}",
         )
 
-    def plot_rocs(self, title, disc_names, plot_dir, thresholds=None):
+    def plot_rocs(self, title, disc_names, plot_dir, thresholds=None, signal_name=None):
         """
         Plot the ROC curves for a set of discriminants using the plotting utilities.
 
         Args:
             title (str): Title of the plot.
-            discs (list[Discriminant]): Names of the discriminants to plot. Assumes that the signal name is the same for all discriminants.
+            disc_names (list[str]): Names of the discriminants to plot. Assumes that the signal name is the same for all discriminants.
             plot_dir (Path): Directory to save the plot.
+            thresholds (list[float], optional): Threshold values to mark on ROC curves.
+            signal_name (str, optional): Signal name used to construct composite keys. If None, will try to infer.
         """
         # Check that the folder exists
         (plot_dir / "rocs").mkdir(parents=True, exist_ok=True)
 
         if thresholds is None:
-            thresholds = [0.7, 0.9, 0.95, 0.99]
+            thresholds = [0.3, 0.7, 0.9, 0.95]
+
+        # Get discriminant keys (with composite keys if needed)
+        disc_keys = [self._get_discriminant_key(disc_name, signal_name) for disc_name in disc_names]
+
+        # Check that all keys exist
+        missing_keys = [key for key in disc_keys if key not in self.discriminants]
+        if missing_keys:
+            raise KeyError(
+                f"Discriminants not found: {missing_keys}. Available keys: {list(self.discriminants.keys())}"
+            )
 
         # check that all discriminants have the same signal name
-        signal_name = self.discriminants[disc_names[0]].get_signal_name()
-        for disc_name in disc_names:
-            if self.discriminants[disc_name].get_signal_name() != signal_name:
+        disc_signal_name = self.discriminants[disc_keys[0]].get_signal_name()
+        for disc_key in disc_keys:
+            if self.discriminants[disc_key].get_signal_name() != disc_signal_name:
                 print(
-                    f"Warning: Discriminant {disc_name} has a different signal name than {signal_name}. Aborting."
+                    f"Warning: Discriminant {disc_key} has a different signal name than {disc_signal_name}. Aborting."
                 )
                 return
 
         plotting.multiROCCurve(
             {
                 "": {
-                    disc_name: self.discriminants[disc_name].get_roc(unpacked=True)
-                    for disc_name in disc_names
+                    disc_name: self.discriminants[disc_key].get_roc(unpacked=True)
+                    for disc_name, disc_key in zip(disc_names, disc_keys)
                 }
             },
             title=title,
@@ -717,9 +985,14 @@ class ROCAnalyzer:
         )
 
     def compute_confusion_matrix(
-        self, discriminant_name, sig_vs_bkg=True, threshold=0.5, plot_dir=None, normalize=True
+        self, discriminant_name, threshold=0.5, plot_dir=None, normalize=True, signal_name=None
     ):
-        disc = self.discriminants[discriminant_name]
+        disc_key = self._get_discriminant_key(discriminant_name, signal_name)
+        if disc_key not in self.discriminants:
+            raise KeyError(
+                f"Discriminant '{discriminant_name}' (key: '{disc_key}') not found. Available keys: {list(self.discriminants.keys())}"
+            )
+        disc = self.discriminants[disc_key]
         disc_scores = disc.disc_scores
         extended_labels = disc.extended_labels
         bkg_names = list(disc.bkg_names)
@@ -734,13 +1007,8 @@ class ROCAnalyzer:
         label_to_col = {name: i for i, name in enumerate(col_names)}
 
         # Rows: 0 = predicted background, 1 = predicted signal
-        n_rows = 2 if sig_vs_bkg else len(col_names)
-
-        # Predicted class: 1 (signal) if disc_score >= threshold else 0 (background); otherwise just argmax of output
-        if sig_vs_bkg:
-            y_pred = (disc_scores >= threshold).astype(int)
-        else:
-            y_pred = np.argmax(disc_scores, axis=1)
+        n_rows = 2
+        y_pred = (disc_scores >= threshold).astype(int)
 
         # True class: index in col_names, determined from extended_labels
         y_true = np.array([label_to_col.get(lbl, n_cols - 1) for lbl in extended_labels])
@@ -799,10 +1067,12 @@ class ROCAnalyzer:
             (plot_dir / "confusion_matrix").mkdir(parents=True, exist_ok=True)
             suffix = "_normalized" if normalize else ""
             fig.savefig(
-                plot_dir / "confusion_matrix" / f"2byN_weighted{suffix}.png", bbox_inches="tight"
+                plot_dir / "confusion_matrix" / f"2byN_weighted{disc.get_name()}_{suffix}.png",
+                bbox_inches="tight",
             )
             fig.savefig(
-                plot_dir / "confusion_matrix" / f"2byN_weighted{suffix}.pdf", bbox_inches="tight"
+                plot_dir / "confusion_matrix" / f"2byN_weighted{disc.get_name()}_{suffix}.pdf",
+                bbox_inches="tight",
             )
         plt.close(fig)
 

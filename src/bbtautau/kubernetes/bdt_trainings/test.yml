@@ -1,0 +1,48 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bbtautau-bdt-test
+  labels:
+    type: bbtautau
+spec:
+  template:
+    spec:
+      containers:
+      - name: bbtautau
+        image: gitlab-registry.nrp-nautilus.io/ludomori99/bbtautau-docker:latest
+        command:
+          - "/bin/bash"
+          - "-c"
+          - >
+            git clone --single-branch --recurse-submodules --branch kube https://github.com/LPC-HH/bbtautau.git /opt/repo/bbtautau &&
+            mkdir -p /bbtautauvol/bdt/test/ &&
+            pip install -e /opt/repo/bbtautau &&
+            pip install -e /opt/repo/bbtautau/boostedhh &&
+            python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --train --model test
+            --save-dir /bbtautauvol/bdt/test --data-path /bbtautauvol/25Sep23AddVars_v12_private_signal/ --tt-preselection --signal-key vbfbbtt
+            | tee /bbtautauvol/bdt/test/log.txt
+        volumeMounts:
+        - mountPath: /bbtautauvol
+          name: bbtautauvol
+        resources:
+          limits:
+            memory: 32Gi
+            cpu: "8"
+          requests:
+            memory: 32Gi
+            cpu: "6"
+      volumes:
+      - name: bbtautauvol
+        persistentVolumeClaim:
+          claimName: bbtautauvol
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values:
+                      - service-02.nrp.mghpcc.org
+      restartPolicy: Never
+  backoffLimit: 0
