@@ -102,49 +102,47 @@ SAMPLES = {
         label="TT LL",
         isSignal=False,
     ),
-    # todo: (only for 2024) Not all samples have been fully processed yet, so this is temporarily commented out;
-    # If running 2022 + 2023, please uncomment.
-
-    # "dyjets": Sample(
-    #     selector="^DYto2L",
-    #     label="DY+Jets",
-    #     isSignal=False,
-    # ),
-    # "wjets": Sample(
-    #     selector="^(Wto2Q-2Jets|WtoLnu-2Jets)",
-    #     label="W+Jets",
-    #     isSignal=False,
-    # ),
-    # "zjets": Sample(
-    #     selector="^Zto2Q-2Jets",
-    #     label="Z+Jets",
-    #     isSignal=False,
-    # ),
-    # "hbb": Sample(
-    #     selector="^(GluGluHto2B|VBFHto2B|WminusH_Hto2B|WplusH_Hto2B|ZH_Hto2B|ggZH_Hto2B)",
-    #     label="Hbb",
-    #     isSignal=False,
-    # ),
+    "dyjets": Sample(
+        selector="^DYto2",
+        # selector="^DYto2L",
+        label="DY+Jets",
+        isSignal=False,
+    ),
+    "wjets": Sample(
+        selector="^(Wto2Q-2Jets|WtoLnu-2Jets)",
+        label="W+Jets",
+        isSignal=False,
+    ),
+    "zjets": Sample(
+        selector="^Zto2Q-2Jets",
+        label="Z+Jets",
+        isSignal=False,
+    ),
+    "hbb": Sample(
+        selector="^(GluGluHto2B|VBFHto2B|WminusH_Hto2B|WplusH_Hto2B|ZH_Hto2B|ggZH_Hto2B)",
+        label="Hbb",
+        isSignal=False,
+    ),
     "ggfbbtt": Sample(
         selector=hh_vars.bbtt_sigs["ggfbbtt"],
         label=r"ggF HHbb$\tau\tau$",
         isSignal=True,
     ),
-    # "ggfbbtt-kl0p00": Sample(
-    # selector=hh_vars.bbtt_sigs["ggfbbtt-kl0p00"],
-    # label=r"ggF HHbb$\tau\tau$ ($\kappa_\lambda=0$)",
-    # isSignal=True,
-    # ),
-    # "ggfbbtt-kl2p45": Sample(
-    #     selector=hh_vars.bbtt_sigs["ggfbbtt-kl2p45"],
-    #     label=r"ggF HHbb$\tau\tau$ ($\kappa_\lambda=2.45$)",
-    #     isSignal=True,
-    # ),
-    # "ggfbbtt-kl5p00": Sample(
-    #     selector=hh_vars.bbtt_sigs["ggfbbtt-kl5p00"],
-    #     label=r"ggF HHbb$\tau\tau$ ($\kappa_\lambda=5.00$)",
-    #     isSignal=True,
-    # ),
+    "ggfbbtt-kl0p00": Sample(
+    selector=hh_vars.bbtt_sigs["ggfbbtt-kl0p00"],
+    label=r"ggF HHbb$\tau\tau$ ($\kappa_\lambda=0$)",
+    isSignal=True,
+    ),
+    "ggfbbtt-kl2p45": Sample(
+        selector=hh_vars.bbtt_sigs["ggfbbtt-kl2p45"],
+        label=r"ggF HHbb$\tau\tau$ ($\kappa_\lambda=2.45$)",
+        isSignal=True,
+    ),
+    "ggfbbtt-kl5p00": Sample(
+        selector=hh_vars.bbtt_sigs["ggfbbtt-kl5p00"],
+        label=r"ggF HHbb$\tau\tau$ ($\kappa_\lambda=5.00$)",
+        isSignal=True,
+    ),
     "vbfbbtt": Sample(
         selector=hh_vars.bbtt_sigs["vbfbbtt"],
         label=r"VBF HHbb$\tau\tau$ (SM)",
@@ -156,57 +154,57 @@ SAMPLES = {
         isSignal=True,
     ),
     # BSM VBF samples (no own regions - contribute to ggf/vbf like vbfbbtt-k2v0)
-    # "vbfbbtt-kv1p74-k2v1p37-kl14p4": Sample(
-    #     selector=hh_vars.bbtt_sigs["vbfbbtt-kv1p74-k2v1p37-kl14p4"],
-    #     label=r"VBF HHbb$\tau\tau$ (BSM)",
-    #     isSignal=True,
-    # ),
-    # "vbfbbtt-kvm0p758-k2v1p44-klm19p3": Sample(
-    #     selector=hh_vars.bbtt_sigs["vbfbbtt-kvm0p758-k2v1p44-klm19p3"],
-    #     label=r"VBF HHbb$\tau\tau$ (BSM)",
-    #     isSignal=True,
-    # ),
-    # "vbfbbtt-kvm0p962-k2v0p959-klm1p43": Sample(
-    #     selector=hh_vars.bbtt_sigs["vbfbbtt-kvm0p962-k2v0p959-klm1p43"],
-    #     label=r"VBF HHbb$\tau\tau$ (BSM)",
-    #     isSignal=True,
-    # ),
-    # "vbfbbtt-kvm1p6-k2v2p72-klm1p36": Sample(
-    #     selector=hh_vars.bbtt_sigs["vbfbbtt-kvm1p6-k2v2p72-klm1p36"],
-    #     label=r"VBF HHbb$\tau\tau$ (BSM)",
-    #     isSignal=True,
-    # ),
+    "vbfbbtt-kv1p74-k2v1p37-kl14p4": Sample(
+        selector=hh_vars.bbtt_sigs["vbfbbtt-kv1p74-k2v1p37-kl14p4"],
+        label=r"VBF HHbb$\tau\tau$ (BSM)",
+        isSignal=True,
+    ),
+    "vbfbbtt-kvm0p758-k2v1p44-klm19p3": Sample(
+        selector=hh_vars.bbtt_sigs["vbfbbtt-kvm0p758-k2v1p44-klm19p3"],
+        label=r"VBF HHbb$\tau\tau$ (BSM)",
+        isSignal=True,
+    ),
+    "vbfbbtt-kvm0p962-k2v0p959-klm1p43": Sample(
+        selector=hh_vars.bbtt_sigs["vbfbbtt-kvm0p962-k2v0p959-klm1p43"],
+        label=r"VBF HHbb$\tau\tau$ (BSM)",
+        isSignal=True,
+    ),
+    "vbfbbtt-kvm1p6-k2v2p72-klm1p36": Sample(
+        selector=hh_vars.bbtt_sigs["vbfbbtt-kvm1p6-k2v2p72-klm1p36"],
+        label=r"VBF HHbb$\tau\tau$ (BSM)",
+        isSignal=True,
+    ),
 }
 
 # Do not include the unified SM signal below
 SIGNALS = [
     "ggfbbtt",
-    # "ggfbbtt-kl0p00",
-    # "ggfbbtt-kl2p45",
-    # "ggfbbtt-kl5p00",
+    "ggfbbtt-kl0p00",
+    "ggfbbtt-kl2p45",
+    "ggfbbtt-kl5p00",
     "vbfbbtt",
     "vbfbbtt-k2v0",
-    # "vbfbbtt-kv1p74-k2v1p37-kl14p4",
-    # "vbfbbtt-kvm0p758-k2v1p44-klm19p3",
-    # "vbfbbtt-kvm0p962-k2v0p959-klm1p43",
-    # "vbfbbtt-kvm1p6-k2v2p72-klm1p36",
+    "vbfbbtt-kv1p74-k2v1p37-kl14p4",
+    "vbfbbtt-kvm0p758-k2v1p44-klm19p3",
+    "vbfbbtt-kvm0p962-k2v0p959-klm1p43",
+    "vbfbbtt-kvm1p6-k2v2p72-klm1p36",
 ]
 SIGNALS_CHANNELS = []
 
 SM_SIGNALS = ["ggfbbtt", "vbfbbtt"]
 SM_SIGNALS_CHANNELS = []
 
-# sig_keys_ggf = ["ggfbbtt", "ggfbbtt-kl0p00", "ggfbbtt-kl2p45", "ggfbbtt-kl5p00"]
-sig_keys_ggf = ["ggfbbtt"]
-# sig_keys_vbf = [
-#     "vbfbbtt",
-#     "vbfbbtt-k2v0",
-#     "vbfbbtt-kv1p74-k2v1p37-kl14p4",
-#     "vbfbbtt-kvm0p758-k2v1p44-klm19p3",
-#     "vbfbbtt-kvm0p962-k2v0p959-klm1p43",
-#     "vbfbbtt-kvm1p6-k2v2p72-klm1p36",
-# ]
-sig_keys_vbf = ["vbfbbtt", "vbfbbtt-k2v0"]
+sig_keys_ggf = ["ggfbbtt", "ggfbbtt-kl0p00", "ggfbbtt-kl2p45", "ggfbbtt-kl5p00"]
+# sig_keys_ggf = ["ggfbbtt"]
+sig_keys_vbf = [
+    "vbfbbtt",
+    "vbfbbtt-k2v0",
+    "vbfbbtt-kv1p74-k2v1p37-kl14p4",
+    "vbfbbtt-kvm0p758-k2v1p44-klm19p3",
+    "vbfbbtt-kvm0p962-k2v0p959-klm1p43",
+    "vbfbbtt-kvm1p6-k2v2p72-klm1p36",
+]
+# sig_keys_vbf = ["vbfbbtt", "vbfbbtt-k2v0"]
 
 # add individual bbtt channels
 for signal in SIGNALS:
@@ -226,10 +224,10 @@ BGS = [
     "ttbarhad",
     "ttbarsl",
     "ttbarll",
-    # "dyjets",
-    # "wjets",
-    # "zjets",
-    # "hbb",
+    "dyjets",
+    "wjets",
+    "zjets",
+    "hbb",
 ]
 
 single_h_keys = ["hbb"]

@@ -114,14 +114,14 @@ def extract_base_signal_key(sig_key_with_channel: str) -> str:
     # If running 2022 + 2023, please uncomment.
     
     for base_sig in [
-        # "ggfbbtt-kl5p00",
-        # "ggfbbtt-kl2p45",
-        # "ggfbbtt-kl0p00",
+        "ggfbbtt-kl5p00",
+        "ggfbbtt-kl2p45",
+        "ggfbbtt-kl0p00",
         "ggfbbtt",
-        # "vbfbbtt-kvm1p6-k2v2p72-klm1p36",
-        # "vbfbbtt-kvm0p962-k2v0p959-klm1p43",
-        # "vbfbbtt-kvm0p758-k2v1p44-klm19p3",
-        # "vbfbbtt-kv1p74-k2v1p37-kl14p4",
+        "vbfbbtt-kvm1p6-k2v2p72-klm1p36",
+        "vbfbbtt-kvm0p962-k2v0p959-klm1p43",
+        "vbfbbtt-kvm0p758-k2v1p44-klm19p3",
+        "vbfbbtt-kv1p74-k2v1p37-kl14p4",
         "vbfbbtt-k2v0",
         "vbfbbtt",
     ]:

@@ -214,12 +214,9 @@ mc_samples = OrderedDict(
         ("ttbarll", "ttbarll"),
         ("ttbarhad", "ttbarhad"),
         # ("dyjets", "dyjets"),
-        
-        # todo: (only for 2024) Not all samples have been fully processed yet, so this is temporarily commented out;
-        # If running 2022 + 2023, please uncomment.
-        # ("wjets", "wjets"),
-        # ("zjets", "zjets"),
-        # ("hbb", "hbb"),
+        ("wjets", "wjets"),
+        ("zjets", "zjets"),
+        ("hbb", "hbb"),
     ]
 )
 
