@@ -109,10 +109,6 @@ def extract_base_signal_key(sig_key_with_channel: str) -> str:
         "vbfbbtthm" -> "vbfbbtt"
     """
     # Check longer names first so "vbfbbtt-k2v0hh" doesn't match "vbfbbtt"
-
-    # todo: (only for 2024) Not all samples have been fully processed yet, so this is temporarily commented out;
-    # If running 2022 + 2023, please uncomment.
-    
     for base_sig in [
         "ggfbbtt-kl5p00",
         "ggfbbtt-kl2p45",
