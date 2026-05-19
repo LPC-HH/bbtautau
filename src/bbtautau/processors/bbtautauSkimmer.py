@@ -257,6 +257,18 @@ class bbtautauSkimmer(SkimmerABC):
 
             # glopart variables
             glopart_vars = [
+                "TopbWev",
+                "TopbWmv",
+                "TopbWq",
+                "TopbWqq",
+                "TopbWtauhv",
+                "Xbb",
+                "Xcc",
+                "Xcs",
+                "Xqq",
+                "Xtauhtaue",
+                "Xtauhtauh",
+                "Xtauhtaum",
                 # Derived variables
                 "massResCorr",
                 "massVisCorr",

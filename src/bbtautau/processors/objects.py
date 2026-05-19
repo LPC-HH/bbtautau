@@ -75,12 +75,21 @@ def get_ak8jets(fatjets: FatJetArray, nano_version: str):
     elif nano_version.startswith("v15"):
         fatjets["globalParT_QCD"] = fatjets.globalParT3_QCD
         fatjets["globalParT_Top"] = fatjets.globalParT3_TopbWev + fatjets.globalParT3_TopbWmv + fatjets.globalParT3_TopbWq + fatjets.globalParT3_TopbWqq + fatjets.globalParT3_TopbWtauhv
+        fatjets["globalParT_TopbWev"] = fatjets.globalParT3_TopbWev
+        fatjets["globalParT_TopbWmv"] = fatjets.globalParT3_TopbWmv
+        fatjets["globalParT_TopbWq"] = fatjets.globalParT3_TopbWq
+        fatjets["globalParT_TopbWqq"] = fatjets.globalParT3_TopbWqq
+        fatjets["globalParT_TopbWtauhv"] = fatjets.globalParT3_TopbWtauhv
         fatjets["globalParT_XbbvsQCD"] = fatjets.globalParT3_Xbb / (
             fatjets.globalParT3_Xbb + fatjets["globalParT_QCD"]
         )
         fatjets["globalParT_XbbvsQCDTop"] = fatjets.globalParT3_Xbb / (
             fatjets.globalParT3_Xbb + fatjets["globalParT_QCD"] + fatjets["globalParT_Top"]
         )
+        fatjets["globalParT_Xbb"] = fatjets.globalParT3_Xbb
+        fatjets["globalParT_Xcc"] = fatjets.globalParT3_Xcc
+        fatjets["globalParT_Xcs"] = fatjets.globalParT3_Xcs
+        fatjets["globalParT_Xqq"] = fatjets.globalParT3_Xqq
         for tautau in ["tauhtauh", "tauhtaue", "tauhtaum"]:
             fatjets[f"globalParT_X{tautau}vsQCD"] = fatjets[f"globalParT3_X{tautau}"] / (
                 fatjets[f"globalParT3_X{tautau}"] + fatjets["globalParT_QCD"]
@@ -88,6 +97,7 @@ def get_ak8jets(fatjets: FatJetArray, nano_version: str):
             fatjets[f"globalParT_X{tautau}vsQCDTop"] = fatjets[f"globalParT3_X{tautau}"] / (
                 fatjets[f"globalParT3_X{tautau}"] + fatjets["globalParT_QCD"] + fatjets["globalParT_Top"]
             )
+            fatjets[f"globalParT_X{tautau}"] = fatjets[f"globalParT3_X{tautau}"]
 
     if nano_version.startswith("v12"):
         fatjets["globalParT_massResCorr"] = fatjets.globalParT_massRes

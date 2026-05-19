@@ -247,7 +247,7 @@ def get_columns(
     if year == "2024":
         if ParT_taggers:
             for branch in (
-                [f"ak8FatJetParT{key}" for key in Samples.qcdouts_v15 + Samples.topouts_v15]
+                [f"ak8FatJetParT{key}" for key in Samples.qcdouts_v15 + Samples.topouts_v15 + Samples.sigouts]
                 + [
                     f"ak8FatJetParT{key}vsQCD" for key in Samples.sigouts
                 ]  # remove exception in muon channel, was only necessary in old ntuples
@@ -678,36 +678,16 @@ def bbtautau_assignment(
             sig_labels = [ch.tagger_label for ch in CHANNELS.values()]
             # 2024, v15, the ParT score is different from v12
             print(sig_labels)
-            if is_2024:
-                num = (
-                    (sample.get_var(f"ak8FatJetParTX{sig_labels[0]}vsQCD")
-                    * sample.get_var("ak8FatJetParTQCD"))
-                    / (1-sample.get_var(f"ak8FatJetParTX{sig_labels[0]}vsQCD"))
-                    + 
-                    (sample.get_var(f"ak8FatJetParTX{sig_labels[1]}vsQCD")
-                    * sample.get_var("ak8FatJetParTQCD"))
-                    / (1-sample.get_var(f"ak8FatJetParTX{sig_labels[1]}vsQCD"))
-                    + 
-                    (sample.get_var(f"ak8FatJetParTX{sig_labels[1]}vsQCD")
-                    * sample.get_var("ak8FatJetParTQCD"))
-                    / (1-sample.get_var(f"ak8FatJetParTX{sig_labels[1]}vsQCD"))
-                ) / 3
-                denom = num + sample.get_var("ak8FatJetParTQCD")
-                combined_score = np.divide(
-                    num, denom, out=np.zeros_like(num), where=((num != PAD_VAL) & (denom != 0))
-                )
-                tautau_pick = np.argmax(combined_score, axis=1)
-            else:
-                num = (
-                    sample.get_var(f"ak8FatJetParTX{sig_labels[0]}")
-                    + sample.get_var(f"ak8FatJetParTX{sig_labels[1]}")
-                    + sample.get_var(f"ak8FatJetParTX{sig_labels[2]}")
-                ) / 3
-                denom = num + sample.get_var("ak8FatJetParTQCD")
-                combined_score = np.divide(
-                    num, denom, out=np.zeros_like(num), where=((num != PAD_VAL) & (denom != 0))
-                )
-                tautau_pick = np.argmax(combined_score, axis=1)
+            num = (
+                sample.get_var(f"ak8FatJetParTX{sig_labels[0]}")
+                + sample.get_var(f"ak8FatJetParTX{sig_labels[1]}")
+                + sample.get_var(f"ak8FatJetParTX{sig_labels[2]}")
+            ) / 3
+            denom = num + sample.get_var("ak8FatJetParTQCD")
+            combined_score = np.divide(
+                num, denom, out=np.zeros_like(num), where=((num != PAD_VAL) & (denom != 0))
+            )
+            tautau_pick = np.argmax(combined_score, axis=1)
         else:
             tautau_pick = np.argmax(
                 sample.get_var(f"ak8FatJetParTX{channel.tagger_label}vsQCD"), axis=1
