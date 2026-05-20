@@ -9,7 +9,9 @@ from boostedhh import utils
 
 years_2022 = ["2022", "2022EE"]
 years_2023 = ["2023", "2023BPix"]
+years_2024 = ["2024"]
 years = years_2022 + years_2023
+years_all = years + years_2024
 
 
 @dataclass
@@ -39,12 +41,12 @@ class HLTs:
             # 2023 after 6fb-1, that is from Run2023C_0v2 to Run2023C_0v3
             HLT(
                 name="HLT_AK8PFJet230_SoftDropMass40_PNetBB0p06",
-                years=years_2023,
+                years=years_2023 + years_2024,
                 dataset="JetMET",
             ),
             HLT(
                 name="HLT_AK8PFJet230_SoftDropMass40_PNetTauTau0p03",
-                years=years_2023,
+                years=years_2023 + years_2024,
                 dataset="JetMET",
             ),
         ],
@@ -57,6 +59,11 @@ class HLTs:
             HLT(
                 name="HLT_AK8PFJet425_SoftDropMass40",
                 years=years,
+                dataset="JetMET",
+            ),
+            HLT(
+                name="HLT_AK8PFJet425_SoftDropMass30",
+                years=years_2024,
                 dataset="JetMET",
             ),
         ],
@@ -88,25 +95,37 @@ class HLTs:
                 dataset="JetMET",
                 channel=["hh"],
             ),
+            HLT(
+                name="HLT_QuadPFJet103_88_75_15_PNet2BTag_0p4_0p12_VBF1",
+                years=years_2024,
+                dataset="JetMET",
+                channel=["hh"],
+            ),
+            HLT(
+                name="HLT_QuadPFJet103_88_75_15_PNetBTag_0p4_VBF2",
+                years=years_2024,
+                dataset="JetMET",
+                channel=["hh"],
+            ),
         ],
         "singletau": [
             HLT(
                 name="HLT_LooseDeepTauPFTauHPS180_L2NN_eta2p1",
-                years=years,
+                years=years_all,
                 dataset="Tau",
             ),
         ],
         "ditau": [
             HLT(
                 name="HLT_DoubleMediumDeepTauPFTauHPS35_L2NN_eta2p1",
-                years=years,
+                years=years_all,
                 dataset="Tau",
             ),
         ],
         "ditaujet": [
             HLT(
                 name="HLT_DoubleMediumDeepTauPFTauHPS30_L2NN_eta2p1_PFJet60",
-                years=years,
+                years=years_all,
                 dataset="Tau",
                 channel=["hh"],
             ),
@@ -120,14 +139,14 @@ class HLTs:
         "muon": [
             HLT(
                 name="HLT_IsoMu24",
-                years=years,
+                years=years_all,
                 dataset="Muon",
                 channel=["hm"],
             ),
             # TODO: check sensitivity without below triggers
             HLT(
                 name="HLT_Mu50",
-                years=years,
+                years=years_all,
                 dataset="Muon",
                 channel=["hm"],
             ),
@@ -135,7 +154,7 @@ class HLTs:
         "muontau": [
             HLT(
                 name="HLT_IsoMu20_eta2p1_LooseDeepTauPFTauHPS27_eta2p1_CrossL1",
-                years=years,
+                years=years_all,
                 dataset="Muon",
                 channel=["hm"],
             ),
@@ -143,25 +162,25 @@ class HLTs:
         "egamma": [
             HLT(
                 name="HLT_Ele30_WPTight_Gsf",
-                years=years,
+                years=years_all,
                 dataset="EGamma",
                 channel=["he"],
             ),
             HLT(
                 name="HLT_Ele115_CaloIdVT_GsfTrkIdT",
-                years=years,
+                years=years_all,
                 dataset="EGamma",
                 channel=["he"],
             ),
             HLT(
                 name="HLT_Ele50_CaloIdVT_GsfTrkIdT_PFJet165",
-                years=years,
+                years=years_all,
                 dataset="EGamma",
                 channel=["he"],
             ),
             HLT(
                 name="HLT_Photon200",
-                years=years,
+                years=years_all,
                 dataset="EGamma",
                 channel=["he"],
             ),
@@ -169,7 +188,7 @@ class HLTs:
         "etau": [
             HLT(
                 name="HLT_Ele24_eta2p1_WPTight_Gsf_LooseDeepTauPFTauHPS30_eta2p1_CrossL1",
-                years=years,
+                years=years_all,
                 dataset="EGamma",
                 channel=["he"],
             ),
@@ -177,7 +196,7 @@ class HLTs:
         "met": [
             HLT(
                 name="HLT_PFMET120_PFMHT120_IDTight",
-                years=years,
+                years=years_all,
                 dataset="JetMET",
             ),
         ],
@@ -185,13 +204,13 @@ class HLTs:
             # Moved to Parking in 2023 after 6fb-1
             HLT(
                 name="HLT_PFHT280_QuadPFJet30_PNet2BTagMean0p55",
-                years=["2023BPix"],
+                years=["2023BPix"] + years_2024,
                 dataset="ParkingHH",
                 channel=["hh"],
             ),
             HLT(
                 name="HLT_PFHT340_QuadPFJet70_50_40_40_PNet2BTagMean0p70",
-                years=years_2023,
+                years=years_2023 + years_2024,
                 dataset="ParkingHH",
                 channel=["hh"],
             ),
@@ -252,7 +271,7 @@ class HLTs:
                 for sublist in cls.hlt_dict(year, as_str=False, **hlt_kwargs).values()
                 for hlt in sublist
             ]
-            for year in years
+            for year in years_all
         }
 
     @classmethod
