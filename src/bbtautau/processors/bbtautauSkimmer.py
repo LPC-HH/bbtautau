@@ -65,6 +65,7 @@ class bbtautauSkimmer(SkimmerABC):
         "MET": {
             "pt": "Pt",
             "phi": "Phi",
+            "significance": "significance",
         },
         "Lepton": {
             **P4,
@@ -180,6 +181,33 @@ class bbtautauSkimmer(SkimmerABC):
         self.jmsr_vars = ["msoftdrop", "particleNet_mass_legacy", "ParTmassVis", "ParTmassRes"]
 
         # particlenet legacy variables
+        pnet_vars_legacy = [
+            "Xbb",
+            "QCD",
+            "QCDb",
+            "QCDbb",
+            "QCDcc",
+            "QCDc",
+            "QCDothers",
+            "XbbvsQCD",
+            "mass",
+        ]
+        self.skim_vars["FatJet"] = {
+            **self.skim_vars["FatJet"],
+            **{f"particleNetLegacy_{var}": f"PNet{var}Legacy" for var in pnet_vars_legacy},
+        }
+
+        # particlenet NOT legacy variables
+        pnet_vars = [
+            "XbbVsQCD",
+            "XteVsQCD",
+            "XtmVsQCD",
+            "XttVsQCD",
+        ]
+        self.skim_vars["FatJet"] = {
+            **self.skim_vars["FatJet"],
+            **{f"particleNet_{var}": f"PNet{var}" for var in pnet_vars},
+        }
 
         # 2022+2023, v12, more QCD/Top/ParTs var
         if nano_version.startswith("v12"):
@@ -295,33 +323,27 @@ class bbtautauSkimmer(SkimmerABC):
         ca_vars = [
             "tau_number",
             "tau_number_in_fatjet",
-            
             "globalParT_massVisApplied_oneHPSTau",
             "globalParT_massVisApplied_oneHPSTau_thth",
             "globalParT_massVisApplied_oneHPSTauorMuon_thtm",
             "globalParT_massVisApplied_oneHPSTauorElectron_thte",
             "globalParT_massVisApplied_with_delta_axis_merged",
             "globalParT_massVisApplied_oneHPSTauorLepton_flag",
-
             "globalParT_massVisApplied_000_fatjetwithMET",
             "globalParT_massVisApplied_000_fatjet",
             "globalParT_massVisApplied_000_fatjet_MET_with_same_dirc",
-
             "mass_merged",
             "msoftdrop_merged",
             "globalParT_massVisApplied_merged",
             "globalParT_massResApplied_merged",
             "particleNet_mass_legacy_merged",
             "Tauflag",
-
             "one_elec_in_fatjet",
             "one_muon_in_fatjet",
             "one_elec",
             "one_muon",
-
             "mass_fatjet_et",
             "mass_fatjet_mt",
-
             "isDauTau",
             "mass",
             "msoftdrop",
@@ -341,7 +363,6 @@ class bbtautauSkimmer(SkimmerABC):
             "mass_boostedtaus",
             "nsubjets_perfatjets",
             "mass_fatjets",
-
             "mass_mt",
             "msoftdrop_mt",
             "globalParT_massVisApplied_mt",
@@ -364,7 +385,6 @@ class bbtautauSkimmer(SkimmerABC):
             "muon_subjet_dr02",
             "mass_subjets_mt_1",
             "mass_subjets_mt_0",
-
             "mass_et",
             "msoftdrop_et",
             "globalParT_massVisApplied_et",
@@ -548,7 +568,6 @@ class bbtautauSkimmer(SkimmerABC):
         #     jmr_values={key: [1.0, 0.9, 1.1] for key in self.jmsr_vars},
         #     isData=isData,
         # )
-
 
         # fatjets = objects.get_CA_MASS(fatjets, boostedtaus, met, subjets, muons, electrons)
         fatjets = objects.get_CA_MASS(fatjets, taus, met, subjets, muons, electrons)
@@ -820,6 +839,7 @@ class bbtautauSkimmer(SkimmerABC):
             cut_bb = (
                 np.sum(
                     ak8FatJetVars["ak8FatJetParTXbbvsQCDTop"] >= self.preselection["glopart-v2"],
+                    # ak8FatJetVars["ak8FatJetPNetXbbVsQCD"] >= self.preselection["pnet-v12"],
                     axis=1,
                 )
                 >= 1
@@ -827,9 +847,7 @@ class bbtautauSkimmer(SkimmerABC):
             add_selection("ak8_bb_preselection", cut_bb, *selection_args)
 
         if self._prescale_factor:
-            cut_prescale = (
-                events.event % self._prescale_factor == 0
-            )
+            cut_prescale = events.event % self._prescale_factor == 0
             add_selection("prescale", cut_prescale, *selection_args)
 
         print("Selection", f"{time.time() - start:.2f}")

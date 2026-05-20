@@ -122,7 +122,7 @@ parser.add_argument(
     "--nTF-per-channel",
     default=None,
     type=str,
-    help="Per-channel TF orders: JSON file path or inline JSON. Format: {\"ggfbbtt\": {\"hh\": 0, \"he\": 1, \"hm\": 0}, \"vbfbbtt\": {...}}. Overrides --nTF when set.",
+    help='Per-channel TF orders: JSON file path or inline JSON. Format: {"ggfbbtt": {"hh": 0, "he": 1, "hm": 0}, "vbfbbtt": {...}}. Overrides --nTF when set.',
 )
 parser.add_argument(
     "--regions",
@@ -170,7 +170,7 @@ if args.nTF_per_channel is not None:
     if raw.startswith("{"):
         nTF_per_channel = json.loads(raw)
     else:
-        with open(raw) as f:
+        with Path.open(raw) as f:
             nTF_per_channel = json.load(f)
     logging.info(f"Per-channel TF orders: {nTF_per_channel}")
     for sr_key, ch_orders in nTF_per_channel.items():
@@ -222,23 +222,23 @@ mc_samples = OrderedDict(
 
 mc_samples_sig = OrderedDict(
     [
-        ("ggfbbtt", "ggHH_kl_1_kt_1_13p6TeV_hbbhtauau"),
-        ("ggfbbtt-kl0p00", "ggHH_kl_0_kt_1_13p6TeV_hbbhtauau"),
-        ("ggfbbtt-kl2p45", "ggHH_kl_2p45_kt_1_13p6TeV_hbbhtauau"),
-        ("ggfbbtt-kl5p00", "ggHH_kl_5_kt_1_13p6TeV_hbbhtauau"),
-        ("vbfbbtt", "qqHH_CV_1_C2V_1_kl_1_13p6TeV_hbbhtauau"),
-        ("vbfbbtt-k2v0", "qqHH_CV_1_C2V_0_kl_1_13p6TeV_hbbhtauau"),
-        ("vbfbbtt-kv1p74-k2v1p37-kl14p4", "qqHH_CV_1p74_C2V_1p37_kl_14p4_13p6TeV_hbbhtauau"),
-        ("vbfbbtt-kvm0p012-k2v0p03-kl10p2", "qqHH_CV_m0p012_C2V_0p03_kl_10p2_13p6TeV_hbbhtauau"),
-        ("vbfbbtt-kvm0p758-k2v1p44-klm19p3", "qqHH_CV_m0p758_C2V_1p44_kl_m19p3_13p6TeV_hbbhtauau"),
+        ("ggfbbtt", "ggHH_kl_1_kt_1_13p6TeV_hbbhtt"),
+        ("ggfbbtt-kl0p00", "ggHH_kl_0_kt_1_13p6TeV_hbbhtt"),
+        ("ggfbbtt-kl2p45", "ggHH_kl_2p45_kt_1_13p6TeV_hbbhtt"),
+        ("ggfbbtt-kl5p00", "ggHH_kl_5_kt_1_13p6TeV_hbbhtt"),
+        ("vbfbbtt", "qqHH_CV_1_C2V_1_kl_1_13p6TeV_hbbhtt"),
+        ("vbfbbtt-k2v0", "qqHH_CV_1_C2V_0_kl_1_13p6TeV_hbbhtt"),
+        ("vbfbbtt-kv1p74-k2v1p37-kl14p4", "qqHH_CV_1p74_C2V_1p37_kl_14p4_13p6TeV_hbbhtt"),
+        ("vbfbbtt-kvm0p012-k2v0p03-kl10p2", "qqHH_CV_m0p012_C2V_0p03_kl_10p2_13p6TeV_hbbhtt"),
+        ("vbfbbtt-kvm0p758-k2v1p44-klm19p3", "qqHH_CV_m0p758_C2V_1p44_kl_m19p3_13p6TeV_hbbhtt"),
         (
             "vbfbbtt-kvm0p962-k2v0p959-klm1p43",
-            "qqHH_CV_m0p962_C2V_0p959_kl_m1p43_13p6TeV_hbbhtauau",
+            "qqHH_CV_m0p962_C2V_0p959_kl_m1p43_13p6TeV_hbbhtt",
         ),
-        ("vbfbbtt-kvm1p21-k2v1p94-klm0p94", "qqHH_CV_m1p21_C2V_1p94_kl_m0p94_13p6TeV_hbbhtauau"),
-        ("vbfbbtt-kvm1p6-k2v2p72-klm1p36", "qqHH_CV_m1p6_C2V_2p72_kl_m1p36_13p6TeV_hbbhtauau"),
-        ("vbfbbtt-kvm1p83-k2v3p57-klm3p39", "qqHH_CV_m1p83_C2V_3p57_kl_m3p39_13p6TeV_hbbhtauau"),
-        ("vbfbbtt-kvm2p12-k2v3p87-klm5p96", "qqHH_CV_m2p12_C2V_3p87_kl_m5p96_13p6TeV_hbbhtauau"),
+        ("vbfbbtt-kvm1p21-k2v1p94-klm0p94", "qqHH_CV_m1p21_C2V_1p94_kl_m0p94_13p6TeV_hbbhtt"),
+        ("vbfbbtt-kvm1p6-k2v2p72-klm1p36", "qqHH_CV_m1p6_C2V_2p72_kl_m1p36_13p6TeV_hbbhtt"),
+        ("vbfbbtt-kvm1p83-k2v3p57-klm3p39", "qqHH_CV_m1p83_C2V_3p57_kl_m3p39_13p6TeV_hbbhtt"),
+        ("vbfbbtt-kvm2p12-k2v3p87-klm5p96", "qqHH_CV_m2p12_C2V_3p87_kl_m5p96_13p6TeV_hbbhtt"),
     ]
 )
 
@@ -306,7 +306,12 @@ nuisance_params = {
     "THU_HH": Syst(
         prior="lnN",
         samples=sig_keys_ggf,
-        value={"ggfbbtt": 1.06, "ggfbbtt-kl0p00": 1.08, "ggfbbtt-kl2p45": 1.06, "ggfbbtt-kl5p00": 1.18},
+        value={
+            "ggfbbtt": 1.06,
+            "ggfbbtt-kl0p00": 1.08,
+            "ggfbbtt-kl2p45": 1.06,
+            "ggfbbtt-kl5p00": 1.18,
+        },
         value_down={
             "ggfbbtt": 0.77,
             "ggfbbtt-kl0p00": 0.82,

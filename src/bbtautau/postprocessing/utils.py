@@ -23,6 +23,7 @@ from joblib import Parallel, delayed
 from bbtautau.HLTs import HLTs
 from bbtautau.postprocessing import Samples
 from bbtautau.postprocessing.bbtautau_types import Channel, LoadedSample
+from bbtautau.postprocessing.bdt_config import BDT_CONFIG
 from bbtautau.postprocessing.bdt_utils import compute_or_load_bdt_preds
 from bbtautau.postprocessing.Samples import CHANNELS
 from bbtautau.userConfig import BDT_EVAL_DIR, DATA_PATHS, MODEL_DIR
@@ -164,22 +165,25 @@ def bb_filters(
 
 
 def tt_filters(
-    # if channel is None, it is agnostic selection
     channel: Channel = None,
     in_filters: dict[str, list[tuple]] = None,
     num_fatjets: int = 3,
-    tt_cut: float = 0.3,
+    tt_cut: float = 0.1,
+    qcd_only: bool = True,
+    agnostic: bool = True,
 ):
     if in_filters is None:
         in_filters = base_filter()
 
     filters = {}
 
+    bkgstr = "QCD" if qcd_only else "QCDTop"
+
     # Agnostic selection: at least one jet with ParT score in any channel is required. Note that cannot sum scores together at this stage.
-    if channel is None:
+    if channel is None or agnostic:
         for dtype, ifilters_bydtype in in_filters.items():
             filters[dtype] = [
-                ifilter + [(f"('ak8FatJetParTX{ch.tagger_label}vsQCDTop', '{n}')", ">=", tt_cut)]
+                ifilter + [(f"('ak8FatJetParTX{ch.tagger_label}vs{bkgstr}', '{n}')", ">=", tt_cut)]
                 for n in range(num_fatjets)
                 for ifilter in ifilters_bydtype
                 for ch in CHANNELS.values()
@@ -188,7 +192,7 @@ def tt_filters(
         for dtype, ifilters_bydtype in in_filters.items():
             filters[dtype] = [
                 ifilter
-                + [(f"('ak8FatJetParTX{channel.tagger_label}vsQCDTop', '{n}')", ">=", tt_cut)]
+                + [(f"('ak8FatJetParTX{channel.tagger_label}vs{bkgstr}', '{n}')", ">=", tt_cut)]
                 for n in range(num_fatjets)
                 for ifilter in ifilters_bydtype
             ]
@@ -204,6 +208,7 @@ def get_columns(
     leptons: bool = True,
     other: bool = True,
     lowercase_jetaway: bool = False,
+    vbf: bool = True,
 ):
 
     columns_data = [
@@ -211,6 +216,7 @@ def get_columns(
         ("ak8FatJetPt", 3),
         ("ak8FatJetEta", 3),
         ("ak8FatJetPhi", 3),
+        ("ak8FatJetTau3OverTau2", 3),
         ("ak4JetPt", 3),
         ("ak4JetEta", 3),
         ("ak4JetPhi", 3),
@@ -242,6 +248,7 @@ def get_columns(
             ("ak8FatJetCAglobalParT_massVisApplied_with_delta_axis_merged", 3),
             ("ak8FatJetCAglobalParT_massVisApplied_merged", 3),
             ("ak8FatJetMsd", 3),
+            ("ak8FatJetCAglobalParT_massVisApplied", 3),
         ]
 
     if year == "2024":
@@ -279,14 +286,25 @@ def get_columns(
             ("Muoncharge", 2),
             ("MuonMass", 2),
         ]
+
+    if vbf:
+        columns_data += [
+            ("VBFJetPt", 2),
+            ("VBFJetEta", 2),
+            ("VBFJetPhi", 2),
+            ("VBFJetMass", 2),
+        ]
     if other:
         columns_data += [
             ("nFatJets", 1),
             ("METPt", 1),
             ("METPhi", 1),
+            ("METsignificance", 1),
             ("ht", 1),
             ("nElectrons", 1),
             ("nMuons", 1),
+            ("nTaus", 1),
+            ("nBoostedTaus", 1),
             ("run", 1),
             ("event", 1),
             ("luminosityBlock", 1),
@@ -307,6 +325,10 @@ def get_columns(
         ("GenTauhh", 1),
         ("GenTauhm", 1),
         ("GenTauhe", 1),
+        ("GenHiggsEta", 2),
+        ("GenHiggsPhi", 2),
+        ("GenHiggsPt", 2),
+        ("GenHiggsChildren", 2),
     ]
 
     columns = {
@@ -461,16 +483,18 @@ def load_samples(
         if n_jobs is None:
             n_jobs = min(max(1, 2 * len(samples)), os.cpu_count() or 1)
 
-        data_ = Parallel(n_jobs=n_jobs, backend="threading", prefer="threads")(
-            delayed(LoadedSample)(
-                sample=sample,
-                events=utils.load_sample(
-                    sample,
-                    year,
-                    paths,
-                    filters_dict[sample.get_type()] if filters_dict is not None else None,
-                ),
+        def _load_loaded_sample(sample: Sample) -> LoadedSample:
+            filters = filters_dict[sample.get_type()] if filters_dict is not None else None
+            events = utils.load_sample(
+                sample,
+                year,
+                paths,
+                filters,
             )
+            return LoadedSample(sample=sample, events=events)
+
+        data_ = Parallel(n_jobs=n_jobs, backend="threading", prefer="threads")(
+            delayed(_load_loaded_sample)(sample)
             for sample in samples.values()
             if sample.selector is not None  # this line is key to only load bbtt once
         )
@@ -583,26 +607,34 @@ def apply_triggers_data(events_dict: dict[str, LoadedSample], year: str, channel
 def apply_triggers(
     events_dict: dict[str, pd.DataFrame | LoadedSample],
     year: str,
-    channel: Channel,
+    channel: Channel | None = None,
 ):
     """Apply triggers in MC and data, and remove overlap between datasets."""
 
-    if not isinstance(next(iter(events_dict.values())), LoadedSample):
-        warnings.warn(
-            "Deprecation warning: Should switch to using the LoadedSample class in the future!",
-            stacklevel=1,
-        )
-        return apply_triggers_old(events_dict, year, channel)
-
-    # MC
-    for _skey, sample in events_dict.items():
-        if not sample.sample.isData:
-            triggered = np.sum(
-                [sample.get_var(hlt) for hlt in channel.triggers(year, mc_only=True)], axis=0
-            ).astype(bool)
-            sample.events = sample.events[triggered]
+    if channel is None:  # agnostic, used for BDT training
+        for _skey, sample in events_dict.items():
+            if not sample.sample.isData:
+                triggered = np.sum(
+                    [
+                        sample.get_var(hlt)
+                        for ch in CHANNELS.values()
+                        for hlt in ch.triggers(year, mc_only=True)
+                    ],
+                    axis=0,
+                ).astype(bool)
+                sample.events = sample.events[triggered]
+    else:
+        # MC: apply only the triggers for the specific channel
+        for _skey, sample in events_dict.items():
+            if not sample.sample.isData:
+                triggered = np.sum(
+                    [sample.get_var(hlt) for hlt in channel.triggers(year, mc_only=True)], axis=0
+                ).astype(bool)
+                sample.events = sample.events[triggered]
 
     if any(sample.sample.isData for sample in events_dict.values()):
+        if channel is None:
+            raise ValueError("Channel is required to apply triggers to data")
         apply_triggers_data(events_dict, year, channel)
 
     return events_dict
@@ -648,15 +680,12 @@ def delete_columns(
 def bbtautau_assignment(
     events_dict: dict[str, pd.DataFrame | LoadedSample],
     channel: Channel = None,
+    ttvsbb: bool = True,  # This is now by default
     agnostic: bool = False,
     # 2024, v15, the ParT score is different from v12
     is_2024: bool = False,
 ):
     """Assign bb and tautau jets per each event."""
-
-    # if channel is none but agnostic is false raise an error
-    if channel is None and not agnostic:
-        raise ValueError("Channel is required if agnostic is False")
 
     if not isinstance(next(iter(events_dict.values())), LoadedSample):
         if agnostic:
@@ -669,12 +698,27 @@ def bbtautau_assignment(
 
     for _skey, sample in events_dict.items():
         bbtt_masks = {
-            "bb": np.zeros_like(sample.get_var("ak8FatJetPt"), dtype=bool),
-            "tt": np.zeros_like(sample.get_var("ak8FatJetPt"), dtype=bool),
+            "bb": np.zeros_like(sample.get_var("ak8FatJetParTXbb"), dtype=bool),
+            "tt": np.zeros_like(sample.get_var("ak8FatJetParTXbb"), dtype=bool),
         }
 
+        if ttvsbb:
+            sig_labels = [ch.tagger_label for ch in CHANNELS.values()]
+            num = (
+                sample.get_var(f"ak8FatJetParTX{sig_labels[0]}")
+                + sample.get_var(f"ak8FatJetParTX{sig_labels[1]}")
+                + sample.get_var(f"ak8FatJetParTX{sig_labels[2]}")
+            ) / 3
+            denom = num + sample.get_var("ak8FatJetParTXbb")
+            combined_score = np.divide(
+                num, denom, out=np.zeros_like(num), where=((num != PAD_VAL) & (denom != 0))
+            )
+            tautau_pick = np.argmax(combined_score, axis=1)
+
+        ### Legacy, not used anymore, keep for record
+
         # assign tautau jet as the one with the highest ParTtautauvsQCD score
-        if agnostic:
+        elif agnostic:
             sig_labels = [ch.tagger_label for ch in CHANNELS.values()]
             # 2024, v15, the ParT score is different from v12
             print(sig_labels)
@@ -982,8 +1026,36 @@ def derive_lepton_variables(events_dict: dict[str, LoadedSample]):
                 sample.get_var("MuonDeltaEta")[:, n] ** 2
                 + sample.get_var("MuonDeltaPhi")[:, n] ** 2
             )[sample.m_mask[:, n]]
-
     return
+
+
+def derive_vbf_variables(events_dict: dict[str, LoadedSample]):
+    for sample in events_dict.values():
+        sample.events[("VBFJetDeltaEta", 0)] = delta_eta(
+            sample.get_var("VBFJetEta")[:, 0], sample.get_var("VBFJetEta")[:, 1]
+        )
+
+        # Compute invariant mass of the two VBF jets (mjj)
+        vbf_jet0 = vector.array(
+            {
+                "pt": sample.get_var("VBFJetPt")[:, 0],
+                "eta": sample.get_var("VBFJetEta")[:, 0],
+                "phi": sample.get_var("VBFJetPhi")[:, 0],
+                "mass": sample.get_var("VBFJetMass")[:, 0],
+            }
+        )
+        vbf_jet1 = vector.array(
+            {
+                "pt": sample.get_var("VBFJetPt")[:, 1],
+                "eta": sample.get_var("VBFJetEta")[:, 1],
+                "phi": sample.get_var("VBFJetPhi")[:, 1],
+                "mass": sample.get_var("VBFJetMass")[:, 1],
+            }
+        )
+
+        # Add 4-vectors and compute invariant mass
+        vbf_dijet = vbf_jet0 + vbf_jet1
+        sample.events[("VBFMassjj", 0)] = vbf_dijet.mass
 
 
 def load_data_channel(
@@ -997,6 +1069,8 @@ def load_data_channel(
     bdt_eval_dir: Path = BDT_EVAL_DIR,
     at_inference: bool = False,
     cutflow: bool = False,
+    ttvsbb: bool = True,
+    unbiased_mc_eval: bool = True,
     **kwargs,
 ):
     """Load data for all years and signals for a given channel."""
@@ -1009,7 +1083,7 @@ def load_data_channel(
 
         if tt_pres:
             filters_dict = tt_filters(
-                channel=channel, in_filters=filters_dict, num_fatjets=3, tt_cut=0.3
+                channel=channel, in_filters=filters_dict, num_fatjets=3, qcd_only=False
             )
 
         columns = get_columns(year, triggers_in_channel=channel)
@@ -1042,42 +1116,38 @@ def load_data_channel(
         delete_columns(events_dict[year], year, channels=[channel])
 
         derive_variables(events_dict[year])
-
-        # 2024, v15, the ParT score is different from v12
-        if(year == "2024"):
-            bbtautau_assignment(events_dict[year], agnostic=True, is_2024=True)
-        else:
-            bbtautau_assignment(events_dict[year], agnostic=True, is_2024=False)
-
-
-        # bbtautau_assignment(events_dict[year], agnostic=True)
+        bbtautau_assignment(events_dict[year], ttvsbb=ttvsbb)
         leptons_assignment(events_dict[year], dR_cut=1.5)
         derive_lepton_variables(events_dict[year])
+        derive_vbf_variables(events_dict[year])
 
-    # Load or compute BDT predictions for all signals in a single pass
-    # Only compute predictions for matching model-signal pairs to avoid overwriting discriminator columns
-    # (e.g., ggf model should only be used with ggfbbtt signal_objective, vbf model with vbfbbtt)
+    # Load or compute BDT predictions for every requested model.
+    # Each model writes signal-specific columns (e.g. BDTggfbb{ch}vsAll, BDTvbfbb{ch}vsAll)
+    # so there is no overwrite risk between models. The caller controls which models to evaluate.
     if models is not None:
         for model in models:
-            for sig in signals:
-                # Match model to signal: model name should contain the signal base name
-                # e.g., "ggfbbtt" model matches "ggfbbtt" signal, "vbfbbtt" model matches "vbfbbtt" signal
-                # This prevents VBF model from overwriting GGF discriminator columns when signal_objective="ggfbbtt"
-                sig_base = sig.removesuffix("tt") if sig.endswith("tt") else sig
-                # Needed this minimal fix and now it works. But still some redundant logic with modelname and signal_objective could be merged in a dictionary. signal_objective needed to label the BDT branches
-                if sig_base in model.lower():
-                    compute_or_load_bdt_preds(
-                        events_dict=events_dict,
-                        modelname=model,
-                        model_dir=model_dir,
-                        signal_objective=sig,
-                        channel=channel,
-                        bdt_preds_dir=bdt_eval_dir,
-                        tt_pres=tt_pres,
-                        test_mode=test_mode,
-                        at_inference=at_inference,
-                        all_outs=True,
-                    )
+            if model not in BDT_CONFIG:
+                raise ValueError(f"Could not find config for modelname '{model}' in BDT_CONFIG")
+
+            model_signals = BDT_CONFIG[model].get("signals", [])
+            if not isinstance(model_signals, list) or len(model_signals) == 0:
+                raise ValueError(
+                    f"Model '{model}' has invalid 'signals' in config: {model_signals}. Expected a non-empty list."
+                )
+
+            n_folds = int(BDT_CONFIG[model].get("n_folds", 1))
+            compute_or_load_bdt_preds(
+                events_dict=events_dict,
+                modelname=model,
+                model_dir=model_dir,
+                channel=channel,
+                bdt_preds_dir=bdt_eval_dir,
+                tt_pres=tt_pres,
+                test_mode=test_mode,
+                at_inference=at_inference,
+                n_folds=n_folds,
+                unbiased_mc_eval=unbiased_mc_eval,
+            )
 
     if cutflow:
         return events_dict, cutflow
@@ -1155,7 +1225,13 @@ def singleVarHist(
 
 def label_transform(classes: list[str], labels: list[str]) -> list[int]:
     """Transform labels to integers."""
-    return [classes.index(label) for label in labels]
+    return np.array([classes.index(label) for label in labels])
+
+
+def _ensure_dir(path: Path) -> Path:
+    """Ensure a directory exists, creating it if necessary."""
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 #### Legacy functions

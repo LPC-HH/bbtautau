@@ -14,24 +14,25 @@ spec:
           - "/bin/bash"
           - "-c"
           - >
-            git clone --single-branch --recurse-submodules --branch kube https://github.com/LPC-HH/bbtautau.git /opt/repo/bbtautau &&
+            git clone --single-branch --recurse-submodules --branch dev-bdt https://github.com/LPC-HH/bbtautau.git /opt/repo/bbtautau &&
             mkdir -p $output_dir/ &&
             pip install -e /opt/repo/bbtautau &&
             pip install -e /opt/repo/bbtautau/boostedhh &&
-            python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --train --model $name --signal-key $signal_key
-            --output-dir $output_dir --data-path $datapath/ $args
-            | tee $output_dir/log.txt
+            $config_bootstrap
+            python /opt/repo/bbtautau/src/bbtautau/postprocessing/bdt.py --years all --train $model_args
+            --output-dir $output_dir --data-path $datapath/ --bin-features $args
+            2>&1 | tee $output_dir/log.txt
         volumeMounts:
         - mountPath: /bbtautauvol
           name: bbtautauvol
         resources:
           limits:
-            memory: 32Gi
-            cpu: "8"
+            memory: ${memory}Gi
+            cpu: "16"
             nvidia.com/gpu: "1"
           requests:
-            memory: 32Gi
-            cpu: "6"
+            memory: ${memory}Gi
+            cpu: "14"
             nvidia.com/gpu: "1"
       volumes:
       - name: bbtautauvol
@@ -46,5 +47,10 @@ spec:
                     operator: NotIn
                     values:
                       - service-02.nrp.mghpcc.org
+                      - clu-fiona2.ucmerced.edu
+                  - key: nvidia.com/gpu.memory
+                    operator: Gt
+                    values:
+                      - "${min_gpu_mem}"
       restartPolicy: Never
   backoffLimit: 0

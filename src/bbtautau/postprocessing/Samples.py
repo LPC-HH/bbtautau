@@ -129,9 +129,9 @@ SAMPLES = {
         isSignal=True,
     ),
     "ggfbbtt-kl0p00": Sample(
-    selector=hh_vars.bbtt_sigs["ggfbbtt-kl0p00"],
-    label=r"ggF HHbb$\tau\tau$ ($\kappa_\lambda=0$)",
-    isSignal=True,
+        selector=hh_vars.bbtt_sigs["ggfbbtt-kl0p00"],
+        label=r"ggF HHbb$\tau\tau$ ($\kappa_\lambda=0$)",
+        isSignal=True,
     ),
     "ggfbbtt-kl2p45": Sample(
         selector=hh_vars.bbtt_sigs["ggfbbtt-kl2p45"],
@@ -205,6 +205,17 @@ sig_keys_vbf = [
     "vbfbbtt-kvm1p6-k2v2p72-klm1p36",
 ]
 # sig_keys_vbf = ["vbfbbtt", "vbfbbtt-k2v0"]
+
+
+def canonical_signal_key(signal: str) -> str:
+    """Map a signal key to its canonical production-mode form.
+
+    Strips variant suffixes (e.g., '-k2v0') so that BDT discriminant columns
+    are named consistently regardless of which signal variant was used for training.
+    Examples: 'vbfbbtt-k2v0' -> 'vbfbbtt', 'ggfbbtt' -> 'ggfbbtt'
+    """
+    return signal.split("-")[0]
+
 
 # add individual bbtt channels
 for signal in SIGNALS:

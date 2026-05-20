@@ -5,8 +5,8 @@
 # Usage: ./meta_run_blinded.sh [combined|individual|both] [--cmds <commands>]
 
 # Configuration
-CARDS_BASE_DIR="/home/users/haoyang/bbtautau_ggfvbf/src/bbtautau/postprocessing/cards/hello"
-SCRIPT_PATH="/home/users/haoyang/bbtautau_ggfvbf/src/bbtautau/combine/run_blinded_bbtt.sh"
+CARDS_BASE_DIR="/home/users/lumori/bbtautau/src/bbtautau/cards/26Feb17-11febBdt"
+SCRIPT_PATH="/home/users/lumori/bbtautau/src/bbtautau/combine/run_blinded_bbtt.sh"
 CHANNELS=("hh" "hm" "he")
 
 # Default values

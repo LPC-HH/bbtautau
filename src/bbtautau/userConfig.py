@@ -16,6 +16,8 @@ import getpass
 import os
 from pathlib import Path
 
+import numpy as np
+
 
 def _username() -> str:
     return os.environ.get("USER") or getpass.getuser()
@@ -63,9 +65,7 @@ CLASSIFIER_DIR = _PACKAGE_ROOT / "postprocessing" / "classifier"
 _user = _username()
 _repo_name = _REPO_ROOT.name
 # Skimmer ntuple path (shared bbtautau skimmer tag on ceph)
-_default_data_dir = (
-    "/ceph/cms/store/user/haoyang/bbtautau/skimmer/25Sep23AddVars_v12_private_signal"
-)
+
 #for 2024:
 # _default_data_dir = (
 #     "/eos/user/j/jinwa/bbtautau/skimmer/25Sep24QCD_v15_signal"
@@ -73,6 +73,8 @@ _default_data_dir = (
 # _default_data_dir = (
 #     "/eos/user/j/jinwa/a_2024_small_par"
 # )
+
+_default_data_dir = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
 DATA_DIR = os.environ.get("BBTAUTAU_DATA_DIR", _default_data_dir)
 DATA_PATHS = path_dict(DATA_DIR)
 
@@ -102,3 +104,19 @@ PT_CUTS = {
 # usually will go (hh,ggf)->(hh,vbf)->(hm,ggf), etc.
 CHANNEL_ORDERING = ["hh", "hm", "he"]  # order of applying selection and vetoes
 SIGNAL_ORDERING = ["ggfbbtt", "vbfbbtt"]  # order of applying selection and vetoes
+
+
+# Working point bin edges for tt GloParT discriminants
+# Determine using the plot_cuts_hist.py script
+
+WPS_TTPART: dict[str, np.ndarray] = {
+    "ttFatJetParTXtauhtauhvsQCDTop": np.array(
+        [0.4, 0.7722271084785461, 0.9961739778518677, 0.9997739195823669, 0.9999425411224365]
+    ),
+    "ttFatJetParTXtauhtaumvsQCDTop": np.array(
+        [0.4, 0.8451746702194214, 0.9981048107147217, 0.9997354745864868, 0.9999304413795471]
+    ),
+    "ttFatJetParTXtauhtauevsQCDTop": np.array(
+        [0.4, 0.806851863861084, 0.9941548109054565, 0.9995246529579163, 0.9998924732208252]
+    ),
+}

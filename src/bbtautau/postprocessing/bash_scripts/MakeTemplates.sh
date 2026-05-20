@@ -3,7 +3,7 @@
 
 ####################################################################################################
 # Script for making templates
-# Author: Raghav Kansal
+# Author: Raghav Kansal, Ludovico Mori
 ####################################################################################################
 
 ####################################################################################################
@@ -21,22 +21,24 @@
 
 years=("2022" "2022EE" "2023" "2023BPix")
 channels=("hh" "hm" "he")
-bmin_values=(5 10 12)  # Can be overridden with --bmin
+bmin_values=(5 9 10 11 12)  # Can be overridden with --bmin
 
 # Repo root (parent of src/); works for any user/checkout path
 MAIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 SCRIPT_DIR="${MAIN_DIR}/src/bbtautau/postprocessing"
-DATA_DIR="/ceph/cms/store/user/haoyang/bbtautau/skimmer/25Sep23AddVars_v12_private_signal"
-# Default: Lumori checkout (matches MakeTemplates_billy.sh); override with --sensitivity-dir
-SENSITIVITY_DIR="/home/users/lumori/bbtautau/plots/SensitivityStudy/2025-12-27/"
+DATA_DIR="/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
+SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2026-05-08/"
+COMBINED_SIGNALS="separate_signals"
 TAG=""
 USE_PART=0
 DO_VBF=0
 USE_SENSITIVITY_DIR=1  # Flag to control --sensitivity-dir argument (default: on)
 TEST_MODE=0
 TT_PRES=0
-GGF_MODEL="19oct25_ak4away_ggfbbtt"
-VBF_MODEL="19oct25_ak4away_vbfbbtt"
+GGF_MODEL="May4_optimized_ggf"
+#"19oct25_ak4away_ggfbbtt"
+VBF_MODEL="May4_optimized_vbfk2v0"
+#"19oct25_ak4away_vbfbbtt"
 
 # Function to display help
 show_help() {
@@ -56,6 +58,7 @@ show_help() {
     echo "  --tt-pres              Apply tt preselection"
     echo "  --ggf-model MODEL      GGF model name (default: 19oct25_ak4away_ggfbbtt)"
     echo "  --vbf-model MODEL      VBF model name (default: 19oct25_ak4away_vbfbbtt)"
+    echo "  --combined-signals COMBINED_SIGNALS Name of the combined signals to use"
     echo "  --bmin VALUES          Space-separated list of minimum background yield values"
     echo "                         Examples: --bmin 1"
     echo "                                  --bmin 1 5 10"
@@ -134,6 +137,11 @@ while [[ $# -gt 0 ]]; do
             VBF_MODEL=$1
             shift
             ;;
+        --combined-signals)
+            shift
+            COMBINED_SIGNALS=$1
+            shift
+            ;;
         --help|-h)
             show_help
             exit 0
@@ -169,7 +177,7 @@ echo "TEST_MODE: $TEST_MODE"
 echo "TT_PRES: $TT_PRES"
 echo "GGF_MODEL: $GGF_MODEL"
 echo "VBF_MODEL: $VBF_MODEL"
-
+echo "COMBINED_SIGNALS: $COMBINED_SIGNALS"
 for year in "${years[@]}"
 do
     echo "Data dir: $DATA_DIR"
@@ -215,6 +223,11 @@ do
         # Add --tt-pres if enabled
         if [[ $TT_PRES -eq 1 ]]; then
             cmd+=(--tt-pres)
+        fi
+
+        # Add --combined-signals when set (non-empty string)
+        if [[ -n "$COMBINED_SIGNALS" ]]; then
+            cmd+=(--combined-signals "$COMBINED_SIGNALS")
         fi
 
         # Add bmin values (passed as multiple arguments)
