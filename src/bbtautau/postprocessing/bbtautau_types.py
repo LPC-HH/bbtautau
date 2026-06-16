@@ -25,7 +25,8 @@ class Channel:
     key: str  # key in dictionaries etc.
     label: str  # label for plotting
     data_samples: list[str]  # datasets for this channel
-    hlt_types: list[str]  # list of HLT types
+    hlt_types: list[str]  # trigger-type keys used by the trigger study (HLTs.HLTs)
+    hlt_menu: list[str]  # analysis trigger menu: logical keys into HLTs.MENU
     isLepton: bool  # lepton channel or fully hadronic
     tagger_label: str  # label for tagger score used
     txbb_cut: float  # cut on bb tagger score
@@ -39,8 +40,17 @@ class Channel:
         year: str,
         **hlt_kwargs,
     ):
-        """Get triggers for a given year for this channel."""
+        """Study trigger union for a given year (over ``hlt_types``)."""
         return HLTs.hlts_by_type(year, self.hlt_types, **hlt_kwargs)
+
+    def menu_triggers(
+        self,
+        year: str,
+        **hlt_kwargs,
+    ):
+        """Analysis triggers for a given year: the year-correct path(s) for this
+        channel's ``hlt_menu`` (the pair to OR when applying triggers)."""
+        return HLTs.resolve_menu(year, self.hlt_menu, **hlt_kwargs)
 
     def lepton_triggers(
         self,
@@ -51,7 +61,10 @@ class Channel:
         if self.lepton_dataset is None:
             return None
 
-        return HLTs.hlts_by_dataset(year, self.lepton_dataset, **hlt_kwargs)
+        return utils.list_intersection(
+            self.menu_triggers(year, **hlt_kwargs),
+            HLTs.hlts_by_dataset(year, self.lepton_dataset, **hlt_kwargs),
+        )
 
 
 @dataclass

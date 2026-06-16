@@ -10,7 +10,11 @@ CHANNELS = {  # in alphabetical order
         key="he",
         label=r"$\tau_h e$",
         hlt_types=["PNet", "PFJet", "EGamma", "ETau", "DiTau", "DitauJet", "SingleTau"],
-        data_samples=["jetmet", "tau", "egamma"],
+        hlt_menu=["pnetbb", "ele30"],
+        # NOTE: "tau" PD dropped because the new he menu (pnetbb, ele30) has no
+        # Tau-dataset trigger, so the Tau PD contributed zero events after overlap
+        # removal. Revert by restoring: data_samples=["jetmet", "tau", "egamma"].
+        data_samples=["jetmet", "egamma"],
         lepton_dataset="egamma",
         isLepton=True,
         tagger_label="tauhtaue",
@@ -32,6 +36,7 @@ CHANNELS = {  # in alphabetical order
             "SingleTau",
             "MET",
         ],  # Probably remove parking
+        hlt_menu=["pnetbb", "ditau"],
         data_samples=["jetmet", "tau"],
         isLepton=False,
         tagger_label="tauhtauh",
@@ -44,7 +49,11 @@ CHANNELS = {  # in alphabetical order
         key="hm",
         label=r"$\tau_h \mu$",
         hlt_types=["PNet", "PFJet", "Muon", "MuonTau", "DiTau", "DitauJet", "SingleTau", "MET"],
-        data_samples=["jetmet", "tau", "muon"],
+        hlt_menu=["pnetbb", "muiso24"],
+        # NOTE: "tau" PD dropped because the new hm menu (pnetbb, muiso24) has no
+        # Tau-dataset trigger, so the Tau PD contributed zero events after overlap
+        # removal. Revert by restoring: data_samples=["jetmet", "tau", "muon"].
+        data_samples=["jetmet", "muon"],
         lepton_dataset="muon",
         isLepton=True,
         tagger_label="tauhtaum",

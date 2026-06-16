@@ -28,7 +28,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _PACKAGE_ROOT = Path(__file__).resolve().parent
 
 
-def path_dict(path: str, path_2022: str = None):
+def path_dict(path: str, path_2022: str = None, path_2024: str = None):
     return {
         "2022": {
             "data": Path(path_2022 if path_2022 else path),
@@ -50,6 +50,11 @@ def path_dict(path: str, path_2022: str = None):
             "bg": Path(path),
             "signal": Path(path),
         },
+        "2024": {
+            "data": Path(path_2024 if path_2024 else path),
+            "bg": Path(path_2024 if path_2024 else path),
+            "signal": Path(path_2024 if path_2024 else path),
+        },
     }
 
 
@@ -61,8 +66,9 @@ _user = _username()
 _repo_name = _REPO_ROOT.name
 # Skimmer ntuple path (shared bbtautau skimmer tag on ceph)
 _default_data_dir = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
+data_dir_2024 = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Jun9_v15_2024_sig_Jin/"
 DATA_DIR = os.environ.get("BBTAUTAU_DATA_DIR", _default_data_dir)
-DATA_PATHS = path_dict(DATA_DIR)
+DATA_PATHS = path_dict(DATA_DIR, path_2024=data_dir_2024)
 
 _default_bdt_eval = f"/ceph/cms/store/user/{_user}/{_repo_name}/BDT_predictions/"
 BDT_EVAL_DIR = Path(os.environ.get("BBTAUTAU_BDT_EVAL_DIR", _default_bdt_eval))
