@@ -180,23 +180,6 @@ class bbtautauSkimmer(SkimmerABC):
         # JMSR
         self.jmsr_vars = ["msoftdrop", "particleNet_mass_legacy", "ParTmassVis", "ParTmassRes"]
 
-        # particlenet legacy variables
-        pnet_vars_legacy = [
-            "Xbb",
-            "QCD",
-            "QCDb",
-            "QCDbb",
-            "QCDcc",
-            "QCDc",
-            "QCDothers",
-            "XbbvsQCD",
-            "mass",
-        ]
-        self.skim_vars["FatJet"] = {
-            **self.skim_vars["FatJet"],
-            **{f"particleNetLegacy_{var}": f"PNet{var}Legacy" for var in pnet_vars_legacy},
-        }
-
         # particlenet NOT legacy variables
         pnet_vars = [
             "XbbVsQCD",
@@ -212,7 +195,7 @@ class bbtautauSkimmer(SkimmerABC):
         # 2022+2023, v12, more QCD/Top/ParTs var
         if nano_version.startswith("v12"):
 
-            pnet_vars = [
+            pnet_vars_legacy = [
                 "Xbb",
                 "QCD",
                 "QCDb",
@@ -225,7 +208,7 @@ class bbtautauSkimmer(SkimmerABC):
             ]
             self.skim_vars["FatJet"] = {
                 **self.skim_vars["FatJet"],
-                **{f"particleNetLegacy_{var}": f"PNet{var}Legacy" for var in pnet_vars},
+                **{f"particleNetLegacy_{var}": f"PNet{var}Legacy" for var in pnet_vars_legacy},
             }
 
             # glopart variables
@@ -272,7 +255,7 @@ class bbtautauSkimmer(SkimmerABC):
 
         elif nano_version.startswith("v15"):
 
-            pnet_vars = [
+            pnet_vars_legacy = [
                 "Xbb",
                 "QCD",
                 "XbbvsQCD",
@@ -280,7 +263,7 @@ class bbtautauSkimmer(SkimmerABC):
             ]
             self.skim_vars["FatJet"] = {
                 **self.skim_vars["FatJet"],
-                **{f"particleNetLegacy_{var}": f"PNet{var}Legacy" for var in pnet_vars},
+                **{f"particleNetLegacy_{var}": f"PNet{var}Legacy" for var in pnet_vars_legacy},
             }
 
             # glopart variables
