@@ -65,6 +65,8 @@ CHANNELS = {  # in alphabetical order
 }
 
 # overall list of samples
+# Because the 2024 sample names are not consistent with those from 2022/2023,
+# the matching has been made more flexible.
 SAMPLES = {
     "jetmet": Sample(
         selector="^(JetHT|JetMET)",
@@ -72,17 +74,20 @@ SAMPLES = {
         isData=True,
     ),
     "tau": Sample(
-        selector="^Tau_Run",
+        selector="^Tau",
+        # selector="^Tau_Run",
         label="Tau",
         isData=True,
     ),
     "muon": Sample(
-        selector="^Muon_Run",
+        selector="^Muon",
+        # selector="^Muon_Run",
         label="Muon",
         isData=True,
     ),
     "egamma": Sample(
-        selector="^EGamma_Run",
+        selector="^EGamma",
+        # selector="^EGamma_Run",
         label="EGamma",
         isData=True,
     ),
@@ -107,7 +112,8 @@ SAMPLES = {
         isSignal=False,
     ),
     "dyjets": Sample(
-        selector="^DYto2L",
+        selector="^DYto2",
+        # selector="^DYto2L",
         label="DY+Jets",
         isSignal=False,
     ),
@@ -198,6 +204,7 @@ SM_SIGNALS = ["ggfbbtt", "vbfbbtt"]
 SM_SIGNALS_CHANNELS = []
 
 sig_keys_ggf = ["ggfbbtt", "ggfbbtt-kl0p00", "ggfbbtt-kl2p45", "ggfbbtt-kl5p00"]
+# sig_keys_ggf = ["ggfbbtt"]
 sig_keys_vbf = [
     "vbfbbtt",
     "vbfbbtt-k2v0",
@@ -206,6 +213,7 @@ sig_keys_vbf = [
     "vbfbbtt-kvm0p962-k2v0p959-klm1p43",
     "vbfbbtt-kvm1p6-k2v2p72-klm1p36",
 ]
+# sig_keys_vbf = ["vbfbbtt", "vbfbbtt-k2v0"]
 
 
 def canonical_signal_key(signal: str) -> str:
@@ -247,4 +255,6 @@ ttbar_keys = ["ttbarhad", "ttbarsl", "ttbarll"]
 
 qcdouts = ["QCD", "QCD0HF", "QCD1HF", "QCD2HF"]
 topouts = ["Top", "TopW", "TopbW", "TopbWev", "TopbWmv", "TopbWtauhv", "TopbWq", "TopbWqq"]
+qcdouts_v15 = ["QCD"]
+topouts_v15 = ["Top", "TopbWev", "TopbWmv", "TopbWq", "TopbWqq", "TopbWtauhv"]
 sigouts = ["Xtauhtauh", "Xtauhtaue", "Xtauhtaum", "Xbb"]

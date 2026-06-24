@@ -65,6 +65,15 @@ CLASSIFIER_DIR = _PACKAGE_ROOT / "postprocessing" / "classifier"
 _user = _username()
 _repo_name = _REPO_ROOT.name
 # Skimmer ntuple path (shared bbtautau skimmer tag on ceph)
+
+#for 2024:
+# _default_data_dir = (
+#     "/eos/user/j/jinwa/bbtautau/skimmer/25Sep24QCD_v15_signal"
+# )
+# _default_data_dir = (
+#     "/eos/user/j/jinwa/a_2024_small_par"
+# )
+
 _default_data_dir = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
 data_dir_2024 = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Jun9_v15_2024_sig_Jin/"
 DATA_DIR = os.environ.get("BBTAUTAU_DATA_DIR", _default_data_dir)
