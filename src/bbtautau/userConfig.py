@@ -50,6 +50,11 @@ def path_dict(path: str, path_2022: str = None):
             "bg": Path(path),
             "signal": Path(path),
         },
+        "2024": {
+            "data": Path(path),
+            "bg": Path(path),
+            "signal": Path(path),
+        },
     }
 
 
@@ -60,6 +65,15 @@ CLASSIFIER_DIR = _PACKAGE_ROOT / "postprocessing" / "classifier"
 _user = _username()
 _repo_name = _REPO_ROOT.name
 # Skimmer ntuple path (shared bbtautau skimmer tag on ceph)
+
+#for 2024:
+# _default_data_dir = (
+#     "/eos/user/j/jinwa/bbtautau/skimmer/25Sep24QCD_v15_signal"
+# )
+# _default_data_dir = (
+#     "/eos/user/j/jinwa/a_2024_small_par"
+# )
+
 _default_data_dir = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
 DATA_DIR = os.environ.get("BBTAUTAU_DATA_DIR", _default_data_dir)
 DATA_PATHS = path_dict(DATA_DIR)
