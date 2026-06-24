@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import warnings
+from collections.abc import Iterable
 from pathlib import Path
 
 import hist
@@ -130,7 +131,7 @@ def extract_base_signal_key(sig_key_with_channel: str) -> str:
 
 def base_filter(test_mode: bool = False):
     """
-    Returns the base filters for the data, signal, and background samples.
+    Returns per-sample-type kinematic filter lists (fat-jet pT, mass, …) for load_sample.
     """
 
     base_filters = copy.deepcopy(base_filters_default)
@@ -200,16 +201,47 @@ def tt_filters(
     return filters
 
 
+def _normalize_hlts_channels(
+    channels: Channel | Iterable[Channel] | None,
+) -> list[Channel] | None:
+    """Single channel or iterable → list; ``None`` stays ``None``."""
+    if channels is None:
+        return None
+    if isinstance(channels, Channel):
+        return [channels]
+    return list(channels)
+
+
 def get_columns(
     year: str,
-    triggers_in_channel: Channel = None,
+    *,
+    hlts_channels: Channel | Iterable[Channel] | None = None,
     legacy_taggers: bool = True,
     ParT_taggers: bool = True,
     leptons: bool = True,
     other: bool = True,
     lowercase_jetaway: bool = False,
     vbf: bool = True,
+    all_hlts: bool = False,
 ):
+    """
+    Build per-sample-type column lists for :func:`load_samples`.
+
+    Parameters
+    ----------
+    hlts_channels
+        If set, add HLT decision branches for the union of ``ch.menu_triggers(...)`` over these
+        physics channels (one :class:`Channel` or several) -- i.e. just the analysis menu paths.
+        MC vs data trigger lists are handled like the former single-channel case. If ``None``,
+        no per-path HLT columns are added. Ignored when ``all_hlts=True``.
+    all_hlts
+        If True, load *every* HLT path in the :class:`~bbtautau.HLTs.HLTs` study registry for the
+        year (data/MC split via ``check_year``), regardless of ``hlts_channels``. Used by the
+        trigger study, which inspects all trigger classes. Cheap since the study loads signal only.
+        This also covers the Parking paths, so no special-casing is needed for them.
+    """
+
+    hlts_ch_list = _normalize_hlts_channels(hlts_channels)
 
     columns_data = [
         ("weight", 1),
@@ -309,13 +341,27 @@ def get_columns(
             ("event", 1),
             ("luminosityBlock", 1),
         ]
-
     columns_mc = copy.deepcopy(columns_data)
 
-    if triggers_in_channel is not None:
-        for branch in triggers_in_channel.triggers(year, data_only=True):
+    if all_hlts:
+        # Trigger-study mode: load every HLT path in the registry for this year
+        # (includes Parking). Data/MC split handled by check_year.
+        hlt_data = sorted(HLTs.hlt_list(as_str=True, data_only=True)[year])
+        hlt_mc = sorted(HLTs.hlt_list(as_str=True, mc_only=True)[year])
+        for branch in hlt_data:
             columns_data.append((branch, 1))
-        for branch in triggers_in_channel.triggers(year, mc_only=True):
+        for branch in hlt_mc:
+            columns_mc.append((branch, 1))
+    elif hlts_ch_list is not None:
+        hlt_data = sorted(
+            {hlt for ch in hlts_ch_list for hlt in ch.menu_triggers(year, data_only=True)}
+        )
+        hlt_mc = sorted(
+            {hlt for ch in hlts_ch_list for hlt in ch.menu_triggers(year, mc_only=True)}
+        )
+        for branch in hlt_data:
+            columns_data.append((branch, 1))
+        for branch in hlt_mc:
             columns_mc.append((branch, 1))
 
     # signal-only columns
@@ -328,6 +374,7 @@ def get_columns(
         ("GenHiggsEta", 2),
         ("GenHiggsPhi", 2),
         ("GenHiggsPt", 2),
+        ("GenHiggsMass", 2),
         ("GenHiggsChildren", 2),
     ]
 
@@ -554,21 +601,27 @@ def apply_triggers_data(events_dict: dict[str, LoadedSample], year: str, channel
     ldataset = channel.lepton_dataset
 
     # storing triggers fired per dataset
-    trigdict = {"jetmet": {}, "tau": {}}
+    # "tau" PD is only present for channels whose menu has a Tau-dataset trigger
+    # (currently only hh); hm/he dropped it (see Samples.py data_samples).
+    trigdict = {"jetmet": {}}
+    if "tau" in events_dict:
+        trigdict["tau"] = {}
     if channel.isLepton:
         trigdict[ldataset] = {}
         lepton_triggers = utils.list_intersection(
-            channel.lepton_triggers(year), channel.triggers(year, data_only=True)
+            channel.lepton_triggers(year), channel.menu_triggers(year, data_only=True)
         )
 
     # JetMET triggers considered in this channel
     jet_triggers = utils.list_intersection(
-        HLTs.hlts_by_dataset(year, "JetMET", data_only=True), channel.triggers(year, data_only=True)
+        HLTs.hlts_by_dataset(year, "JetMET", data_only=True),
+        channel.menu_triggers(year, data_only=True),
     )
 
     # Tau triggers considered in this channel
     tau_triggers = utils.list_intersection(
-        HLTs.hlts_by_dataset(year, "Tau", data_only=True), channel.triggers(year, data_only=True)
+        HLTs.hlts_by_dataset(year, "Tau", data_only=True),
+        channel.menu_triggers(year, data_only=True),
     )
 
     for key, d in trigdict.items():
@@ -599,7 +652,8 @@ def apply_triggers_data(events_dict: dict[str, LoadedSample], year: str, channel
     # print(trigdict["jetmet"])
 
     events_dict["jetmet"].apply_selection(trigdict["jetmet"]["jets"])
-    events_dict["tau"].apply_selection(trigdict["tau"]["taunojets"])
+    if "tau" in events_dict:
+        events_dict["tau"].apply_selection(trigdict["tau"]["taunojets"])
 
     return events_dict
 
@@ -618,7 +672,7 @@ def apply_triggers(
                     [
                         sample.get_var(hlt)
                         for ch in CHANNELS.values()
-                        for hlt in ch.triggers(year, mc_only=True)
+                        for hlt in ch.menu_triggers(year, mc_only=True)
                     ],
                     axis=0,
                 ).astype(bool)
@@ -628,7 +682,8 @@ def apply_triggers(
         for _skey, sample in events_dict.items():
             if not sample.sample.isData:
                 triggered = np.sum(
-                    [sample.get_var(hlt) for hlt in channel.triggers(year, mc_only=True)], axis=0
+                    [sample.get_var(hlt) for hlt in channel.menu_triggers(year, mc_only=True)],
+                    axis=0,
                 ).astype(bool)
                 sample.events = sample.events[triggered]
 
@@ -670,7 +725,9 @@ def delete_columns(
                     - {
                         trigger
                         for channel in channels
-                        for trigger in channel.triggers(year, data_only=isData, mc_only=not isData)
+                        for trigger in channel.menu_triggers(
+                            year, data_only=isData, mc_only=not isData
+                        )
                     }
                 )
             )
@@ -1086,7 +1143,7 @@ def load_data_channel(
                 channel=channel, in_filters=filters_dict, num_fatjets=3, qcd_only=False
             )
 
-        columns = get_columns(year, triggers_in_channel=channel)
+        columns = get_columns(year, hlts_channels=channel)
 
         events_dict[year] = load_samples(
             year=year,
@@ -1275,79 +1332,6 @@ def derive_httak4away(
                 PAD_VAL * np.ones_like(sample.get_var("ak4JetPt"))[:, n]
             )
             sample.events.loc[ak4_mask[:, n], ("httak4away_dR", str(n))] = httak4away.deltaR()
-
-
-def apply_triggers_data_old(events_dict: dict[str, pd.DataFrame], year: str, channel: Channel):
-    """Apply triggers to data and remove overlap between datasets due to multiple triggers fired in an event."""
-    ldataset = channel.lepton_dataset
-
-    # storing triggers fired per dataset
-    trigdict = {"jetmet": {}, "tau": {}}
-    if channel.isLepton:
-        trigdict[ldataset] = {}
-        lepton_triggers = utils.list_intersection(
-            channel.lepton_triggers(year), channel.triggers(year, data_only=True)
-        )
-
-    # JetMET triggers considered in this channel
-    jet_triggers = utils.list_intersection(
-        HLTs.hlts_by_dataset(year, "JetMET", data_only=True), channel.triggers(year, data_only=True)
-    )
-
-    # Tau triggers considered in this channel
-    tau_triggers = utils.list_intersection(
-        HLTs.hlts_by_dataset(year, "Tau", data_only=True), channel.triggers(year, data_only=True)
-    )
-
-    for key, d in trigdict.items():
-        d["jets"] = np.sum([events_dict[key][hlt][0] for hlt in jet_triggers], axis=0).astype(bool)
-        if key == "jetmet":
-            continue
-
-        d["taus"] = np.sum([events_dict[key][hlt][0] for hlt in tau_triggers], axis=0).astype(bool)
-        d["taunojets"] = ~d["jets"] & d["taus"]
-
-        if key == "tau":
-            continue
-
-        if channel.isLepton:
-            d[ldataset] = np.sum(
-                [events_dict[key][hlt][0] for hlt in lepton_triggers], axis=0
-            ).astype(bool)
-
-            d[f"{ldataset}noothers"] = ~d["jets"] & ~d["taus"] & d[ldataset]
-
-            events_dict[ldataset] = events_dict[ldataset][trigdict[ldataset][f"{ldataset}noothers"]]
-
-    # remove overlap
-    # print(trigdict["jetmet"])
-
-    events_dict["jetmet"] = events_dict["jetmet"][trigdict["jetmet"]["jets"]]
-    events_dict["tau"] = events_dict["tau"][trigdict["tau"]["taunojets"]]
-
-    return events_dict
-
-
-def apply_triggers_old(
-    events_dict: dict[str, pd.DataFrame],
-    year: str,
-    channel: Channel,
-):
-    """Apply triggers in MC and data, and remove overlap between datasets, for old version of events_dict.
-
-    Deprecation warning: Should switch to using the LoadedSample class in the future!
-    """
-    for skey, events in events_dict.items():
-        if not Samples.SAMPLES[skey].isData:
-            triggered = np.sum(
-                [events[hlt][0] for hlt in channel.triggers(year, mc_only=True)], axis=0
-            ).astype(bool)
-            events_dict[skey] = events[triggered]
-
-    if any(Samples.SAMPLES[skey].isData for skey in events_dict):
-        apply_triggers_data_old(events_dict, year, channel)
-
-    return events_dict
 
 
 def bbtautau_assignment_old(events_dict: dict[str, pd.DataFrame], channel: Channel):

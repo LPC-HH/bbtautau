@@ -19,7 +19,37 @@ class HLT(utils.HLT):
     """Same as boostedhh.utils.HLT but with channel."""
 
     # which channel? defaults to all.
-    channel: list[str] = field(default_factory=lambda: ["hh", "hm", "he"])  
+    channel: list[str] = field(default_factory=lambda: ["hh", "hm", "he"])
+
+
+# Short labels for overlap / trigger-study plots (full path -> axis label).
+HLT_SHORT_LABELS: dict[str, str] = {
+    "HLT_AK8PFJet250_SoftDropMass40_PFAK8ParticleNetBB0p35": "AK8Jet250_PNetBB0p35",
+    "HLT_AK8PFJet230_SoftDropMass40_PFAK8ParticleNetTauTau0p30": "AK8Jet230_PNetTT0p30",
+    "HLT_AK8PFJet230_SoftDropMass40_PNetBB0p06": "AK8Jet230_PNetBB0p06",
+    "HLT_AK8PFJet230_SoftDropMass40_PNetTauTau0p03": "AK8Jet230_PNetTT0p03",
+    "HLT_AK8PFJet420_MassSD30": "AK8Jet420_MassSD30",
+    "HLT_AK8PFJet425_SoftDropMass40": "AK8Jet425_SD40",
+    "HLT_QuadPFJet70_50_40_35_PFBTagParticleNet_2BTagSum0p65": "Quad70_PNet2B0p65",
+    "HLT_QuadPFJet70_50_40_35_PNet2BTagMean0p65": "Quad70_PNet2B0p65",
+    "HLT_QuadPFJet103_88_75_15_PFBTagDeepJet_1p3_VBF2": "Quad103_DJ1p3_VBF2",
+    "HLT_QuadPFJet103_88_75_15_DoublePFBTagDeepJet_1p3_7p7_VBF1": "Quad103_2xDJ1p3_VBF1",
+    "HLT_LooseDeepTauPFTauHPS180_L2NN_eta2p1": "LooseDeepTau180",
+    "HLT_DoubleMediumDeepTauPFTauHPS35_L2NN_eta2p1": "DiMedDeepTau35",
+    "HLT_DoubleMediumDeepTauPFTauHPS30_L2NN_eta2p1_PFJet60": "DiMedDeepTau30_Jet60",
+    "HLT_DoubleMediumDeepTauPFTauHPS30_L2NN_eta2p1_PFJet75": "DiMedDeepTau30_Jet75",
+    "HLT_IsoMu24": "IsoMu24",
+    "HLT_Mu50": "Mu50",
+    "HLT_IsoMu20_eta2p1_LooseDeepTauPFTauHPS27_eta2p1_CrossL1": "IsoMu20_LooseTau27",
+    "HLT_Ele30_WPTight_Gsf": "Ele30_WPTight",
+    "HLT_Ele115_CaloIdVT_GsfTrkIdT": "Ele115",
+    "HLT_Ele50_CaloIdVT_GsfTrkIdT_PFJet165": "Ele50_Jet165",
+    "HLT_Photon200": "Photon200",
+    "HLT_Ele24_eta2p1_WPTight_Gsf_LooseDeepTauPFTauHPS30_eta2p1_CrossL1": "Ele24_LooseTau30",
+    "HLT_PFMET120_PFMHT120_IDTight": "MET120",
+    "HLT_PFHT280_QuadPFJet30_PNet2BTagMean0p55": "PFHT280_Quad30_PNet2B0p55",
+    "HLT_PFHT340_QuadPFJet70_50_40_40_PNet2BTagMean0p70": "PFHT340_Quad70_PNet2B0p70",
+}
 
 
 class HLTs:
@@ -53,12 +83,17 @@ class HLTs:
         "pfjet": [
             HLT(
                 name="HLT_AK8PFJet420_MassSD30",
-                years=years,  # years_2023  makes it work in 25Mar7 data samples
+                years=years_2022 + years_2023,  # years_2023  makes it work in 25Mar7 data samples
                 dataset="JetMET",
             ),
             HLT(
                 name="HLT_AK8PFJet425_SoftDropMass40",
-                years=years,
+                years=years_2022 + years_2023,
+                dataset="JetMET",
+            ),
+            HLT(
+                name="HLT_AK8PFJet425_SoftDropMass30",
+                years=["2024"],
                 dataset="JetMET",
             ),
             HLT(
@@ -76,22 +111,27 @@ class HLTs:
                 dataset="JetMET",
                 channel=["hh"],
             ),
-            # HLT( #This should be there but is not in 25Apr16 samples. For now just ignore
-            #     name="HLT_QuadPFJet70_50_40_35_PNet2BTagMean0p65",
-            #     mc_years=[],
-            #     data_years=["2023"],
-            #     dataset="JetMET",
-            # ),
-            # 2022 + 2023
             HLT(
                 name="HLT_QuadPFJet103_88_75_15_PFBTagDeepJet_1p3_VBF2",
-                years=years,
+                years=years_2022 + years_2023,
                 dataset="JetMET",
                 channel=["hh"],
             ),
             HLT(
                 name="HLT_QuadPFJet103_88_75_15_DoublePFBTagDeepJet_1p3_7p7_VBF1",
-                years=years,
+                years=years_2022 + years_2023,
+                dataset="JetMET",
+                channel=["hh"],
+            ),
+            HLT(
+                name="HLT_QuadPFJet103_88_75_15_PNet2BTag_0p4_0p12_VBF1",
+                years=["2024"],
+                dataset="JetMET",
+                channel=["hh"],
+            ),
+            HLT(
+                name="HLT_QuadPFJet103_88_75_15_PNetBTag_0p4_VBF2",
+                years=["2024"],
                 dataset="JetMET",
                 channel=["hh"],
             ),
@@ -216,6 +256,87 @@ class HLTs:
             ),
         ],
     }
+
+    # Analysis trigger menu: maps a single logical, year-agnostic key to the
+    # year-tagged variants of ONE physical trigger. Each channel's ``hlt_menu``
+    # references these keys; ``resolve_menu`` turns them into the year-correct
+    # HLT path(s) to OR when applying triggers.
+
+    MENU: ClassVar[dict[str, list[HLT]]] = {
+        # PNet BB single-jet trigger. The path was retuned partway through 2023
+        # (after 6 fb-1), so the "2023" data sample sees BOTH variants -> both
+        # resolve and are OR'd.
+        "pnetbb": [
+            HLT(
+                name="HLT_AK8PFJet250_SoftDropMass40_PFAK8ParticleNetBB0p35",
+                mc_years=years_2022,
+                data_years=years_2022 + ["2023"],
+                dataset="JetMET",
+            ),
+            HLT(
+                name="HLT_AK8PFJet230_SoftDropMass40_PNetBB0p06",
+                years=years_2023 + ["2024"],
+                dataset="JetMET",
+            ),
+        ],
+        "ditau": [
+            HLT(
+                name="HLT_DoubleMediumDeepTauPFTauHPS35_L2NN_eta2p1",
+                years=years,
+                dataset="Tau",
+            ),
+        ],
+        "muiso24": [
+            HLT(
+                name="HLT_IsoMu24",
+                years=years,
+                dataset="Muon",
+            ),
+        ],
+        "ele30": [
+            HLT(
+                name="HLT_Ele30_WPTight_Gsf",
+                years=years,
+                dataset="EGamma",
+            ),
+        ],
+    }
+
+    @classmethod
+    def resolve_menu(
+        cls,
+        year: str,
+        keys: str | list[str],
+        as_str: bool = True,
+        hlt_prefix: bool = True,
+        data_only: bool = False,
+        mc_only: bool = False,
+    ) -> list[HLT | str]:
+        """Resolve logical analysis-menu key(s) to year-correct HLT path(s).
+
+        Args:
+            year (str): year to resolve for.
+            keys (str | list[str]): one or more keys from ``HLTs.MENU``.
+            as_str (bool): return HLT names (True) or HLT objects (False).
+            hlt_prefix (bool): keep the ``HLT_`` prefix on names.
+            data_only / mc_only: filter variants by data/MC validity for the year.
+
+        Returns:
+            list[HLT | str]: the concrete trigger(s) for this menu in this year.
+            A single key may yield more than one path during a transition year
+            (e.g. ``pnetbb`` in 2023).
+        """
+        if isinstance(keys, str):
+            keys = [keys]
+
+        out: list[HLT | str] = []
+        for key in keys:
+            if key not in cls.MENU:
+                raise ValueError(f"Menu key {key!r} not found in HLTs.MENU")
+            for hlt in cls.MENU[key]:
+                if hlt.check_year(year, data_only, mc_only):
+                    out.append(hlt.get_name(hlt_prefix) if as_str else hlt)
+        return out
 
     @classmethod
     def hlt_dict(
@@ -380,3 +501,11 @@ class HLTs:
                 if hlt.get_name() == name:
                     return hlt
         raise ValueError(f"HLT {name} not found in HLTs")
+
+    @classmethod
+    def short_label(cls, name: str) -> str:
+        """Short axis label for *name* (with or without ``HLT_`` prefix)."""
+        key = name if name.startswith("HLT_") else f"HLT_{name}"
+        if key in HLT_SHORT_LABELS:
+            return HLT_SHORT_LABELS[key]
+        return key.removeprefix("HLT_")
