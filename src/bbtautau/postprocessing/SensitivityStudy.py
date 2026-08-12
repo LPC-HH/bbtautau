@@ -147,8 +147,12 @@ class Analyser:
 
         # Extra fixed cut on the tt GloParT tagger, applied on top of the tt
         # discriminant being optimized (BDT or ParT) and the bb discriminant.
+        # Channel-agnostic: cut on the mean of the three per-channel GloParT scores
+        # rather than the score for whichever channel is currently being processed.
         self.tt_glopart_cut = tt_glopart_cut
-        self.extra_tt_disc_name = f"ttFatJetParTX{CHANNELS[sr_config.channel].tagger_label}vsQCDTop"
+        self.extra_tt_disc_names = [
+            f"ttFatJetParTX{ch.tagger_label}vsQCDTop" for ch in CHANNELS.values()
+        ]
 
         self.llsl_weight = llsl_weight
         self.dataMinusSimABCD = dataMinusSimABCD
@@ -473,9 +477,16 @@ class Analyser:
         }
 
         if self.tt_glopart_cut is not None:
-            base_vars["txtts_extra"] = self._extract_var_with_cuts(
-                self.extra_tt_disc_name, base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
-            )
+            extra_disc_vars = [
+                self._extract_var_with_cuts(
+                    disc_name, base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
+                )
+                for disc_name in self.extra_tt_disc_names
+            ]
+            base_vars["txtts_extra"] = {
+                group_name: np.mean([v[group_name] for v in extra_disc_vars], axis=0)
+                for group_name in sig_vs_bkg_groups
+            }
 
         # Extract veto discriminant vars
         base_veto_disc_vars = {}
@@ -757,7 +768,10 @@ class Analyser:
         print(f"{'='*60}")
         print(f"Cuts: txbb > {txbbcut:.4f}, txtt > {txttcut:.4f}")
         if self.tt_glopart_cut is not None:
-            print(f"Extra cut: {self.extra_tt_disc_name} > {self.tt_glopart_cut:.4f}")
+            print(
+                f"Extra cut: mean({', '.join(self.extra_tt_disc_names)}) "
+                f"> {self.tt_glopart_cut:.4f}"
+            )
         print(f"Signal yield: {results['sig_pass']:.2f}")
         print(f"Signal efficiency: {results['sig_eff']:.4f}")
         print(f"Background (ABCD): {results['bkg_ABCD']:.2f}")
@@ -1783,11 +1797,12 @@ Examples:
         type=float,
         default=None,
         help=(
-            "Extra fixed cut on the tt GloParT tagger "
-            "(ttFatJetParTX<channel>vsQCDTop), applied on top of --bb-disc and the tt "
-            "discriminant being optimized (BDT or ParT, per --use-ParT). Useful to test "
-            "combining a BDT cut with an additional GloParT cut. Only respected by the "
-            "'sensitivity' and 'evaluate' actions (default: None, i.e. no extra cut)."
+            "Extra fixed, channel-agnostic cut on the tt GloParT tagger: the mean of the "
+            "three per-channel scores (ttFatJetParTX<channel>vsQCDTop for channel in "
+            "he/hh/hm), applied on top of --bb-disc and the tt discriminant being "
+            "optimized (BDT or ParT, per --use-ParT). Useful to test combining a BDT cut "
+            "with an additional GloParT cut. Only respected by the 'sensitivity' and "
+            "'evaluate' actions (default: None, i.e. no extra cut)."
         ),
     )
     disc_group.add_argument(
