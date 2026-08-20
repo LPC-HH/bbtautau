@@ -147,11 +147,14 @@ class Analyser:
 
         # Extra fixed cut on the tt GloParT tagger, applied on top of the tt
         # discriminant being optimized (BDT or ParT) and the bb discriminant.
-        # Channel-agnostic: cut on the mean of the three per-channel GloParT scores
-        # rather than the score for whichever channel is currently being processed.
+        # Cross-normalized: self channel's raw GloParT score divided by the sum of
+        # all three per-channel raw scores plus QCD and Top, i.e. a proper 5-class
+        # softmax-style ratio rather than a one-vs-QCD+Top-only ratio. This penalizes
+        # jets that look ambiguous between tau channels, not just jets that look like
+        # QCD/top, giving genuine channel-to-channel discrimination.
         self.tt_glopart_cut = tt_glopart_cut
-        self.extra_tt_disc_names = [
-            f"ttFatJetParTX{ch.tagger_label}vsQCDTop" for ch in CHANNELS.values()
+        self._all_tauhtau_raw_disc_names = [
+            f"ttFatJetParTX{ch.tagger_label}" for ch in CHANNELS.values()
         ]
 
         self.llsl_weight = llsl_weight
@@ -212,6 +215,15 @@ class Analyser:
 
         print(f"Computing ROCs for signals: {self.sig_keys_channel}")
 
+        # ROC/score-distribution characterization must always compare against true-channel signal
+        gen_key = f"GenTau{self.channel.key}"
+        signal_events_for_roc = {
+            sig_key: events_dict_allyears[sig_key].copy_from_selection(
+                events_dict_allyears[sig_key].get_var(gen_key).astype(bool)
+            )
+            for sig_key in self.sig_keys_channel
+        }
+
         # Create a combined signal if multiple signals are present. ROCAnalyzer requires a single signal.
         # This allows ROC computation for "SM signal" = union of ggF and VBF.
         if len(self.sig_keys_channel) > 1:
@@ -223,7 +235,7 @@ class Analyser:
             # Collect SM signals and concatenate them
             SM_sample = Sample(label=f"SM bbtt{self.sr_config.channel}", isSignal=True)
             combined_sample = utils.concatenate_loaded_samples(
-                [events_dict_allyears[key] for key in self.sig_keys_channel], out_sample=SM_sample
+                [signal_events_for_roc[key] for key in self.sig_keys_channel], out_sample=SM_sample
             )
 
             signals_for_roc = {combined_signal_name: combined_sample}
@@ -231,7 +243,7 @@ class Analyser:
         else:
             # Single signal: use as-is
             signals_for_roc = {
-                sig_key: events_dict_allyears[sig_key] for sig_key in self.sig_keys_channel
+                sig_key: signal_events_for_roc[sig_key] for sig_key in self.sig_keys_channel
             }
             signal_name_for_fill = self.sig_keys_channel[0]
 
@@ -381,6 +393,28 @@ class Analyser:
             [self.events_dict[year][key].get_var(var_name) for year in self.years], axis=0
         )
 
+    def _compute_glopart_score(
+        self, tagger_label: str, vars_source: dict[str, dict[str, np.ndarray]], group_name: str
+    ) -> np.ndarray:
+        """Cross-normalized GloParT score for an arbitrary channel's ``tagger_label``:
+        its own raw class score divided by the sum of all three tau-channel raw scores
+        plus QCD and Top. ``vars_source`` must contain, for every group in
+        ``sig_vs_bkg_groups``, the raw ``ttFatJetParTX<label>`` entries for all channels
+        (``self._all_tauhtau_raw_disc_names``) plus ``ttFatJetParTQCD``/``ttFatJetParTTop``.
+
+        Single source of truth for this formula: used both to build the current
+        channel's own ``txtts_extra`` (in ``prepare_sensitivity``) and to evaluate a
+        veto region's own channel-specific cut (in ``_apply_veto_masks_for_bmin``), so
+        the two can never silently diverge.
+        """
+        numer = vars_source[f"ttFatJetParTX{tagger_label}"][group_name]
+        denom = (
+            sum(vars_source[name][group_name] for name in self._all_tauhtau_raw_disc_names)
+            + vars_source["ttFatJetParTQCD"][group_name]
+            + vars_source["ttFatJetParTTop"][group_name]
+        )
+        return np.divide(numer, denom, out=np.zeros_like(numer), where=denom != 0)
+
     def _extract_var_with_cuts(
         self, var_name: str, pt_cuts: dict, concatenate_samples: dict[str, list[str]] = None
     ) -> dict[str, np.ndarray]:
@@ -477,14 +511,28 @@ class Analyser:
         }
 
         if self.tt_glopart_cut is not None:
-            extra_disc_vars = [
-                self._extract_var_with_cuts(
+            # Raw ingredients for the cross-normalized GloParT score, channel-independent
+            # (same 5 quantities regardless of which channel is "self"). Kept around (not
+            # just folded into txtts_extra) so _apply_veto_masks_for_bmin can also compute
+            # any *other* channel's version of this score via the same _compute_glopart_score
+            # helper -- single source of truth for the formula, see that method's docstring.
+            raw_glopart_vars = {
+                disc_name: self._extract_var_with_cuts(
                     disc_name, base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
                 )
-                for disc_name in self.extra_tt_disc_names
-            ]
+                for disc_name in self._all_tauhtau_raw_disc_names
+            }
+            raw_glopart_vars["ttFatJetParTQCD"] = self._extract_var_with_cuts(
+                "ttFatJetParTQCD", base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
+            )
+            raw_glopart_vars["ttFatJetParTTop"] = self._extract_var_with_cuts(
+                "ttFatJetParTTop", base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
+            )
+
             base_vars["txtts_extra"] = {
-                group_name: np.mean([v[group_name] for v in extra_disc_vars], axis=0)
+                group_name: self._compute_glopart_score(
+                    self.channel.tagger_label, raw_glopart_vars, group_name
+                )
                 for group_name in sig_vs_bkg_groups
             }
 
@@ -502,6 +550,12 @@ class Analyser:
                     base_veto_disc_vars[veto_tt_disc] = self._extract_var_with_cuts(
                         veto_tt_disc, base_presel_cuts, concatenate_samples=sig_vs_bkg_groups
                     )
+            # Also carry the raw glopart ingredients through the veto-disc-vars pipeline
+            # (progressively sliced in lockstep with everything else across chained
+            # vetoes), so a veto region's own channel-specific score can be recomputed
+            # on its own preselected/already-vetoed events at each step.
+            if self.tt_glopart_cut is not None:
+                base_veto_disc_vars.update(raw_glopart_vars)
 
         # Compute sideband cuts from massbb
         base_sideband_cuts = {
@@ -769,8 +823,9 @@ class Analyser:
         print(f"Cuts: txbb > {txbbcut:.4f}, txtt > {txttcut:.4f}")
         if self.tt_glopart_cut is not None:
             print(
-                f"Extra cut: mean({', '.join(self.extra_tt_disc_names)}) "
-                f"> {self.tt_glopart_cut:.4f}"
+                f"Extra cut: ttFatJetParTX{self.channel.tagger_label} / "
+                f"({' + '.join(self._all_tauhtau_raw_disc_names)} + "
+                f"ttFatJetParTQCD + ttFatJetParTTop) > {self.tt_glopart_cut:.4f}"
             )
         print(f"Signal yield: {results['sig_pass']:.2f}")
         print(f"Signal efficiency: {results['sig_eff']:.4f}")
@@ -823,9 +878,24 @@ class Analyser:
         print(f"    Applying vetoes for Bmin={bmin}: {list(veto_cuts.keys())}")
 
         # Build combined veto mask for all veto regions
-        for veto_key, (veto_bb_cut, veto_tt_cut, veto_bb_disc, veto_tt_disc) in veto_cuts.items():
+        for veto_key, (
+            veto_bb_cut,
+            veto_tt_cut,
+            veto_bb_disc,
+            veto_tt_disc,
+            veto_channel_key,
+        ) in veto_cuts.items():
+            glopart_msg = ""
+            veto_tagger_label = None
+            if self.tt_glopart_cut is not None:
+                veto_tagger_label = CHANNELS[veto_channel_key].tagger_label
+                glopart_msg = (
+                    f", glopart>{self.tt_glopart_cut:.4f} "
+                    f"(cross-norm ttFatJetParTX{veto_tagger_label})"
+                )
             print(
-                f"      {veto_key}: bb>{veto_bb_cut:.4f} ({veto_bb_disc}), tt>{veto_tt_cut:.4f} ({veto_tt_disc})"
+                f"      {veto_key}: bb>{veto_bb_cut:.4f} ({veto_bb_disc}), "
+                f"tt>{veto_tt_cut:.4f} ({veto_tt_disc}){glopart_msg}"
             )
 
             # Get veto discriminant values (pre-extracted in prepare_sensitivity)
@@ -834,10 +904,19 @@ class Analyser:
 
             # Apply veto: keep events that do NOT pass the veto region cuts
             for group_name in self._sig_vs_bkg_groups:
-                veto_mask = ~(
-                    (veto_bb_vals[group_name] > veto_bb_cut)
-                    & (veto_tt_vals[group_name] > veto_tt_cut)
+                veto_region_mask = (veto_bb_vals[group_name] > veto_bb_cut) & (
+                    veto_tt_vals[group_name] > veto_tt_cut
                 )
+                if self.tt_glopart_cut is not None:
+                    # Same formula as the veto channel's own txtts_extra (via
+                    # _compute_glopart_score), evaluated on our own (already
+                    # preselected/previously-vetoed) events -- not a separate
+                    # reimplementation that could silently drift out of sync.
+                    veto_glopart_score = self._compute_glopart_score(
+                        veto_tagger_label, self._veto_disc_vars, group_name
+                    )
+                    veto_region_mask &= veto_glopart_score > self.tt_glopart_cut
+                veto_mask = ~veto_region_mask
                 # Apply mask to all sensitivity vars for this group
                 for var_name in self.sensitivity_vars:
                     self.sensitivity_vars[var_name][group_name] = self.sensitivity_vars[var_name][
@@ -1797,12 +1876,18 @@ Examples:
         type=float,
         default=None,
         help=(
-            "Extra fixed, channel-agnostic cut on the tt GloParT tagger: the mean of the "
-            "three per-channel scores (ttFatJetParTX<channel>vsQCDTop for channel in "
-            "he/hh/hm), applied on top of --bb-disc and the tt discriminant being "
-            "optimized (BDT or ParT, per --use-ParT). Useful to test combining a BDT cut "
-            "with an additional GloParT cut. Only respected by the 'sensitivity' and "
-            "'evaluate' actions (default: None, i.e. no extra cut)."
+            "Extra fixed cut on the tt GloParT tagger, cross-normalized across channels: "
+            "for the channel currently being processed, "
+            "ttFatJetParTX<channel> / (ttFatJetParTXtauhtaue + ttFatJetParTXtauhtauh + "
+            "ttFatJetParTXtauhtaum + ttFatJetParTQCD + ttFatJetParTTop), i.e. the self "
+            "channel's raw score vs. all three tau-channel raw scores plus QCD and Top "
+            "combined, applied on top of --bb-disc and the tt discriminant being "
+            "optimized (BDT or ParT, per --use-ParT). Same cut threshold is used across "
+            "channels but the value is channel-specific, penalizing jets that look "
+            "ambiguous with another tau channel and not just background-like jets. "
+            "Useful to test combining a BDT cut with an additional GloParT cut. Only "
+            "respected by the 'sensitivity' and 'evaluate' actions (default: None, i.e. "
+            "no extra cut)."
         ),
     )
     disc_group.add_argument(

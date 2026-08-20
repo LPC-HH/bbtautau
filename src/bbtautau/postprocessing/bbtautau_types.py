@@ -276,7 +276,7 @@ class SRConfig:
 
     def get_veto_cuts_for_bmin(
         self, bmin: float, fom_name: str = "2sqrtB_S_var"
-    ) -> dict[str, tuple[float, float, str, str]]:
+    ) -> dict[str, tuple[float, float, str, str, str]]:
         """Extract veto cuts from all veto regions for a specific bmin value.
 
         Args:
@@ -284,7 +284,11 @@ class SRConfig:
             fom_name: FOM name to extract cuts from (default: "2sqrtB_S_var")
 
         Returns:
-            dict: veto_key -> (bb_cut, tt_cut, bb_disc, tt_disc)
+            dict: veto_key -> (bb_cut, tt_cut, bb_disc, tt_disc, channel). ``channel`` is
+            the veto region's own channel key, needed by callers that also need to
+            reconstruct channel-specific cuts beyond bb/tt (e.g. the GloParT extra cut
+            in SensitivityStudy.py's Analyser, which is channel-specific and otherwise
+            has no representation here).
         """
         if not self.veto_regions:
             return {}
@@ -327,6 +331,7 @@ class SRConfig:
                 tt_cut,
                 veto_sr_config.bb_disc_name,
                 veto_sr_config.tt_disc_name[veto_sr_config.channel],
+                veto_sr_config.channel,
             )
 
         return veto_cuts
