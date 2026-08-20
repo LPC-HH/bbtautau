@@ -72,17 +72,22 @@ SAMPLES = {
         isData=True,
     ),
     "tau": Sample(
-        selector="^Tau_Run",
+        # 2024 skims dropped "_Run" from the PD directory name (e.g. "Tau_2024C" vs
+        # "Tau_Run2022C"), so match with or without it.
+        selector="^Tau(_Run)?",
         label="Tau",
         isData=True,
     ),
     "muon": Sample(
-        selector="^Muon_Run",
+        # 2024 skims dropped "_Run" and added a part-number suffix (e.g. "Muon0_2024C"
+        # vs "Muon_Run2022C"), so match with or without either.
+        selector="^Muon\\d?(_Run)?",
         label="Muon",
         isData=True,
     ),
     "egamma": Sample(
-        selector="^EGamma_Run",
+        # same 2024 naming difference as "muon" above (e.g. "EGamma0_2024C").
+        selector="^EGamma\\d?(_Run)?",
         label="EGamma",
         isData=True,
     ),

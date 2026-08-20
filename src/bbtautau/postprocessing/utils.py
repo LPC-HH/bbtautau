@@ -283,9 +283,17 @@ def get_columns(
         ]
 
     if ParT_taggers:
+        # 2024 skim doesn't have these fine-grained raw sub-branches (verified 2026-08-18);
+        # everything else raw (Xbb, QCD, Top, Xtauhtau*) is present.
+        missing_2024_raw = (
+            {"QCD0HF", "QCD1HF", "QCD2HF", "TopW", "TopbW"} if year == "2024" else set()
+        )
         for branch in (
-            [f"ak8FatJetParT{key}" for key in Samples.qcdouts + Samples.topouts + Samples.sigouts]
-            * (year != "2024")  # TODO reproduce 2024 samples with updated full glopart outputs
+            [
+                f"ak8FatJetParT{key}"
+                for key in Samples.qcdouts + Samples.topouts + Samples.sigouts
+                if key not in missing_2024_raw
+            ]
             + [
                 f"ak8FatJetParT{key}vsQCD" for key in Samples.sigouts
             ]  # remove exception in muon channel, was only necessary in old ntuples

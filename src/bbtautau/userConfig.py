@@ -66,7 +66,7 @@ _user = _username()
 _repo_name = _REPO_ROOT.name
 # Skimmer ntuple path (shared bbtautau skimmer tag on ceph)
 _default_data_dir = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
-data_dir_2024 = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Jun9_v15_2024_sig_Jin/"
+data_dir_2024 = "/ceph/cms/store/user/lumori/bbtautau/skimmer/25Sep24All_618_v15/"
 DATA_DIR = os.environ.get("BBTAUTAU_DATA_DIR", _default_data_dir)
 DATA_PATHS = path_dict(DATA_DIR, path_2024=data_dir_2024)
 
