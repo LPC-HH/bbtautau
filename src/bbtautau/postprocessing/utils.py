@@ -1038,8 +1038,12 @@ def derive_variables(
 
     for sample in events_dict.values():
         if "ak8FatJetPNetXbbvsQCDLegacy" not in sample.events:
-            Xbb = sample.get_var("ak8FatJetPNetXbbLegacy")
-            QCD = sample.get_var("ak8FatJetPNetQCDLegacy")
+            # get_var()'s .squeeze() collapses a genuine (1 event, num_fatjets) array down to
+            # 1-D when the sample has exactly one row (can happen with small test-mode
+            # samples); atleast_2d restores it. Safe here specifically because num_fatjets is
+            # always 3 (never 1) throughout this codebase, so there's no axis ambiguity.
+            Xbb = np.atleast_2d(sample.get_var("ak8FatJetPNetXbbLegacy"))
+            QCD = np.atleast_2d(sample.get_var("ak8FatJetPNetQCDLegacy"))
             Xbb_vs_QCD = np.divide(Xbb, Xbb + QCD, out=np.zeros_like(Xbb), where=(Xbb + QCD) != 0)
 
             for n in range(num_fatjets):

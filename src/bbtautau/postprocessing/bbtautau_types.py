@@ -18,6 +18,22 @@ from boostedhh.utils import PAD_VAL, Sample
 from bbtautau.HLTs import HLTs
 
 
+def _squeeze_keep_event_axis(arr: np.ndarray) -> np.ndarray:
+    """Like ``arr.squeeze()``, but never collapses axis 0 (the event axis).
+
+    A plain ``.squeeze()`` incorrectly drops axis 0 whenever a sample has exactly one event
+    (e.g. after a tight filter on small test-mode samples): a genuine ``(1, num_fatjets)``
+    per-jet array collapses to 1-D ``(num_fatjets,)``, and a genuine ``(1,)``
+    scalar-per-event array collapses to a bare Python scalar -- both silently wrong, and the
+    latter breaks any downstream boolean-mask indexing (``events[mask]`` reads a bare
+    ``False``/``True`` as a column lookup, not a row mask).
+    """
+    if arr.ndim <= 1:
+        return arr
+    axes_to_squeeze = tuple(ax for ax in range(1, arr.ndim) if arr.shape[ax] == 1)
+    return arr.squeeze(axis=axes_to_squeeze) if axes_to_squeeze else arr
+
+
 @dataclass
 class Channel:
     """Channel."""
@@ -82,9 +98,11 @@ class LoadedSample(utils.LoadedSampleABC):
         """Get a variable from the events DataFrame, applying appropriate masks for jet-specific features."""
         if feat in self.events:
             if pad_nan:
-                return np.nan_to_num(self.events[feat].to_numpy().squeeze(), nan=PAD_VAL)
+                return np.nan_to_num(
+                    _squeeze_keep_event_axis(self.events[feat].to_numpy()), nan=PAD_VAL
+                )
             else:
-                return self.events[feat].to_numpy().squeeze()
+                return _squeeze_keep_event_axis(self.events[feat].to_numpy())
         elif feat.startswith("ttMuon"):
             if self.m_mask is None:
                 raise ValueError(f"m_mask is not set for {self.sample}")
@@ -111,11 +129,11 @@ class LoadedSample(utils.LoadedSampleABC):
             ak8_feat = self.rename_jetbranch_ak8(feat)
             if pad_nan:
                 return np.nan_to_num(
-                    self.events[ak8_feat].to_numpy()[self.bb_mask].squeeze(),
+                    _squeeze_keep_event_axis(self.events[ak8_feat].to_numpy()[self.bb_mask]),
                     nan=PAD_VAL,
                 )
             else:
-                return self.events[ak8_feat].to_numpy()[self.bb_mask].squeeze()
+                return _squeeze_keep_event_axis(self.events[ak8_feat].to_numpy()[self.bb_mask])
         elif feat.startswith("ttFatJet"):
             if self.tt_mask is None:
                 raise ValueError(f"tt_mask is not set for {self.sample}")
@@ -123,10 +141,10 @@ class LoadedSample(utils.LoadedSampleABC):
             ak8_feat = self.rename_jetbranch_ak8(feat)
             if pad_nan:
                 return np.nan_to_num(
-                    self.events[ak8_feat].to_numpy()[self.tt_mask].squeeze(),
+                    _squeeze_keep_event_axis(self.events[ak8_feat].to_numpy()[self.tt_mask]),
                     nan=PAD_VAL,
                 )
-            return self.events[ak8_feat].to_numpy()[self.tt_mask].squeeze()
+            return _squeeze_keep_event_axis(self.events[ak8_feat].to_numpy()[self.tt_mask])
 
         elif feat.startswith("bbJetAway"):
             return self.events[feat.replace("bbJetAway", "AK4JetAway")].to_numpy()[
@@ -140,7 +158,7 @@ class LoadedSample(utils.LoadedSampleABC):
 
         # Not sure if should pad also this case.
         elif utils.is_int(feat[-1]):
-            return self.events[feat[:-1]].to_numpy()[:, int(feat[-1])].squeeze()
+            return _squeeze_keep_event_axis(self.events[feat[:-1]].to_numpy()[:, int(feat[-1])])
 
         else:
             raise ValueError(f"Feature {feat} not found in events")
