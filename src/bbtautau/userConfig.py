@@ -93,6 +93,12 @@ PT_CUTS = {
     "tt": 200,
 }
 
+# dev_channel_separation: dR cone (centered on ttFatJet) used to decide whether a tight
+# lepton counts as "in the tautau candidate" for the a priori hh/hm/he channel definition
+# (see untracked_utils/.../channel_separation_diagnostic.py). Chosen after comparing 0.8 vs
+# 1.5 on ggf SM signal; 1.5 recovers meaningfully more true hm/he signal.
+LEPTON_CONE_DR = 1.5
+
 # usually will go (hh,ggf)->(hh,vbf)->(hm,ggf), etc.
 CHANNEL_ORDERING = ["hh", "hm", "he"]  # order of applying selection and vetoes
 SIGNAL_ORDERING = ["ggfbbtt", "vbfbbtt"]  # order of applying selection and vetoes

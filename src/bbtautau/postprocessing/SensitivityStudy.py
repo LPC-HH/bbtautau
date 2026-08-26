@@ -1588,6 +1588,12 @@ def main(args):
         # preserve order but drop duplicates
         models = list(dict.fromkeys(models))
 
+    if args.a_priori_channels and args.do_vbf:
+        raise ValueError(
+            "--a-priori-channels does not yet support --do-vbf: the cross-signal (ggf-vs-vbf) "
+            "veto path hasn't been designed/tested against a priori channel splitting."
+        )
+
     # Track optimized regions for vetoes (key = signal_channel, e.g., "ggfbbtthh")
     optimized_regions: dict[str, SRConfig] = {}
 
@@ -1615,6 +1621,20 @@ def main(args):
             restrict_signal_to_channel_gen=args.gen_split,
         )
 
+        if args.a_priori_channels:
+            # Classify every sample (data/background/signal alike) by lepton content and keep
+            # only this channel's events -- replaces the CHANNEL_ORDERING veto chain below.
+            # copy_from_selection doesn't preserve e_mask/m_mask (see LoadedSample), but that's
+            # fine here: BDT prediction (the only consumer of ttMuon*/ttElectron* features,
+            # which need e_mask/m_mask) already ran inside load_data_channel above, and nothing
+            # downstream in SensitivityStudy.py touches e_mask/m_mask or ttMuon*/ttElectron*
+            # directly.
+            for year in events_dict:
+                utils.assign_lepton_channel(events_dict[year])
+                for key, sample in events_dict[year].items():
+                    keep = sample.get_var("lepton_channel") == channel_key
+                    events_dict[year][key] = sample.copy_from_selection(keep)
+
         channel_regions: list[SRConfig] = []  # within current channel (overlapping mode)
 
         for signal_name in signal_regions:
@@ -1628,9 +1648,15 @@ def main(args):
                 tt_disc_name=tt_disc_map[signal_name],
             )
 
-            # Add veto regions from previously optimized regions
+            # Add veto regions from previously optimized regions. Skipped under
+            # --a-priori-channels: channel membership is already enforced above, and (ggf-only,
+            # enforced at the top of main()) there's no signal-ordering axis left to veto.
             regions_to_veto = (
-                optimized_regions.values() if not args.overlapping_channels else channel_regions
+                []
+                if args.a_priori_channels
+                else (
+                    optimized_regions.values() if not args.overlapping_channels else channel_regions
+                )
             )
             for veto_region in regions_to_veto:
                 sr_config.add_veto_region(veto_region)
@@ -1816,6 +1842,19 @@ Examples:
         action="store_true",
         default=False,
         help="Also optimize VBF region (runs after ggF, applies veto)",
+    )
+    sr_group.add_argument(
+        "--a-priori-channels",
+        action="store_true",
+        default=False,
+        help=(
+            "dev_channel_separation: classify hh/hm/he a priori from lepton content instead of "
+            "the CHANNEL_ORDERING veto chain -- hm if a tight muon is within "
+            "userConfig.LEPTON_CONE_DR of the ttFatJet, else he if a tight electron is, else hh "
+            "(exhaustive by construction, see utils.assign_lepton_channel). Not yet compatible "
+            "with --do-vbf (cross-signal, i.e. ggf-vs-vbf, veto handling is unaffected by this "
+            "flag and untested in combination with it)."
+        ),
     )
     sr_group.add_argument(  # leave there for testing/legacy purposes
         "--overlapping-channels",

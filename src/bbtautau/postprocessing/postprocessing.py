@@ -209,6 +209,12 @@ def main(args: argparse.Namespace):
 
     CHANNEL = CHANNELS[args.channel]
 
+    if args.a_priori_channels and args.do_vbf:
+        raise ValueError(
+            "--a-priori-channels does not yet support --do-vbf: the cross-signal (ggf-vs-vbf) "
+            "veto path hasn't been designed/tested against a priori channel splitting."
+        )
+
     models = None
     if not args.use_ParT:
         models = [args.ggf_modelname] + ([args.vbf_modelname] if args.do_vbf else [])
@@ -227,6 +233,17 @@ def main(args: argparse.Namespace):
 
     # Keep dictionary structure consistent with legacy code, working out templates one year at a time
     events_dict = events_dict[year_label]
+
+    if args.a_priori_channels:
+        # Classify every sample (data/background/signal alike) by lepton content and keep only
+        # this channel's events -- replaces the CHANNEL_ORDERING veto chain in get_templates.
+        # copy_from_selection doesn't preserve e_mask/m_mask, but that's fine here: BDT
+        # prediction (the only consumer of ttMuon*/ttElectron* features) already ran inside
+        # load_data_channel above, and nothing downstream touches e_mask/m_mask directly.
+        putils.assign_lepton_channel(events_dict)
+        for key, sample in events_dict.items():
+            keep = sample.get_var("lepton_channel") == CHANNEL.key
+            events_dict[key] = sample.copy_from_selection(keep)
     args.sigs = {s + CHANNEL.key: SAMPLES[s + CHANNEL.key] for s in args.sigs}
     systematics: dict[str, dict] = {}
     systematics_path: Path | None = None
@@ -309,6 +326,7 @@ def main(args: argparse.Namespace):
                 template_dir=template_dir_bmin,
                 plot_dir=plot_dir_bmin,
                 show=False,
+                a_priori_channels=args.a_priori_channels,
                 selection_region_kwargs={
                     "sensitivity_dir": args.sensitivity_dir,
                     "bmin": bmin,  # Use loop variable, not args.bmin
@@ -625,6 +643,7 @@ def get_templates(
     plot_data: bool = True,
     show: bool = False,
     selection_region_kwargs: dict = None,
+    a_priori_channels: bool = False,
 ) -> dict[str, Hist]:
     """
     (1) Makes histograms for each region in the ``selection_regions`` dictionary,
@@ -662,8 +681,10 @@ def get_templates(
 
     vetoes = []
     found = False
-    # veto all channels/signals earlier in the ordering than the current one
-    if not control_region:
+    # veto all channels/signals earlier in the ordering than the current one. Skipped under
+    # a_priori_channels: channel membership is already enforced upstream (see main()), and
+    # (ggf-only, enforced there too) there's no signal-ordering axis left to veto.
+    if not control_region and not a_priori_channels:
         for channel_iter in CHANNEL_ORDERING:
             for signal_iter in signal_regions:
                 if channel_iter == channel.key and signal_iter == signal:
@@ -1112,6 +1133,17 @@ def parse_args(parser=None):
         "purely by reco-level SR cuts + the existing cross-channel veto chain, same as "
         "data/background -- signal migrating across channels at reco level is neither lost nor "
         "invisible. Pass --gen-split to recover the old behavior for comparison",
+        default=False,
+    )
+    add_bool_arg(
+        parser,
+        "a-priori-channels",
+        "dev_channel_separation: classify hh/hm/he a priori from lepton content instead of the "
+        "CHANNEL_ORDERING veto chain -- hm if a tight muon is within userConfig.LEPTON_CONE_DR "
+        "of the ttFatJet, else he if a tight electron is, else hh (exhaustive by construction, "
+        "see utils.assign_lepton_channel). Not yet compatible with --do-vbf (cross-signal, i.e. "
+        "ggf-vs-vbf, veto handling is unaffected by this flag and untested in combination with "
+        "it).",
         default=False,
     )
 

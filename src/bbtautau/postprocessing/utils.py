@@ -27,7 +27,7 @@ from bbtautau.postprocessing.bbtautau_types import Channel, LoadedSample
 from bbtautau.postprocessing.bdt_config import BDT_CONFIG
 from bbtautau.postprocessing.bdt_utils import compute_or_load_bdt_preds
 from bbtautau.postprocessing.Samples import CHANNELS
-from bbtautau.userConfig import BDT_EVAL_DIR, DATA_PATHS, MODEL_DIR
+from bbtautau.userConfig import BDT_EVAL_DIR, DATA_PATHS, LEPTON_CONE_DR, MODEL_DIR
 
 base_filters_default = [
     [
@@ -1026,6 +1026,34 @@ def leptons_assignment(
         sample.m_mask = _get_lepton_mask(sample, "Muon", dR_cut)
 
 
+def assign_lepton_channel(events_dict: dict[str, LoadedSample]) -> None:
+    """A priori hh/hm/he channel classification from lepton content (dev_channel_separation).
+
+    hm: a tight muon was found within the tautau cone (``sample.m_mask``, set by
+    ``leptons_assignment`` with ``dR_cut=LEPTON_CONE_DR``). he: no such muon, but a tight
+    electron was found (``sample.e_mask``) -- muon takes precedence. hh: neither -- exhaustive
+    by construction (every event gets exactly one label), unlike a whole-event lepton veto
+    (see channel_separation_diagnostic.py for why that variant was not chosen: hh purity was
+    nearly identical but ~14.6% of true-hh signal became unclassifiable "orphans").
+
+    Requires ``leptons_assignment`` to have already been called (e.g. via ``load_data_channel``,
+    which does this unconditionally). Sets a new ``"lepton_channel"`` column (values in
+    ``{"hh","hm","he"}``) on each sample's ``events``, retrievable via ``get_var``.
+    """
+    for sample in events_dict.values():
+        if sample.m_mask is None or sample.e_mask is None:
+            raise ValueError(
+                f"e_mask/m_mask not set for {sample.sample} -- call leptons_assignment first"
+            )
+        has_muon = sample.m_mask.any(axis=1)
+        has_electron = sample.e_mask.any(axis=1)
+
+        lepton_channel = np.full(len(sample.events), "hh", dtype=object)
+        lepton_channel[has_muon] = "hm"
+        lepton_channel[(~has_muon) & has_electron] = "he"
+        sample.events["lepton_channel"] = lepton_channel
+
+
 def derive_variables(
     events_dict: dict[str, LoadedSample], channel: Channel = None, num_fatjets: int = 3
 ):
@@ -1223,7 +1251,7 @@ def load_data_channel(
 
         derive_variables(events_dict[year])
         bbtautau_assignment(events_dict[year], ttvsbb=ttvsbb)
-        leptons_assignment(events_dict[year], dR_cut=1.5)
+        leptons_assignment(events_dict[year], dR_cut=LEPTON_CONE_DR)
         derive_lepton_variables(events_dict[year])
         derive_vbf_variables(events_dict[year])
 
