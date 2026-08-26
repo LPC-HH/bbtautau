@@ -112,7 +112,7 @@ SAMPLES = {
         isSignal=False,
     ),
     "dyjets": Sample(
-        selector="^DYto2L",
+        selector="^DYto2(L|E|Mu|Tau)",
         label="DY+Jets",
         isSignal=False,
     ),
