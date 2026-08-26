@@ -394,7 +394,7 @@ def control_plots(
     if hists is None:
         hists = {}
     if sig_scale_dict is None:
-        sig_scale_dict = {sig_key: 2e5 for sig_key in sigs}
+        sig_scale_dict = {sig_key: 2e4 for sig_key in sigs}
 
     for shape_var in control_plot_vars:
         if shape_var.var not in hists:
@@ -455,8 +455,8 @@ def control_plots(
                 cutlabel=cutlabel,
                 show=show,
                 log=log,
-                plot_data=False,
-                ylim=pylim if not log else 1e1,
+                plot_data=True,
+                ylim=pylim if not log else 1e3,
                 plot_ratio=plot_ratio,
                 cmslabel="Work in progress",
                 leg_args={"fontsize": 18},
