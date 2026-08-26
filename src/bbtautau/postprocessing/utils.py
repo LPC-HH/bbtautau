@@ -1165,15 +1165,23 @@ def derive_lepton_variables(events_dict: dict[str, LoadedSample]):
 
 def derive_vbf_variables(events_dict: dict[str, LoadedSample]):
     for sample in events_dict.values():
-        sample.events[("VBFJetDeltaEta", 0)] = delta_eta(
-            sample.get_var("VBFJetEta")[:, 0], sample.get_var("VBFJetEta")[:, 1]
-        )
+        vbf_eta0 = sample.get_var("VBFJetEta")[:, 0]
+        vbf_eta1 = sample.get_var("VBFJetEta")[:, 1]
+        # Events with <2 VBF jets have PAD_VAL in one or both slots. Un-guarded, delta_eta on
+        # two PAD_VAL entries (0 valid jets) evaluates to exactly 0 -- silently indistinguishable
+        # from a genuine small-deta dijet, rather than landing safely out of range like the
+        # 1-valid-jet case does. Explicitly mask both variables to PAD_VAL when <2 jets are valid.
+        valid_vbf = (vbf_eta0 != PAD_VAL) & (vbf_eta1 != PAD_VAL)
+
+        deta = delta_eta(vbf_eta0, vbf_eta1)
+        sample.events[("VBFJetDeltaEta", 0)] = PAD_VAL * np.ones_like(vbf_eta0)
+        sample.events.loc[valid_vbf, ("VBFJetDeltaEta", 0)] = deta[valid_vbf]
 
         # Compute invariant mass of the two VBF jets (mjj)
         vbf_jet0 = vector.array(
             {
                 "pt": sample.get_var("VBFJetPt")[:, 0],
-                "eta": sample.get_var("VBFJetEta")[:, 0],
+                "eta": vbf_eta0,
                 "phi": sample.get_var("VBFJetPhi")[:, 0],
                 "mass": sample.get_var("VBFJetMass")[:, 0],
             }
@@ -1181,7 +1189,7 @@ def derive_vbf_variables(events_dict: dict[str, LoadedSample]):
         vbf_jet1 = vector.array(
             {
                 "pt": sample.get_var("VBFJetPt")[:, 1],
-                "eta": sample.get_var("VBFJetEta")[:, 1],
+                "eta": vbf_eta1,
                 "phi": sample.get_var("VBFJetPhi")[:, 1],
                 "mass": sample.get_var("VBFJetMass")[:, 1],
             }
@@ -1189,7 +1197,8 @@ def derive_vbf_variables(events_dict: dict[str, LoadedSample]):
 
         # Add 4-vectors and compute invariant mass
         vbf_dijet = vbf_jet0 + vbf_jet1
-        sample.events[("VBFMassjj", 0)] = vbf_dijet.mass
+        sample.events[("VBFMassjj", 0)] = PAD_VAL * np.ones_like(vbf_eta0)
+        sample.events.loc[valid_vbf, ("VBFMassjj", 0)] = vbf_dijet.mass[valid_vbf]
 
 
 def load_data_channel(

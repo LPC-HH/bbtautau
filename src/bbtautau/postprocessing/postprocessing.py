@@ -142,6 +142,13 @@ control_plot_vars = (
         )
         for i in range(3)
     ]
+    # VBF dijet variables (padded/PAD_VAL for events with <2 VBF jets, falls outside
+    # these ranges and lands in over/underflow, same convention as the ak8FatJet* vars above)
+    + [
+        ShapeVar(var="VBFMassjj", label=r"$m_{jj}^{VBF}$ [GeV]", bins=[25, 0, 3000]),
+        # signed (jets are pT-ordered, not eta-ordered), so range is symmetric
+        ShapeVar(var="VBFJetDeltaEta", label=r"$\Delta\eta_{jj}^{VBF}$", bins=[20, -10, 10]),
+    ]
     #  nElectrons
     + [ShapeVar(var="nElectrons", label=r"Number of Electrons", bins=[3, 0, 3])]
     #  nMuons
