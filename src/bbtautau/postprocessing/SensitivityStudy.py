@@ -396,11 +396,17 @@ class Analyser:
     def _compute_glopart_score(
         self, tagger_label: str, vars_source: dict[str, dict[str, np.ndarray]], group_name: str
     ) -> np.ndarray:
-        """Cross-normalized GloParT score for an arbitrary channel's ``tagger_label``:
-        its own raw class score divided by the sum of all three tau-channel raw scores
-        plus QCD and Top. ``vars_source`` must contain, for every group in
-        ``sig_vs_bkg_groups``, the raw ``ttFatJetParTX<label>`` entries for all channels
-        (``self._all_tauhtau_raw_disc_names``) plus ``ttFatJetParTQCD``/``ttFatJetParTTop``.
+        """GloParT score for an arbitrary channel's ``tagger_label``: its own raw class
+        score divided by itself plus QCD and Top -- i.e. currently just the existing
+        vsQCDTop tagger, not actually cross-normalized against the other two tau-channel
+        raw scores. The true cross-normalized sum (own class / sum of all three
+        tau-channel raw scores + QCD + Top) is left commented out below rather than
+        deleted, in case we want to switch to it later; if we settle on keeping the
+        current (non-cross-normalized) version for good, this should be simplified to
+        just reuse the existing vsQCDTop tagger directly instead of recomputing it here.
+        ``vars_source`` must contain, for every group in ``sig_vs_bkg_groups``, the raw
+        ``ttFatJetParTX<label>`` entries for all channels (``self._all_tauhtau_raw_disc_names``)
+        plus ``ttFatJetParTQCD``/``ttFatJetParTTop``.
 
         Single source of truth for this formula: used both to build the current
         channel's own ``txtts_extra`` (in ``prepare_sensitivity``) and to evaluate a
@@ -409,7 +415,8 @@ class Analyser:
         """
         numer = vars_source[f"ttFatJetParTX{tagger_label}"][group_name]
         denom = (
-            sum(vars_source[name][group_name] for name in self._all_tauhtau_raw_disc_names)
+            # sum(vars_source[name][group_name] for name in self._all_tauhtau_raw_disc_names)
+            numer
             + vars_source["ttFatJetParTQCD"][group_name]
             + vars_source["ttFatJetParTTop"][group_name]
         )
