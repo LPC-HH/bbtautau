@@ -278,6 +278,8 @@ def get_columns(
             ("ak8FatJetPNetmassLegacy", 3),
             ("ak8FatJetParTmassResApplied", 3),
             ("ak8FatJetParTmassVisApplied", 3),
+            ("ak8FatJetCAglobalParT_massVisApplied_with_delta_axis_merged", 3),
+            ("ak8FatJetCAglobalParT_massVisApplied_merged", 3),
             ("ak8FatJetMsd", 3),
             ("ak8FatJetCAglobalParT_massVisApplied", 3),
         ]
@@ -788,6 +790,8 @@ def bbtautau_assignment(
     channel: Channel = None,
     ttvsbb: bool = True,  # This is now by default
     agnostic: bool = False,
+    # 2024, v15, the ParT score is different from v12
+    is_2024: bool = False,
 ):
     """Assign bb and tautau jets per each event."""
 
@@ -824,6 +828,8 @@ def bbtautau_assignment(
         # assign tautau jet as the one with the highest ParTtautauvsQCD score
         elif agnostic:
             sig_labels = [ch.tagger_label for ch in CHANNELS.values()]
+            # 2024, v15, the ParT score is different from v12
+            print(sig_labels)
             num = (
                 sample.get_var(f"ak8FatJetParTX{sig_labels[0]}")
                 + sample.get_var(f"ak8FatJetParTX{sig_labels[1]}")
