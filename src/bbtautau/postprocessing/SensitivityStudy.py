@@ -1201,8 +1201,8 @@ class Analyser:
             gridlims = (0.3, 1) if use_thresholds else (0.2, 0.9)
             gridsize = 20
         else:
-            gridlims = (0.7, 1) if use_thresholds else (0.15, 0.85)
-            gridsize = 80
+            gridlims = (0.7, 1) if use_thresholds else (0.05, 0.99)
+            gridsize = 100
 
         foms = FOMS_TO_OPTIMIZE
 
