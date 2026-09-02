@@ -274,7 +274,7 @@ elif args.year == "2022-2023":
 else:
     years = [args.year]
 
-full_lumi = LUMI[args.year]
+full_lumi = np.sum([LUMI[y] for y in years])
 
 # jmsr_keys = sig_keys + ["vhtobb", "zz", "nozzdiboson"]
 

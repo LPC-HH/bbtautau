@@ -27,7 +27,7 @@ from bbtautau.postprocessing.bbtautau_types import Channel, LoadedSample
 from bbtautau.postprocessing.bdt_config import BDT_CONFIG
 from bbtautau.postprocessing.bdt_utils import compute_or_load_bdt_preds
 from bbtautau.postprocessing.Samples import CHANNELS
-from bbtautau.userConfig import BDT_EVAL_DIR, DATA_PATHS, MODEL_DIR
+from bbtautau.userConfig import BDT_EVAL_DIR, DATA_PATHS, LEPTON_CONE_DR, MODEL_DIR
 
 base_filters_default = [
     [
@@ -284,27 +284,24 @@ def get_columns(
             ("ak8FatJetCAglobalParT_massVisApplied", 3),
         ]
 
-    if year == "2024":
-        if ParT_taggers:
-            for branch in (
-                [f"ak8FatJetParT{key}" for key in Samples.qcdouts_v15 + Samples.topouts_v15 + Samples.sigouts]
-                + [
-                    f"ak8FatJetParT{key}vsQCD" for key in Samples.sigouts
-                ]  # remove exception in muon channel, was only necessary in old ntuples
-                + [f"ak8FatJetParT{key}vsQCDTop" for key in Samples.sigouts]
-            ):
-                columns_data.append((branch, 3))
-    # 2022+2023, v12, more QCD/Top/ParTs var
-    else:
-        if ParT_taggers:
-            for branch in (
-                [f"ak8FatJetParT{key}" for key in Samples.qcdouts + Samples.topouts + Samples.sigouts]
-                + [
-                    f"ak8FatJetParT{key}vsQCD" for key in Samples.sigouts
-                ]  # remove exception in muon channel, was only necessary in old ntuples
-                + [f"ak8FatJetParT{key}vsQCDTop" for key in Samples.sigouts]
-            ):
-                columns_data.append((branch, 3))
+    if ParT_taggers:
+        # 2024 skim doesn't have these fine-grained raw sub-branches (verified 2026-08-18);
+        # everything else raw (Xbb, QCD, Top, Xtauhtau*) is present.
+        missing_2024_raw = (
+            {"QCD0HF", "QCD1HF", "QCD2HF", "TopW", "TopbW"} if year == "2024" else set()
+        )
+        for branch in (
+            [
+                f"ak8FatJetParT{key}"
+                for key in Samples.qcdouts + Samples.topouts + Samples.sigouts
+                if key not in missing_2024_raw
+            ]
+            + [
+                f"ak8FatJetParT{key}vsQCD" for key in Samples.sigouts
+            ]  # remove exception in muon channel, was only necessary in old ntuples
+            + [f"ak8FatJetParT{key}vsQCDTop" for key in Samples.sigouts]
+        ):
+            columns_data.append((branch, 3))
 
     if leptons:
         columns_data += [
@@ -1035,6 +1032,34 @@ def leptons_assignment(
         sample.m_mask = _get_lepton_mask(sample, "Muon", dR_cut)
 
 
+def assign_lepton_channel(events_dict: dict[str, LoadedSample]) -> None:
+    """A priori hh/hm/he channel classification from lepton content (dev_channel_separation).
+
+    hm: a tight muon was found within the tautau cone (``sample.m_mask``, set by
+    ``leptons_assignment`` with ``dR_cut=LEPTON_CONE_DR``). he: no such muon, but a tight
+    electron was found (``sample.e_mask``) -- muon takes precedence. hh: neither -- exhaustive
+    by construction (every event gets exactly one label), unlike a whole-event lepton veto
+    (see channel_separation_diagnostic.py for why that variant was not chosen: hh purity was
+    nearly identical but ~14.6% of true-hh signal became unclassifiable "orphans").
+
+    Requires ``leptons_assignment`` to have already been called (e.g. via ``load_data_channel``,
+    which does this unconditionally). Sets a new ``"lepton_channel"`` column (values in
+    ``{"hh","hm","he"}``) on each sample's ``events``, retrievable via ``get_var``.
+    """
+    for sample in events_dict.values():
+        if sample.m_mask is None or sample.e_mask is None:
+            raise ValueError(
+                f"e_mask/m_mask not set for {sample.sample} -- call leptons_assignment first"
+            )
+        has_muon = sample.m_mask.any(axis=1)
+        has_electron = sample.e_mask.any(axis=1)
+
+        lepton_channel = np.full(len(sample.events), "hh", dtype=object)
+        lepton_channel[has_muon] = "hm"
+        lepton_channel[(~has_muon) & has_electron] = "he"
+        sample.events["lepton_channel"] = lepton_channel
+
+
 def derive_variables(
     events_dict: dict[str, LoadedSample], channel: Channel = None, num_fatjets: int = 3
 ):
@@ -1047,8 +1072,12 @@ def derive_variables(
 
     for sample in events_dict.values():
         if "ak8FatJetPNetXbbvsQCDLegacy" not in sample.events:
-            Xbb = sample.get_var("ak8FatJetPNetXbbLegacy")
-            QCD = sample.get_var("ak8FatJetPNetQCDLegacy")
+            # get_var()'s .squeeze() collapses a genuine (1 event, num_fatjets) array down to
+            # 1-D when the sample has exactly one row (can happen with small test-mode
+            # samples); atleast_2d restores it. Safe here specifically because num_fatjets is
+            # always 3 (never 1) throughout this codebase, so there's no axis ambiguity.
+            Xbb = np.atleast_2d(sample.get_var("ak8FatJetPNetXbbLegacy"))
+            QCD = np.atleast_2d(sample.get_var("ak8FatJetPNetQCDLegacy"))
             Xbb_vs_QCD = np.divide(Xbb, Xbb + QCD, out=np.zeros_like(Xbb), where=(Xbb + QCD) != 0)
 
             for n in range(num_fatjets):
@@ -1142,15 +1171,23 @@ def derive_lepton_variables(events_dict: dict[str, LoadedSample]):
 
 def derive_vbf_variables(events_dict: dict[str, LoadedSample]):
     for sample in events_dict.values():
-        sample.events[("VBFJetDeltaEta", 0)] = delta_eta(
-            sample.get_var("VBFJetEta")[:, 0], sample.get_var("VBFJetEta")[:, 1]
-        )
+        vbf_eta0 = sample.get_var("VBFJetEta")[:, 0]
+        vbf_eta1 = sample.get_var("VBFJetEta")[:, 1]
+        # Events with <2 VBF jets have PAD_VAL in one or both slots. Un-guarded, delta_eta on
+        # two PAD_VAL entries (0 valid jets) evaluates to exactly 0 -- silently indistinguishable
+        # from a genuine small-deta dijet, rather than landing safely out of range like the
+        # 1-valid-jet case does. Explicitly mask both variables to PAD_VAL when <2 jets are valid.
+        valid_vbf = (vbf_eta0 != PAD_VAL) & (vbf_eta1 != PAD_VAL)
+
+        deta = delta_eta(vbf_eta0, vbf_eta1)
+        sample.events[("VBFJetDeltaEta", 0)] = PAD_VAL * np.ones_like(vbf_eta0)
+        sample.events.loc[valid_vbf, ("VBFJetDeltaEta", 0)] = deta[valid_vbf]
 
         # Compute invariant mass of the two VBF jets (mjj)
         vbf_jet0 = vector.array(
             {
                 "pt": sample.get_var("VBFJetPt")[:, 0],
-                "eta": sample.get_var("VBFJetEta")[:, 0],
+                "eta": vbf_eta0,
                 "phi": sample.get_var("VBFJetPhi")[:, 0],
                 "mass": sample.get_var("VBFJetMass")[:, 0],
             }
@@ -1158,7 +1195,7 @@ def derive_vbf_variables(events_dict: dict[str, LoadedSample]):
         vbf_jet1 = vector.array(
             {
                 "pt": sample.get_var("VBFJetPt")[:, 1],
-                "eta": sample.get_var("VBFJetEta")[:, 1],
+                "eta": vbf_eta1,
                 "phi": sample.get_var("VBFJetPhi")[:, 1],
                 "mass": sample.get_var("VBFJetMass")[:, 1],
             }
@@ -1166,7 +1203,8 @@ def derive_vbf_variables(events_dict: dict[str, LoadedSample]):
 
         # Add 4-vectors and compute invariant mass
         vbf_dijet = vbf_jet0 + vbf_jet1
-        sample.events[("VBFMassjj", 0)] = vbf_dijet.mass
+        sample.events[("VBFMassjj", 0)] = PAD_VAL * np.ones_like(vbf_eta0)
+        sample.events.loc[valid_vbf, ("VBFMassjj", 0)] = vbf_dijet.mass[valid_vbf]
 
 
 def load_data_channel(
@@ -1228,7 +1266,7 @@ def load_data_channel(
 
         derive_variables(events_dict[year])
         bbtautau_assignment(events_dict[year], ttvsbb=ttvsbb)
-        leptons_assignment(events_dict[year], dR_cut=1.5)
+        leptons_assignment(events_dict[year], dR_cut=LEPTON_CONE_DR)
         derive_lepton_variables(events_dict[year])
         derive_vbf_variables(events_dict[year])
 
