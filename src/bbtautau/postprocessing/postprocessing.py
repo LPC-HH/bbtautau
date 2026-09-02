@@ -26,7 +26,12 @@ from hist import Hist
 import bbtautau.postprocessing.utils as putils
 from bbtautau.postprocessing import Regions, Samples, plotting
 from bbtautau.postprocessing.bbtautau_types import Channel, LoadedSample
-from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES, SIGNALS, SM_SIGNALS
+from bbtautau.postprocessing.Samples import (
+    CHANNELS,
+    SAMPLES,
+    SIGNALS,
+    sig_keys_vbf,
+)
 from bbtautau.postprocessing.utils import load_data_channel
 from bbtautau.userConfig import (
     CHANNEL_ORDERING,
@@ -222,6 +227,35 @@ def main(args: argparse.Namespace):
             "veto path hasn't been designed/tested against a priori channel splitting."
         )
 
+    if args.use_ParT and args.tt_glopart_cut is not None:
+        print(
+            "--tt-glopart-cut is a no-op in --use_ParT mode (the optimized tt discriminant there "
+            "already is ttFatJetParTX<channel>vsQCDTop); ignoring."
+        )
+
+    if args.sensitivity_dir is not None:
+        # Fail fast on a bad --ggf-modelname/--sensitivity-disc-tag/--tt-glopart-cut combination
+        # by resolving the same CSV lookup used later for real, before the slow (~1hr/year) data
+        # load below -- reuses extract_optimal_cuts_from_csv itself so this can't drift from the
+        # real resolution logic.
+        for signal_region in signal_regions:
+            for bmin in args.bmin:
+                Regions.extract_optimal_cuts_from_csv(
+                    args.sensitivity_dir,
+                    signal_region,
+                    CHANNEL.key,
+                    args.combined_signals,
+                    bmin,
+                    args.use_ParT,
+                    args.do_vbf,
+                    test_mode=args.test_mode,
+                    tt_pres=args.tt_pres,
+                    overlapping_channels=args.overlapping_channels,
+                    sensitivity_disc_tag=args.sensitivity_disc_tag,
+                    ggf_modelname=args.ggf_modelname,
+                    tt_glopart_cut=args.tt_glopart_cut,
+                )
+
     models = None
     if not args.use_ParT:
         models = [args.ggf_modelname] + ([args.vbf_modelname] if args.do_vbf else [])
@@ -347,6 +381,7 @@ def main(args: argparse.Namespace):
                     "sensitivity_disc_tag": args.sensitivity_disc_tag,
                     "ggf_modelname": args.ggf_modelname,
                     "control_region": args.control_region,
+                    "tt_glopart_cut": args.tt_glopart_cut,
                 },
             )
 
@@ -420,6 +455,9 @@ def control_plots(
         hists = {}
     if sig_scale_dict is None:
         sig_scale_dict = {sig_key: 2e4 for sig_key in sigs}
+        for key in sig_scale_dict:
+            if "vbfbbtt" in key and "-" not in key:
+                sig_scale_dict[key] = 1e6
 
     for shape_var in control_plot_vars:
         if shape_var.var not in hists:
@@ -509,7 +547,9 @@ def run_control_plots(args: argparse.Namespace) -> None:
         year_label = args.years
 
     if args.sigs is None:
-        args.sigs = SM_SIGNALS
+
+        # args.sigs = SM_SIGNALS
+        args.sigs = sig_keys_vbf
 
     if args.bgs is None:
         args.bgs = {bkey: b for bkey, b in SAMPLES.items() if b.get_type() == "bg"}
@@ -592,6 +632,7 @@ def run_control_plots(args: argparse.Namespace) -> None:
             overlapping_channels=args.overlapping_channels,
             sensitivity_disc_tag=args.sensitivity_disc_tag,
             ggf_modelname=args.ggf_modelname,
+            tt_glopart_cut=args.tt_glopart_cut,
         )
         pass_region = selection_regions["pass"]
         selection, _ = utils.make_selection(pass_region.cuts, events_dict)
@@ -1219,6 +1260,20 @@ def parse_args(parser=None):
         help=(
             "Subfolder under the presel directory for optimized cuts (must match ``SensitivityStudy`` "
             "output, e.g. May4_optimized_ggf). Overrides ``--ggf-modelname`` for the path only when set."
+        ),
+    )
+
+    parser.add_argument(
+        "--tt-glopart-cut",
+        type=float,
+        default=None,
+        help=(
+            "Extra fixed cut on ttFatJetParTX<channel>vsQCDTop, applied on top of --bb-disc and "
+            "the tt discriminant being optimized (matches SensitivityStudy.py's --tt-glopart-cut, "
+            "which appends '_ttglopart<cut>' to the sensitivity-dir disc folder -- set this to the "
+            "same value used there so the CSV WPs are found and reproduced correctly). No-op in "
+            "--use_ParT mode (the tt discriminant being optimized there already is this same "
+            "column, so a separate cut would be redundant); ignored with a printed note if set."
         ),
     )
 
