@@ -52,7 +52,7 @@ seed=42
 numtoys=100
 toysname=""
 toysfile="--snapshotName MultiDimFit --bypassFrequentistFit --saveToys --toysFrequentist"  # if no toys provided, use post-fit nuisance values from snapshot and save toys
-verbose=9
+verbose=1
 bias=-1
 mintol=0.1  # --cminDefaultMinimizerTolerance
 # maxcalls=1000000000  # --X-rtd MINIMIZER_MaxCalls
@@ -221,8 +221,8 @@ maskblindedargs=""
 for sig_region in "${SIG_REGIONS[@]}"; do
     for channel in "${CHANNELS[@]}"; do
         ccargs+="${sig_region}${channel}fail=${cards_dir}/${sig_region}${channel}fail.txt ${sig_region}${channel}failMCBlinded=${cards_dir}/${sig_region}${channel}failMCBlinded.txt ${sig_region}${channel}pass=${cards_dir}/${sig_region}${channel}pass.txt ${sig_region}${channel}passMCBlinded=${cards_dir}/${sig_region}${channel}passMCBlinded.txt "
-        maskunblindedargs+="mask_${sig_region}${channel}fail=1,mask_${sig_region}${channel}failBlinded=0,mask_${sig_region}${channel}pass=1,mask_${sig_region}${channel}passBlinded=0,"
-        maskblindedargs+="mask_${sig_region}${channel}fail=0,mask_${sig_region}${channel}failBlinded=1,mask_${sig_region}${channel}pass=0,mask_${sig_region}${channel}passBlinded=1,"
+        maskunblindedargs+="mask_${sig_region}${channel}fail=1,mask_${sig_region}${channel}failMCBlinded=0,mask_${sig_region}${channel}pass=1,mask_${sig_region}${channel}passMCBlinded=0,"
+        maskblindedargs+="mask_${sig_region}${channel}fail=0,mask_${sig_region}${channel}failMCBlinded=1,mask_${sig_region}${channel}pass=0,mask_${sig_region}${channel}passMCBlinded=1,"
     done
 done
 

@@ -26,7 +26,12 @@ from hist import Hist
 import bbtautau.postprocessing.utils as putils
 from bbtautau.postprocessing import Regions, Samples, plotting
 from bbtautau.postprocessing.bbtautau_types import Channel, LoadedSample
-from bbtautau.postprocessing.Samples import CHANNELS, SAMPLES, SIGNALS, SM_SIGNALS
+from bbtautau.postprocessing.Samples import (
+    CHANNELS,
+    SAMPLES,
+    SIGNALS,
+    sig_keys_vbf,
+)
 from bbtautau.postprocessing.utils import load_data_channel
 from bbtautau.userConfig import (
     CHANNEL_ORDERING,
@@ -142,6 +147,13 @@ control_plot_vars = (
         )
         for i in range(3)
     ]
+    # VBF dijet variables (padded/PAD_VAL for events with <2 VBF jets, falls outside
+    # these ranges and lands in over/underflow, same convention as the ak8FatJet* vars above)
+    + [
+        ShapeVar(var="VBFMassjj", label=r"$m_{jj}^{VBF}$ [GeV]", bins=[25, 0, 3000]),
+        # signed (jets are pT-ordered, not eta-ordered), so range is symmetric
+        ShapeVar(var="VBFJetDeltaEta", label=r"$\Delta\eta_{jj}^{VBF}$", bins=[20, -10, 10]),
+    ]
     #  nElectrons
     + [ShapeVar(var="nElectrons", label=r"Number of Electrons", bins=[3, 0, 3])]
     #  nMuons
@@ -209,6 +221,41 @@ def main(args: argparse.Namespace):
 
     CHANNEL = CHANNELS[args.channel]
 
+    if args.a_priori_channels and args.do_vbf:
+        raise ValueError(
+            "--a-priori-channels does not yet support --do-vbf: the cross-signal (ggf-vs-vbf) "
+            "veto path hasn't been designed/tested against a priori channel splitting."
+        )
+
+    if args.use_ParT and args.tt_glopart_cut is not None:
+        print(
+            "--tt-glopart-cut is a no-op in --use_ParT mode (the optimized tt discriminant there "
+            "already is ttFatJetParTX<channel>vsQCDTop); ignoring."
+        )
+
+    if args.sensitivity_dir is not None:
+        # Fail fast on a bad --ggf-modelname/--sensitivity-disc-tag/--tt-glopart-cut combination
+        # by resolving the same CSV lookup used later for real, before the slow (~1hr/year) data
+        # load below -- reuses extract_optimal_cuts_from_csv itself so this can't drift from the
+        # real resolution logic.
+        for signal_region in signal_regions:
+            for bmin in args.bmin:
+                Regions.extract_optimal_cuts_from_csv(
+                    args.sensitivity_dir,
+                    signal_region,
+                    CHANNEL.key,
+                    args.combined_signals,
+                    bmin,
+                    args.use_ParT,
+                    args.do_vbf,
+                    test_mode=args.test_mode,
+                    tt_pres=args.tt_pres,
+                    overlapping_channels=args.overlapping_channels,
+                    sensitivity_disc_tag=args.sensitivity_disc_tag,
+                    ggf_modelname=args.ggf_modelname,
+                    tt_glopart_cut=args.tt_glopart_cut,
+                )
+
     models = None
     if not args.use_ParT:
         models = [args.ggf_modelname] + ([args.vbf_modelname] if args.do_vbf else [])
@@ -227,6 +274,17 @@ def main(args: argparse.Namespace):
 
     # Keep dictionary structure consistent with legacy code, working out templates one year at a time
     events_dict = events_dict[year_label]
+
+    if args.a_priori_channels:
+        # Classify every sample (data/background/signal alike) by lepton content and keep only
+        # this channel's events -- replaces the CHANNEL_ORDERING veto chain in get_templates.
+        # copy_from_selection doesn't preserve e_mask/m_mask, but that's fine here: BDT
+        # prediction (the only consumer of ttMuon*/ttElectron* features) already ran inside
+        # load_data_channel above, and nothing downstream touches e_mask/m_mask directly.
+        putils.assign_lepton_channel(events_dict)
+        for key, sample in events_dict.items():
+            keep = sample.get_var("lepton_channel") == CHANNEL.key
+            events_dict[key] = sample.copy_from_selection(keep)
     args.sigs = {s + CHANNEL.key: SAMPLES[s + CHANNEL.key] for s in args.sigs}
     systematics: dict[str, dict] = {}
     systematics_path: Path | None = None
@@ -309,6 +367,7 @@ def main(args: argparse.Namespace):
                 template_dir=template_dir_bmin,
                 plot_dir=plot_dir_bmin,
                 show=False,
+                a_priori_channels=args.a_priori_channels,
                 selection_region_kwargs={
                     "sensitivity_dir": args.sensitivity_dir,
                     "bmin": bmin,  # Use loop variable, not args.bmin
@@ -322,6 +381,7 @@ def main(args: argparse.Namespace):
                     "sensitivity_disc_tag": args.sensitivity_disc_tag,
                     "ggf_modelname": args.ggf_modelname,
                     "control_region": args.control_region,
+                    "tt_glopart_cut": args.tt_glopart_cut,
                 },
             )
 
@@ -394,7 +454,10 @@ def control_plots(
     if hists is None:
         hists = {}
     if sig_scale_dict is None:
-        sig_scale_dict = {sig_key: 2e5 for sig_key in sigs}
+        sig_scale_dict = {sig_key: 2e4 for sig_key in sigs}
+        for key in sig_scale_dict:
+            if "vbfbbtt" in key and "-" not in key:
+                sig_scale_dict[key] = 1e6
 
     for shape_var in control_plot_vars:
         if shape_var.var not in hists:
@@ -455,8 +518,8 @@ def control_plots(
                 cutlabel=cutlabel,
                 show=show,
                 log=log,
-                plot_data=False,
-                ylim=pylim if not log else 1e1,
+                plot_data=True,
+                ylim=pylim if not log else 1e3,
                 plot_ratio=plot_ratio,
                 cmslabel="Work in progress",
                 leg_args={"fontsize": 18},
@@ -484,7 +547,9 @@ def run_control_plots(args: argparse.Namespace) -> None:
         year_label = args.years
 
     if args.sigs is None:
-        args.sigs = SM_SIGNALS
+
+        # args.sigs = SM_SIGNALS
+        args.sigs = sig_keys_vbf
 
     if args.bgs is None:
         args.bgs = {bkey: b for bkey, b in SAMPLES.items() if b.get_type() == "bg"}
@@ -567,6 +632,7 @@ def run_control_plots(args: argparse.Namespace) -> None:
             overlapping_channels=args.overlapping_channels,
             sensitivity_disc_tag=args.sensitivity_disc_tag,
             ggf_modelname=args.ggf_modelname,
+            tt_glopart_cut=args.tt_glopart_cut,
         )
         pass_region = selection_regions["pass"]
         selection, _ = utils.make_selection(pass_region.cuts, events_dict)
@@ -625,6 +691,7 @@ def get_templates(
     plot_data: bool = True,
     show: bool = False,
     selection_region_kwargs: dict = None,
+    a_priori_channels: bool = False,
 ) -> dict[str, Hist]:
     """
     (1) Makes histograms for each region in the ``selection_regions`` dictionary,
@@ -662,8 +729,10 @@ def get_templates(
 
     vetoes = []
     found = False
-    # veto all channels/signals earlier in the ordering than the current one
-    if not control_region:
+    # veto all channels/signals earlier in the ordering than the current one. Skipped under
+    # a_priori_channels: channel membership is already enforced upstream (see main()), and
+    # (ggf-only, enforced there too) there's no signal-ordering axis left to veto.
+    if not control_region and not a_priori_channels:
         for channel_iter in CHANNEL_ORDERING:
             for signal_iter in signal_regions:
                 if channel_iter == channel.key and signal_iter == signal:
@@ -1114,6 +1183,17 @@ def parse_args(parser=None):
         "invisible. Pass --gen-split to recover the old behavior for comparison",
         default=False,
     )
+    add_bool_arg(
+        parser,
+        "a-priori-channels",
+        "dev_channel_separation: classify hh/hm/he a priori from lepton content instead of the "
+        "CHANNEL_ORDERING veto chain -- hm if a tight muon is within userConfig.LEPTON_CONE_DR "
+        "of the ttFatJet, else he if a tight electron is, else hh (exhaustive by construction, "
+        "see utils.assign_lepton_channel). Not yet compatible with --do-vbf (cross-signal, i.e. "
+        "ggf-vs-vbf, veto handling is unaffected by this flag and untested in combination with "
+        "it).",
+        default=False,
+    )
 
     parser.add_argument(
         "--control-plot-vars",
@@ -1180,6 +1260,20 @@ def parse_args(parser=None):
         help=(
             "Subfolder under the presel directory for optimized cuts (must match ``SensitivityStudy`` "
             "output, e.g. May4_optimized_ggf). Overrides ``--ggf-modelname`` for the path only when set."
+        ),
+    )
+
+    parser.add_argument(
+        "--tt-glopart-cut",
+        type=float,
+        default=None,
+        help=(
+            "Extra fixed cut on ttFatJetParTX<channel>vsQCDTop, applied on top of --bb-disc and "
+            "the tt discriminant being optimized (matches SensitivityStudy.py's --tt-glopart-cut, "
+            "which appends '_ttglopart<cut>' to the sensitivity-dir disc folder -- set this to the "
+            "same value used there so the CSV WPs are found and reproduced correctly). No-op in "
+            "--use_ParT mode (the tt discriminant being optimized there already is this same "
+            "column, so a separate cut would be redundant); ignored with a printed note if set."
         ),
     )
 

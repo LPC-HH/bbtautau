@@ -497,11 +497,7 @@ def compute_bdt_preds(
     # Get the expected sample order (must match training order)
     sample_order = get_expected_sample_order(signal_objectives)
 
-    # Load model(s) - single model for n_folds=1, k models for n_folds>1
-    if n_folds > 1:
-        print(f"Loading {n_folds} k-fold models for '{modelname}'...")
-    boosters = load_models(model_dir, modelname, n_folds)
-    print(f"Loaded {len(boosters)} boosters successfully")
+    boosters = None
 
     feature_names = [
         feat
@@ -616,6 +612,12 @@ def compute_bdt_preds(
             if n_target_events == 0:
                 y_pred_new = np.empty((0, len(sample_order)), dtype=np.float32)
             else:
+                if boosters is None:
+                    if n_folds > 1:
+                        print(f"Loading {n_folds} k-fold models for '{modelname}'...")
+                    boosters = load_models(model_dir, modelname, n_folds)
+                    print(f"Loaded {len(boosters)} boosters successfully")
+
                 feature_arrays = [sample_data.get_var(feat) for feat in feature_names]
 
                 if batch_size is None or batch_size <= 0:

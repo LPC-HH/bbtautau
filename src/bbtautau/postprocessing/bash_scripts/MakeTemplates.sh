@@ -19,19 +19,21 @@
 # --tt-pres: Apply tt preselection
 ####################################################################################################
 
-years=("2022" "2022EE" "2023" "2023BPix")
+years=("2022" "2022EE" "2023" "2023BPix" "2024")
 channels=("hh" "hm" "he")
 bmin_values=(5 9 10 11 12 15)  # Can be overridden with --bmin
+sigs_values=()  # Can be set with --sigs; empty means let postprocessing.py use its default (all SIGNALS)
 
 # Repo root (parent of src/); works for any user/checkout path
 MAIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 SCRIPT_DIR="${MAIN_DIR}/src/bbtautau/postprocessing"
 DATA_DIR="/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
-SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2026-06-16/"
+SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2026-08-27/"
 COMBINED_SIGNALS="separate_signals"
 TAG=""
 USE_PART=0
 DO_VBF=0
+A_PRIORI_CHANNELS=0
 USE_SENSITIVITY_DIR=1  # Flag to control --sensitivity-dir argument (default: on)
 TEST_MODE=0
 TT_PRES=0
@@ -40,6 +42,8 @@ GGF_MODEL="May4_optimized_ggf"
 #"19oct25_ak4away_ggfbbtt"
 VBF_MODEL="May4_optimized_vbfk2v0"
 #"19oct25_ak4away_vbfbbtt"
+TT_GLOPART_CUT=""  # Can be set with --tt-glopart-cut; empty means postprocessing.py's default (None)
+SENSITIVITY_DISC_TAG=""  # Can be set with --sensitivity-disc-tag; overrides the auto-computed disc folder
 
 # Function to display help
 show_help() {
@@ -53,6 +57,9 @@ show_help() {
     echo "  --channel CHANNEL      Channel to run on (default: all channels)"
     echo "  --use-part             Use ParT tagger instead of BDT"
     echo "  --do-vbf               Include VBF signal regions"
+    echo "  --a-priori-channels    Classify hh/hm/he by lepton content instead of the"
+    echo "                         CHANNEL_ORDERING veto chain (dev_channel_separation;"
+    echo "                         not yet compatible with --do-vbf)"
     echo "  --control-region       Build CR (annulus) templates for QCD+DY validation"
     echo "  --sensitivity-dir DIR  Directory for --sensitivity-dir (default: /home/users/lumori/bbtautau/plots/SensitivityStudy/2025-12-27/)"
     echo "  --no-sensitivity-dir   Disable the --sensitivity-dir argument (default: enabled)"
@@ -65,6 +72,17 @@ show_help() {
     echo "                         Examples: --bmin 1"
     echo "                                  --bmin 1 5 10"
     echo "                                  --bmin 1 2 5 8 10 15 20"
+    echo "  --sigs KEYS            Space-separated list of signal sample keys to load"
+    echo "                         (default: postprocessing.py's default of all SIGNALS)."
+    echo "                         E.g. --sigs ggfbbtt vbfbbtt to skip BSM points not yet"
+    echo "                         skimmed for a given year (e.g. 2024)."
+    echo "  --tt-glopart-cut CUT   Extra fixed ttFatJetParTX<channel>vsQCDTop cut (must match"
+    echo "                         the --tt-glopart-cut used for the SensitivityStudy run"
+    echo "                         referenced by --sensitivity-dir). No-op with --use-part."
+    echo "  --sensitivity-disc-tag TAG  Override the disc-folder name under --sensitivity-dir"
+    echo "                         (e.g. a manually-renamed SensitivityStudy output folder)."
+    echo "                         Full override -- used verbatim, no --tt-glopart-cut suffix"
+    echo "                         auto-appended."
     echo ""
     echo "Examples:"
     echo "  $0 --tag my_analysis --bmin 1 5 10"
@@ -99,12 +117,25 @@ while [[ $# -gt 0 ]]; do
             channels=($1)
             shift
             ;;
+        --sigs)
+            shift
+            # Parse multiple signal keys separated by spaces (e.g. --sigs ggfbbtt vbfbbtt)
+            sigs_values=()
+            while [[ $# -gt 0 && ! $1 =~ ^-- ]]; do
+                sigs_values+=($1)
+                shift
+            done
+            ;;
         --use-part)
             USE_PART=1
             shift
             ;;
         --do-vbf)
             DO_VBF=1
+            shift
+            ;;
+        --a-priori-channels)
+            A_PRIORI_CHANNELS=1
             shift
             ;;
         --sensitivity-dir)
@@ -148,6 +179,24 @@ while [[ $# -gt 0 ]]; do
             COMBINED_SIGNALS=$1
             shift
             ;;
+        --tt-glopart-cut)
+            shift
+            if [[ $# -eq 0 || $1 =~ ^-- ]]; then
+                echo "Error: --tt-glopart-cut requires a value" >&2
+                exit 1
+            fi
+            TT_GLOPART_CUT=$1
+            shift
+            ;;
+        --sensitivity-disc-tag)
+            shift
+            if [[ $# -eq 0 || $1 =~ ^-- ]]; then
+                echo "Error: --sensitivity-disc-tag requires a value" >&2
+                exit 1
+            fi
+            SENSITIVITY_DISC_TAG=$1
+            shift
+            ;;
         --help|-h)
             show_help
             exit 0
@@ -177,6 +226,7 @@ echo "YEARS: ${years[*]}"
 echo "CHANNELS: ${channels[*]}"
 echo "USE_PART: $USE_PART"
 echo "DO_VBF: $DO_VBF"
+echo "A_PRIORI_CHANNELS: $A_PRIORI_CHANNELS"
 echo "USE_SENSITIVITY_DIR: $USE_SENSITIVITY_DIR"
 echo "SENSITIVITY_DIR: $SENSITIVITY_DIR"
 echo "TEST_MODE: $TEST_MODE"
@@ -184,6 +234,9 @@ echo "TT_PRES: $TT_PRES"
 echo "GGF_MODEL: $GGF_MODEL"
 echo "VBF_MODEL: $VBF_MODEL"
 echo "COMBINED_SIGNALS: $COMBINED_SIGNALS"
+echo "SIGS: ${sigs_values[*]:-<postprocessing.py default: all SIGNALS>}"
+echo "TT_GLOPART_CUT: ${TT_GLOPART_CUT:-<postprocessing.py default: None>}"
+echo "SENSITIVITY_DISC_TAG: ${SENSITIVITY_DISC_TAG:-<auto-computed from GGF_MODEL/TT_GLOPART_CUT>}"
 for year in "${years[@]}"
 do
     echo "Data dir: $DATA_DIR"
@@ -216,6 +269,11 @@ do
             cmd+=(--do-vbf)
         fi
 
+        # Add --a-priori-channels if enabled (dev_channel_separation)
+        if [[ $A_PRIORI_CHANNELS -eq 1 ]]; then
+            cmd+=(--a-priori-channels)
+        fi
+
         # Add --sensitivity-dir if enabled
         if [[ $USE_SENSITIVITY_DIR -eq 1 ]]; then
             cmd+=(--sensitivity-dir "$SENSITIVITY_DIR")
@@ -239,6 +297,21 @@ do
         # Add --combined-signals when set (non-empty string)
         if [[ -n "$COMBINED_SIGNALS" ]]; then
             cmd+=(--combined-signals "$COMBINED_SIGNALS")
+        fi
+
+        # Add --sigs if set (overrides postprocessing.py's default of all SIGNALS)
+        if [[ ${#sigs_values[@]} -gt 0 ]]; then
+            cmd+=(--sigs "${sigs_values[@]}")
+        fi
+
+        # Add --tt-glopart-cut if set
+        if [[ -n "$TT_GLOPART_CUT" ]]; then
+            cmd+=(--tt-glopart-cut "$TT_GLOPART_CUT")
+        fi
+
+        # Add --sensitivity-disc-tag if set
+        if [[ -n "$SENSITIVITY_DISC_TAG" ]]; then
+            cmd+=(--sensitivity-disc-tag "$SENSITIVITY_DISC_TAG")
         fi
 
         # Add bmin values (passed as multiple arguments)

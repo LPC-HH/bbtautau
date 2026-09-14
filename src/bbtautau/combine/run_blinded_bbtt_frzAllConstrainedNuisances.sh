@@ -192,8 +192,8 @@ maskunblindedargs=""
 maskblindedargs=""
 for channel in "${CHANNELS[@]}"; do
     ccargs+="${channel}fail=${cards_dir}/${channel}fail.txt ${channel}failMCBlinded=${cards_dir}/${channel}failMCBlinded.txt ${channel}pass=${cards_dir}/${channel}pass.txt ${channel}passMCBlinded=${cards_dir}/${channel}passMCBlinded.txt "
-    maskunblindedargs+="mask_${channel}fail=1,mask_${channel}failBlinded=0,mask_${channel}pass=1,mask_${channel}passBlinded=0,"
-    maskblindedargs+="mask_${channel}fail=0,mask_${channel}failBlinded=1,mask_${channel}pass=0,mask_${channel}passBlinded=1,"
+    maskunblindedargs+="mask_${channel}fail=1,mask_${channel}failMCBlinded=0,mask_${channel}pass=1,mask_${channel}passMCBlinded=0,"
+    maskblindedargs+="mask_${channel}fail=0,mask_${channel}failMCBlinded=1,mask_${channel}pass=0,mask_${channel}passMCBlinded=1,"
 done
 
 

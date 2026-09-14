@@ -95,18 +95,57 @@ def rem_neg(template_dict: dict):
 
 
 def sum_templates(template_dict: dict, years: list[str]):
-    """Sum templates across years"""
+    """Sum templates across years, restricted to Sample categories common to every year.
+
+    Different years can have different available Sample categories (e.g. BSM signal points
+    not yet skimmed for a given year) -- a plain ``sum()`` of full-axis Hists then fails with
+    "axes not mergeable" once the StrCategory axis contents diverge. Categories missing from
+    at least one year are dropped from the sum (with a warning) rather than padded with zero:
+    we have no MC for that signal point in that year, so treating it as zero yield would
+    misrepresent the acceptance in a combined-years datacard rather than just omitting it.
+    """
 
     ttemplate = next(iter(template_dict.values()))  # sample templates from which to extract values
     combined = {}
 
     for region in ttemplate:
-        thists = []
+        thists = [template_dict[year][region] for year in years]
 
-        for year in years:
-            thists.append(template_dict[year][region])
+        common = set(thists[0].axes["Sample"])
+        for h in thists[1:]:
+            common &= set(h.axes["Sample"])
+        # preserve original category order
+        common_categories = [c for c in thists[0].axes["Sample"] if c in common]
 
-        combined[region] = sum(thists)
+        all_categories: set[str] = set()
+        for h in thists:
+            all_categories |= set(h.axes["Sample"])
+        dropped = all_categories - common
+        if dropped:
+            logging.warning(
+                "sum_templates: region '%s' dropping Sample categories not present in every "
+                "year being summed (%s): %s",
+                region,
+                years,
+                sorted(dropped),
+            )
+
+        restricted = []
+        for h in thists:
+            if list(h.axes["Sample"]) == common_categories:
+                restricted.append(h)
+                continue
+            new_h = Hist(
+                hist.axis.StrCategory(common_categories, name="Sample"),
+                *h.axes[1:],
+                storage="weight",
+            )
+            for sample in common_categories:
+                sample_key_index = np.where(np.array(list(new_h.axes[0])) == sample)[0][0]
+                new_h.view(flow=True)[sample_key_index, ...] = h[sample, ...].view(flow=True)
+            restricted.append(new_h)
+
+        combined[region] = sum(restricted)
 
     return combined
 

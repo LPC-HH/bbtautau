@@ -59,15 +59,21 @@ def _sensitivity_disc_folder(
     use_ParT: bool,
     sensitivity_disc_tag: str | None,
     ggf_modelname: str | None,
+    tt_glopart_cut: float | None = None,
 ) -> str:
-    """Match ``disc_tag`` in ``SensitivityStudy.get_plot_dir`` (ParT, BDT export name, or literal ``BDT``)."""
+    """Match ``disc_tag`` in ``SensitivityStudy.get_plot_dir`` (ParT, BDT export name, or literal
+    ``BDT``), including the ``_ttglopart<cut>`` suffix appended there when a glopart cut is set.
+    An explicit ``sensitivity_disc_tag`` is a full override (e.g. a manually-renamed folder) and
+    is used verbatim -- the suffix is only auto-appended when falling back to ``ggf_modelname``/
+    ``\"BDT\"``."""
     if use_ParT:
         return "ParT"
     if sensitivity_disc_tag:
         return sensitivity_disc_tag
-    if ggf_modelname:
-        return ggf_modelname
-    return "BDT"
+    disc = ggf_modelname or "BDT"
+    if tt_glopart_cut is not None:
+        disc += f"_ttglopart{tt_glopart_cut:.2f}"
+    return disc
 
 
 def extract_optimal_cuts_from_csv(
@@ -84,6 +90,7 @@ def extract_optimal_cuts_from_csv(
     overlapping_channels: bool = False,
     sensitivity_disc_tag: str | None = None,
     ggf_modelname: str | None = None,
+    tt_glopart_cut: float | None = None,
 ):
     """
     Extract optimal cuts for a given bmin value from sensitivity study CSV files.
@@ -105,12 +112,17 @@ def extract_optimal_cuts_from_csv(
         sensitivity_disc_tag: Optional folder name under presel (e.g. ``May4_optimized_ggf``).
             If omitted and not ParT, ``ggf_modelname`` is used, then ``\"BDT\"``.
         ggf_modelname: Default BDT export folder name when ``sensitivity_disc_tag`` is not set.
+        tt_glopart_cut: Extra fixed ttFatJetParTX<channel>vsQCDTop cut used when the
+            sensitivity study was run with ``--tt-glopart-cut`` (appends
+            ``_ttglopart<cut:.2f>`` to the disc folder, matching
+            ``SensitivityStudy.get_plot_dir``). Not used to build the cut itself here --
+            see ``get_selection_regions`` for that.
 
     Returns:
         tuple: (txbb_cut, txtt_cut) - The optimal cuts for the given bmin
     """
     presel = _sensitivity_presel_dir(test_mode, tt_pres)
-    disc = _sensitivity_disc_folder(use_ParT, sensitivity_disc_tag, ggf_modelname)
+    disc = _sensitivity_disc_folder(use_ParT, sensitivity_disc_tag, ggf_modelname, tt_glopart_cut)
     vbf_part = "do_vbf" if do_vbf else "ggf_only"
     ch_part = "overlapping_channels" if overlapping_channels else "orthogonal_channels"
     csv_dir = Path(sensitivity_dir).joinpath(
@@ -154,9 +166,16 @@ def get_selection_regions(
     sensitivity_disc_tag: str | None = None,
     ggf_modelname: str | None = None,
     control_region: bool = False,
+    tt_glopart_cut: float | None = None,
 ):
     """
     Get the selection regions for a given signal and channel.
+
+    ``tt_glopart_cut``: extra fixed cut on ``ttFatJetParTX<channel>vsQCDTop``, matching
+    ``SensitivityStudy.py --tt-glopart-cut``. No-op when ``use_ParT`` (the discriminant being
+    optimized there already is this same column -- see ``main()``'s printed note in
+    ``postprocessing.py``). Otherwise added as its own extra AND condition, separate from the
+    BDT-based tt discriminant being optimized.
 
     If ``control_region`` is True, return the CR (orthogonal annulus) regions instead
     of the nominal SR pass/fail. The SR cuts resolved below are reused as the SR-pass
@@ -185,6 +204,7 @@ def get_selection_regions(
             overlapping_channels=overlapping_channels,
             sensitivity_disc_tag=sensitivity_disc_tag,
             ggf_modelname=ggf_modelname,
+            tt_glopart_cut=None if use_ParT else tt_glopart_cut,
         )
     else:
         txbb_cut = channel.txbb_cut
@@ -230,11 +250,22 @@ def get_selection_regions(
         #     bdt_signal = "ggfbbtt"
         # else:
         bdt_signal = signal
-        pass_cuts[_get_bdt_key(bdt_signal, channel, prefix_only=False)] = [txtt_cut, CUT_MAX_VAL]
-        fail_cuts[f"{bb_disc}+{_get_bdt_key(bdt_signal, channel, prefix_only=False)}"] = [
-            [-CUT_MAX_VAL, txbb_cut],
-            [-CUT_MAX_VAL, txtt_cut],
-        ]
+        bdt_key = _get_bdt_key(bdt_signal, channel, prefix_only=False)
+        pass_cuts[bdt_key] = [txtt_cut, CUT_MAX_VAL]
+        fail_or_vars = f"{bb_disc}+{bdt_key}"
+        fail_or_ranges = [[-CUT_MAX_VAL, txbb_cut], [-CUT_MAX_VAL, txtt_cut]]
+
+        if tt_glopart_cut is not None:
+            # Separate column from bdt_key (the raw ParT vsQCDTop tagger, not the BDT vsAll
+            # score being optimized) -- an extra, independent AND condition, not a max() with
+            # txtt_cut. Extend the fail region's OR-sideband to the matching 3-var complement
+            # (make_selection's "var1+var2+..." OR-cut syntax isn't limited to 2 variables).
+            glopart_col = f"ttFatJetParTX{channel.tagger_label}vsQCDTop"
+            pass_cuts[glopart_col] = [tt_glopart_cut, CUT_MAX_VAL]
+            fail_or_vars += f"+{glopart_col}"
+            fail_or_ranges.append([-CUT_MAX_VAL, tt_glopart_cut])
+
+        fail_cuts[fail_or_vars] = fail_or_ranges
 
     if vetoes is not None:
         for veto in vetoes:

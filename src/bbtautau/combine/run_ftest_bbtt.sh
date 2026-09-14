@@ -221,7 +221,7 @@ run_ftest_for_combo() {
         *) echo "ERROR: bad siglabel $sl"; exit 1 ;;
     esac
 
-    local maskargs="mask_${sr_name}${ch}fail=1,mask_${sr_name}${ch}failBlinded=0,mask_${sr_name}${ch}pass=1,mask_${sr_name}${ch}passBlinded=0"
+    local maskargs="mask_${sr_name}${ch}fail=1,mask_${sr_name}${ch}failMCBlinded=0,mask_${sr_name}${ch}pass=1,mask_${sr_name}${ch}passMCBlinded=0"
     local setparams=""
     local freeparams=""
     for bin in {5..8}; do
@@ -341,7 +341,7 @@ run_ftest_combined() {
     maskunblindedargs=""
     for sr in "${SIG_REGIONS[@]}"; do
         for ch in "${CHANNELS[@]}"; do
-            maskunblindedargs+="mask_${sr}${ch}fail=1,mask_${sr}${ch}failBlinded=0,mask_${sr}${ch}pass=1,mask_${sr}${ch}passBlinded=0,"
+            maskunblindedargs+="mask_${sr}${ch}fail=1,mask_${sr}${ch}failMCBlinded=0,mask_${sr}${ch}pass=1,mask_${sr}${ch}passMCBlinded=0,"
         done
     done
     maskunblindedargs=${maskunblindedargs%,}
