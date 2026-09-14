@@ -180,23 +180,6 @@ class bbtautauSkimmer(SkimmerABC):
         # JMSR
         self.jmsr_vars = ["msoftdrop", "particleNet_mass_legacy", "ParTmassVis", "ParTmassRes"]
 
-        # particlenet legacy variables
-        pnet_vars_legacy = [
-            "Xbb",
-            "QCD",
-            "QCDb",
-            "QCDbb",
-            "QCDcc",
-            "QCDc",
-            "QCDothers",
-            "XbbvsQCD",
-            "mass",
-        ]
-        self.skim_vars["FatJet"] = {
-            **self.skim_vars["FatJet"],
-            **{f"particleNetLegacy_{var}": f"PNet{var}Legacy" for var in pnet_vars_legacy},
-        }
-
         # particlenet NOT legacy variables
         pnet_vars = [
             "XbbVsQCD",
@@ -209,47 +192,115 @@ class bbtautauSkimmer(SkimmerABC):
             **{f"particleNet_{var}": f"PNet{var}" for var in pnet_vars},
         }
 
-        # glopart variables
-        glopart_vars = [
-            "QCD1HF",
-            "QCD2HF",
-            "QCD0HF",
-            "TopW",
-            "TopbW",
-            "TopbWev",
-            "TopbWmv",
-            "TopbWtauhv",
-            "TopbWq",
-            "TopbWqq",
-            "Xbb",
-            "Xcc",
-            "Xcs",
-            "Xgg",
-            "Xqq",
-            "Xtauhtaue",
-            "Xtauhtauh",
-            "Xtauhtaum",
-            # Derived variables
-            "massResCorr",
-            "massVisCorr",
-            "massResApplied",
-            "massVisApplied",
-            "QCD",
-            "Top",
-            "XbbvsQCD",
-            "XbbvsQCDTop",
-            "XtauhtauevsQCD",
-            "XtauhtauevsQCDTop",
-            "XtauhtaumvsQCD",
-            "XtauhtaumvsQCDTop",
-            "XtauhtauhvsQCD",
-            "XtauhtauhvsQCDTop",
-        ]
+        # 2022+2023, v12, more QCD/Top/ParTs var
+        if nano_version.startswith("v12"):
 
-        self.skim_vars["FatJet"] = {
-            **self.skim_vars["FatJet"],
-            **{f"globalParT_{var}": f"ParT{var}" for var in glopart_vars},
-        }
+            pnet_vars_legacy = [
+                "Xbb",
+                "QCD",
+                "QCDb",
+                "QCDbb",
+                "QCDcc",
+                "QCDc",
+                "QCDothers",
+                "XbbvsQCD",
+                "mass",
+            ]
+            self.skim_vars["FatJet"] = {
+                **self.skim_vars["FatJet"],
+                **{f"particleNetLegacy_{var}": f"PNet{var}Legacy" for var in pnet_vars_legacy},
+            }
+
+            # glopart variables
+            glopart_vars = [
+                "QCD1HF",
+                "QCD2HF",
+                "QCD0HF",
+                "TopW",
+                "TopbW",
+                "TopbWev",
+                "TopbWmv",
+                "TopbWtauhv",
+                "TopbWq",
+                "TopbWqq",
+                "Xbb",
+                "Xcc",
+                "Xcs",
+                "Xgg",
+                "Xqq",
+                "Xtauhtaue",
+                "Xtauhtauh",
+                "Xtauhtaum",
+                # Derived variables
+                "massResCorr",
+                "massVisCorr",
+                "massResApplied",
+                "massVisApplied",
+                "QCD",
+                "Top",
+                "XbbvsQCD",
+                "XbbvsQCDTop",
+                "XtauhtauevsQCD",
+                "XtauhtauevsQCDTop",
+                "XtauhtaumvsQCD",
+                "XtauhtaumvsQCDTop",
+                "XtauhtauhvsQCD",
+                "XtauhtauhvsQCDTop",
+            ]
+
+            self.skim_vars["FatJet"] = {
+                **self.skim_vars["FatJet"],
+                **{f"globalParT_{var}": f"ParT{var}" for var in glopart_vars},
+            }
+
+        elif nano_version.startswith("v15"):
+
+            pnet_vars_legacy = [
+                "Xbb",
+                "QCD",
+                "XbbvsQCD",
+                "mass",
+            ]
+            self.skim_vars["FatJet"] = {
+                **self.skim_vars["FatJet"],
+                **{f"particleNetLegacy_{var}": f"PNet{var}Legacy" for var in pnet_vars_legacy},
+            }
+
+            # glopart variables
+            glopart_vars = [
+                "TopbWev",
+                "TopbWmv",
+                "TopbWq",
+                "TopbWqq",
+                "TopbWtauhv",
+                "Xbb",
+                "Xcc",
+                "Xcs",
+                "Xqq",
+                "Xtauhtaue",
+                "Xtauhtauh",
+                "Xtauhtaum",
+                # Derived variables
+                "massResCorr",
+                "massVisCorr",
+                "massResApplied",
+                "massVisApplied",
+                "QCD",
+                "Top",
+                "XbbvsQCD",
+                "XbbvsQCDTop",
+                "XtauhtauevsQCD",
+                "XtauhtauevsQCDTop",
+                "XtauhtaumvsQCD",
+                "XtauhtaumvsQCDTop",
+                "XtauhtauhvsQCD",
+                "XtauhtauhvsQCDTop",
+            ]
+
+            self.skim_vars["FatJet"] = {
+                **self.skim_vars["FatJet"],
+                **{f"globalParT_{var}": f"ParT{var}" for var in glopart_vars},
+            }
 
         # CA variables
         ca_vars = [
@@ -434,9 +485,15 @@ class bbtautauSkimmer(SkimmerABC):
         )
 
         if JEC_loader.met_factory is not None:
-            met = JEC_loader.met_factory.build(events.MET, jets, {}) if isData else events.MET
+            if self._nano_version == "v15":
+                met = JEC_loader.met_factory.build(events.PFMET, jets, {}) if isData else events.PFMET
+            else:
+                met = JEC_loader.met_factory.build(events.MET, jets, {}) if isData else events.MET
         else:
-            met = events.MET
+            if self._nano_version == "v15":
+                met = events.PFMET
+            else:
+                met = events.MET
 
         print("ak4 JECs", f"{time.time() - start:.2f}")
 
@@ -446,7 +503,8 @@ class bbtautauSkimmer(SkimmerABC):
 
         # AK8 Jets
         num_ak8_jets = 3
-        fatjets = objects.get_ak8jets(events.FatJet)  # this adds all our extra variables e.g. TXbb
+        # Added nano_version=self._nano_version for v12/v15
+        fatjets = objects.get_ak8jets(events.FatJet, nano_version=self._nano_version)  # this adds all our extra variables e.g. TXbb
         fatjets, jec_shifted_fatjetvars = JEC_loader.get_jec_jets(
             events,
             fatjets,

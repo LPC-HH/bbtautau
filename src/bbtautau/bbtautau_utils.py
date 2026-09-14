@@ -26,7 +26,7 @@ def parse_common_run_args(parser):
         "--nano-version",
         type=str,
         default="v12_private",
-        choices=["v12_private"],
+        choices=["v12_private", "v15"],
         help="NanoAOD version",
     )
 
