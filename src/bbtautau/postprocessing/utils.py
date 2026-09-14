@@ -169,7 +169,7 @@ def tt_filters(
     channel: Channel = None,
     in_filters: dict[str, list[tuple]] = None,
     num_fatjets: int = 3,
-    tt_cut: float = 0.1,
+    tt_cut: float = 0.3,
     qcd_only: bool = True,
     agnostic: bool = True,
 ):

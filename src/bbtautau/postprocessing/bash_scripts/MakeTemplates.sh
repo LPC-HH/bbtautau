@@ -19,7 +19,7 @@
 # --tt-pres: Apply tt preselection
 ####################################################################################################
 
-years=("2022" "2022EE" "2023" "2023BPix")
+years=("2022" "2022EE" "2023" "2023BPix" "2024")
 channels=("hh" "hm" "he")
 bmin_values=(5 9 10 11 12 15)  # Can be overridden with --bmin
 sigs_values=()  # Can be set with --sigs; empty means let postprocessing.py use its default (all SIGNALS)
@@ -28,7 +28,7 @@ sigs_values=()  # Can be set with --sigs; empty means let postprocessing.py use 
 MAIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 SCRIPT_DIR="${MAIN_DIR}/src/bbtautau/postprocessing"
 DATA_DIR="/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
-SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2026-06-16/"
+SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2026-08-27/"
 COMBINED_SIGNALS="separate_signals"
 TAG=""
 USE_PART=0
@@ -42,6 +42,8 @@ GGF_MODEL="May4_optimized_ggf"
 #"19oct25_ak4away_ggfbbtt"
 VBF_MODEL="May4_optimized_vbfk2v0"
 #"19oct25_ak4away_vbfbbtt"
+TT_GLOPART_CUT=""  # Can be set with --tt-glopart-cut; empty means postprocessing.py's default (None)
+SENSITIVITY_DISC_TAG=""  # Can be set with --sensitivity-disc-tag; overrides the auto-computed disc folder
 
 # Function to display help
 show_help() {
@@ -74,6 +76,13 @@ show_help() {
     echo "                         (default: postprocessing.py's default of all SIGNALS)."
     echo "                         E.g. --sigs ggfbbtt vbfbbtt to skip BSM points not yet"
     echo "                         skimmed for a given year (e.g. 2024)."
+    echo "  --tt-glopart-cut CUT   Extra fixed ttFatJetParTX<channel>vsQCDTop cut (must match"
+    echo "                         the --tt-glopart-cut used for the SensitivityStudy run"
+    echo "                         referenced by --sensitivity-dir). No-op with --use-part."
+    echo "  --sensitivity-disc-tag TAG  Override the disc-folder name under --sensitivity-dir"
+    echo "                         (e.g. a manually-renamed SensitivityStudy output folder)."
+    echo "                         Full override -- used verbatim, no --tt-glopart-cut suffix"
+    echo "                         auto-appended."
     echo ""
     echo "Examples:"
     echo "  $0 --tag my_analysis --bmin 1 5 10"
@@ -170,6 +179,24 @@ while [[ $# -gt 0 ]]; do
             COMBINED_SIGNALS=$1
             shift
             ;;
+        --tt-glopart-cut)
+            shift
+            if [[ $# -eq 0 || $1 =~ ^-- ]]; then
+                echo "Error: --tt-glopart-cut requires a value" >&2
+                exit 1
+            fi
+            TT_GLOPART_CUT=$1
+            shift
+            ;;
+        --sensitivity-disc-tag)
+            shift
+            if [[ $# -eq 0 || $1 =~ ^-- ]]; then
+                echo "Error: --sensitivity-disc-tag requires a value" >&2
+                exit 1
+            fi
+            SENSITIVITY_DISC_TAG=$1
+            shift
+            ;;
         --help|-h)
             show_help
             exit 0
@@ -208,6 +235,8 @@ echo "GGF_MODEL: $GGF_MODEL"
 echo "VBF_MODEL: $VBF_MODEL"
 echo "COMBINED_SIGNALS: $COMBINED_SIGNALS"
 echo "SIGS: ${sigs_values[*]:-<postprocessing.py default: all SIGNALS>}"
+echo "TT_GLOPART_CUT: ${TT_GLOPART_CUT:-<postprocessing.py default: None>}"
+echo "SENSITIVITY_DISC_TAG: ${SENSITIVITY_DISC_TAG:-<auto-computed from GGF_MODEL/TT_GLOPART_CUT>}"
 for year in "${years[@]}"
 do
     echo "Data dir: $DATA_DIR"
@@ -273,6 +302,16 @@ do
         # Add --sigs if set (overrides postprocessing.py's default of all SIGNALS)
         if [[ ${#sigs_values[@]} -gt 0 ]]; then
             cmd+=(--sigs "${sigs_values[@]}")
+        fi
+
+        # Add --tt-glopart-cut if set
+        if [[ -n "$TT_GLOPART_CUT" ]]; then
+            cmd+=(--tt-glopart-cut "$TT_GLOPART_CUT")
+        fi
+
+        # Add --sensitivity-disc-tag if set
+        if [[ -n "$SENSITIVITY_DISC_TAG" ]]; then
+            cmd+=(--sensitivity-disc-tag "$SENSITIVITY_DISC_TAG")
         fi
 
         # Add bmin values (passed as multiple arguments)
