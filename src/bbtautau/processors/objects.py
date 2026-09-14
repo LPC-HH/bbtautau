@@ -109,8 +109,8 @@ def get_ak8jets(fatjets: FatJetArray, nano_version: str):
             fatjets.globalParT_massVis * (1 - fatjets.rawFactor) * fatjets.mass
         )
     elif nano_version.startswith("v15"):
-        fatjets["globalParT_massResCorr"] = fatjets.mass
-        fatjets["globalParT_massVisCorr"] = fatjets.mass
+        fatjets["globalParT_massResCorr"] = fatjets.globalParT3_massCorrX2p
+        fatjets["globalParT_massVisCorr"] = fatjets.globalParT3_massCorrGeneric
         # The mass uses variables from the official NanoAOD.
         # Only to ensure that the variable names are consistent with v12.
         fatjets["globalParT_massResApplied"] = (
@@ -340,12 +340,19 @@ def vbf_jets(
     dr_leptons: float,
     electron_pt: float,
     muon_pt: float,
+    electrons: ElectronArray | None = None,
+    muons: MuonArray | None = None,
 ):
-    """Top 2 jets in pT passing the VBF selections"""
-    electrons = events.Electron
+    """Top 2 jets in pT passing the VBF selections.
+
+    If corrected electron/muon collections are provided by the skimmer, use them
+    for lepton overlap cleaning. Otherwise fall back to the raw NanoAOD
+    collections to preserve the old call pattern.
+    """
+    electrons = events.Electron if electrons is None else electrons
     electrons = electrons[electrons.pt > electron_pt]
 
-    muons = events.Muon
+    muons = events.Muon if muons is None else muons
     muons = muons[muons.pt > muon_pt]
 
     ak4_sel = (
@@ -370,13 +377,20 @@ def ak4_jets_awayfromak8(
     dr_leptons: float,
     electron_pt: float,
     muon_pt: float,
+    electrons: ElectronArray | None = None,
+    muons: MuonArray | None = None,
     sort_by: str = "btag",
 ):
-    """AK4 jets nonoverlapping with AK8 fatjets"""
-    electrons = events.Electron
+    """AK4 jets nonoverlapping with AK8 fatjets.
+
+    If corrected electron/muon collections are provided by the skimmer, use them
+    for lepton overlap cleaning. Otherwise fall back to the raw NanoAOD
+    collections to preserve the old call pattern.
+    """
+    electrons = events.Electron if electrons is None else electrons
     electrons = electrons[electrons.pt > electron_pt]
 
-    muons = events.Muon
+    muons = events.Muon if muons is None else muons
     muons = muons[muons.pt > muon_pt]
 
     ak4_sel = (

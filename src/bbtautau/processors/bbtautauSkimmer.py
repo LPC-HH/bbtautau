@@ -18,11 +18,23 @@ from boostedhh import hh_vars
 from boostedhh.processors import SkimmerABC, utils
 from boostedhh.processors.corrections import (
     JECs,
-    add_pileup_weight,
+    add_pileup_weight_update,
     add_ps_weight,
     get_jetveto_event,
     get_pdf_weights,
     get_scale_weights,
+    # SF, Up/down
+    get_tau_tes,
+    get_tau_vsjet_sf,
+    get_tau_trigger_sf,
+    get_muon_scale_smearing,
+    get_muon_id_sfs,
+    get_muon_trigger_sfs,
+    get_electron_scale_smearing,
+    get_electron_reco_sfs,
+    get_electron_id_sfs,
+    get_electron_trigger_sfs,
+    # get_btag_sfs,
 )
 from boostedhh.processors.utils import (
     P4,
@@ -452,9 +464,372 @@ class bbtautauSkimmer(SkimmerABC):
 
         # Leptons
         num_leptons = 2
-        electrons, etrigvars = objects.good_electrons(events, events.Electron, year)
-        muons, mtrigvars = objects.good_muons(events, events.Muon, year)
-        taus, ttrigvars = objects.good_taus(events, events.Tau, year)
+        # electrons, etrigvars = objects.good_electrons(events, events.Electron, year)
+        electrons_corr, electron_shifted_vars = get_electron_scale_smearing(events, events.Electron, year, isData)
+        # Keep the original NanoAOD Electron index before good_electrons().
+        # Selection and saved kinematics use corrected electrons, while EGM SFs are evaluated on the matched raw electrons.
+        # rawIdx is only a temporary in-memory bridge and is not written to the skim.
+        electrons_corr = ak.with_field(electrons_corr, ak.local_index(events.Electron.pt, axis=1), "rawIdx")
+        electrons, etrigvars = objects.good_electrons(events, electrons_corr, year)
+        electrons_raw_for_sf = events.Electron[electrons.rawIdx]
+
+        # TODO: electron_shifted_vars contains ElectronScale/Smear up/down variations.
+        # They are computed here but not propagated to the selected electrons, CA mass, MET, or skim output yet.
+
+        electron_reco_vars = {}
+        electron_id_vars = {}
+        electron_trigger_vars = {}
+
+        if not isData:
+            electron_reco_sfs = get_electron_reco_sfs(electrons_raw_for_sf, year)
+            electron_id_sfs = get_electron_id_sfs(electrons_raw_for_sf, year)
+            electron_trigger_sfs = get_electron_trigger_sfs(electrons_raw_for_sf, year)
+
+            electron_reco_vars = {
+                "ElectronRecoSF": pad_val(electron_reco_sfs["nom"], num_leptons, 1.0, axis=1),
+                "ElectronRecoEventSF": ak.to_numpy(ak.prod(electron_reco_sfs["nom"], axis=1)),
+            }
+            if self._systematics:
+                electron_reco_vars.update(
+                    {
+                        "ElectronRecoSFUp": pad_val(electron_reco_sfs["up"], num_leptons, 1.0, axis=1),
+                        "ElectronRecoSFDown": pad_val(electron_reco_sfs["down"], num_leptons, 1.0, axis=1),
+                        "ElectronRecoEventSFUp": ak.to_numpy(ak.prod(electron_reco_sfs["up"], axis=1)),
+                        "ElectronRecoEventSFDown": ak.to_numpy(ak.prod(electron_reco_sfs["down"], axis=1)),
+                    }
+                )
+
+            electron_id_vars = {
+                "ElectronWP90NoIsoSF": pad_val(electron_id_sfs["nom"], num_leptons, 1.0, axis=1),
+                "ElectronWP90NoIsoEventSF": ak.to_numpy(ak.prod(electron_id_sfs["nom"], axis=1)),
+            }
+            if self._systematics:
+                electron_id_vars.update(
+                    {
+                        "ElectronWP90NoIsoSFUp": pad_val(electron_id_sfs["up"], num_leptons, 1.0, axis=1),
+                        "ElectronWP90NoIsoSFDown": pad_val(electron_id_sfs["down"], num_leptons, 1.0, axis=1),
+                        "ElectronWP90NoIsoEventSFUp": ak.to_numpy(ak.prod(electron_id_sfs["up"], axis=1)),
+                        "ElectronWP90NoIsoEventSFDown": ak.to_numpy(ak.prod(electron_id_sfs["down"], axis=1)),
+                    }
+                )
+
+            electron_trigger_vars = {
+                "ElectronTrigEle30SF": pad_val(electron_trigger_sfs["nom"], num_leptons, 1.0, axis=1),
+            }
+            if self._systematics:
+                electron_trigger_vars.update(
+                    {
+                        "ElectronTrigEle30SFUp": pad_val(electron_trigger_sfs["up"], num_leptons, 1.0, axis=1),
+                        "ElectronTrigEle30SFDown": pad_val(electron_trigger_sfs["down"], num_leptons, 1.0, axis=1),
+                    }
+                )
+
+        # ============================================================
+        # Electron correction checks
+        # ============================================================
+        debug_electron_corrections = False
+
+        if debug_electron_corrections:
+            print(f"\n========== Electron check: {year} ==========")
+            print("isData:", isData)
+
+            # Scale/smearing arrays correspond to the original Electron order
+            raw_pt_flat = ak.flatten(events.Electron.pt)
+            corrected_pt_flat = ak.flatten(electrons_corr.pt)
+            electron_check_mask = (raw_pt_flat > 20.0) & (raw_pt_flat < 200.0)
+
+            print("\n--- Scale / smearing inputs ---")
+            print("raw pt:", ak.to_list(raw_pt_flat[electron_check_mask][:10]))
+            print("eta:", ak.to_list(ak.flatten(events.Electron.eta)[electron_check_mask][:10]))
+            print("ScEta:", ak.to_list(ak.flatten(events.Electron.eta + events.Electron.deltaEtaSC)[electron_check_mask][:10]))
+            print("r9:", ak.to_list(ak.flatten(events.Electron.r9)[electron_check_mask][:10]))
+            print("seedGain:", ak.to_list(ak.flatten(events.Electron.seedGain)[electron_check_mask][:10]))
+
+            if isData:
+                print("event run:", ak.to_list(events.run[:10]))
+
+            print("\n--- Scale / smearing outputs ---")
+            print("corrected pt:", ak.to_list(corrected_pt_flat[electron_check_mask][:10]))
+            print("corrected/raw:", ak.to_list((corrected_pt_flat[electron_check_mask] / raw_pt_flat[electron_check_mask])[:10]))
+
+            if not isData and electron_shifted_vars is not None:
+                print("scale up pt:", ak.to_list(ak.flatten(electron_shifted_vars["pt"]["ElectronScale_up"])[electron_check_mask][:10]))
+                print("scale down pt:", ak.to_list(ak.flatten(electron_shifted_vars["pt"]["ElectronScale_down"])[electron_check_mask][:10]))
+                print("smear up pt:", ak.to_list(ak.flatten(electron_shifted_vars["pt"]["ElectronSmear_up"])[electron_check_mask][:10]))
+                print("smear down pt:", ak.to_list(ak.flatten(electron_shifted_vars["pt"]["ElectronSmear_down"])[electron_check_mask][:10]))
+
+            # SF arrays correspond to electrons after good_electrons()
+            print("\n--- Selected electrons ---")
+            print("selected pt:", ak.to_list(ak.flatten(electrons.pt)[:10]))
+            print("selected eta:", ak.to_list(ak.flatten(electrons.eta)[:10]))
+            print("selected phi:", ak.to_list(ak.flatten(electrons.phi)[:10]))
+            print("number per event:", ak.to_list(ak.num(electrons, axis=1)[:10]))
+
+            if not isData:
+                print("\n--- Electron Reco SF ---")
+                print("nominal:", ak.to_list(ak.flatten(electron_reco_sfs["nom"])[:10]))
+                print("up:", ak.to_list(ak.flatten(electron_reco_sfs["up"])[:10]))
+                print("down:", ak.to_list(ak.flatten(electron_reco_sfs["down"])[:10]))
+                print("event nominal:", ak.to_list(ak.prod(electron_reco_sfs["nom"], axis=1)[:10]))
+                print("event up:", ak.to_list(ak.prod(electron_reco_sfs["up"], axis=1)[:10]))
+                print("event down:", ak.to_list(ak.prod(electron_reco_sfs["down"], axis=1)[:10]))
+
+                print("\n--- Electron WP90NoIso ID SF ---")
+                print("nominal:", ak.to_list(ak.flatten(electron_id_sfs["nom"])[:10]))
+                print("up:", ak.to_list(ak.flatten(electron_id_sfs["up"])[:10]))
+                print("down:", ak.to_list(ak.flatten(electron_id_sfs["down"])[:10]))
+                print("event nominal:", ak.to_list(ak.prod(electron_id_sfs["nom"], axis=1)[:10]))
+                print("event up:", ak.to_list(ak.prod(electron_id_sfs["up"], axis=1)[:10]))
+                print("event down:", ak.to_list(ak.prod(electron_id_sfs["down"], axis=1)[:10]))
+
+                print("\n--- Electron Ele30 Tight trigger SF ---")
+                print("nominal:", ak.to_list(ak.flatten(electron_trigger_sfs["nom"])[:10]))
+                print("up:", ak.to_list(ak.flatten(electron_trigger_sfs["up"])[:10]))
+                print("down:", ak.to_list(ak.flatten(electron_trigger_sfs["down"])[:10]))
+                print("event nominal:", ak.to_list(ak.prod(electron_trigger_sfs["nom"], axis=1)[:10]))
+                print("event up:", ak.to_list(ak.prod(electron_trigger_sfs["up"], axis=1)[:10]))
+                print("event down:", ak.to_list(ak.prod(electron_trigger_sfs["down"], axis=1)[:10]))
+
+            print("============================================\n") 
+        # ============================================================
+        # Electron correction checks ending
+        # ============================================================ 
+
+        # muons, mtrigvars = objects.good_muons(events, events.Muon, year)
+        muons_corr, muon_shifted_vars = get_muon_scale_smearing(events, events.Muon, year, isData)
+        # Keep the original NanoAOD Muon index before good_muons().
+        # Selection and saved kinematics use corrected muons, while MUO SFs are evaluated on the matched raw muons.
+        # rawIdx is only a temporary in-memory bridge and is not written to the skim.
+        muons_corr = ak.with_field(muons_corr, ak.local_index(events.Muon.pt, axis=1), "rawIdx")
+        muons, mtrigvars = objects.good_muons(events, muons_corr, year)
+        muons_raw_for_sf = events.Muon[muons.rawIdx]
+
+        # TODO: muon_shifted_vars contains MuonScale/Reso up/down variations.
+        # They are computed here but not propagated to the selected muons, CA mass, MET, or skim output yet.
+
+        muon_id_vars = {}
+        muon_trigger_vars = {}
+
+        if not isData:
+            muon_id_sfs = get_muon_id_sfs(muons_raw_for_sf, year)
+            muon_trigger_sfs = get_muon_trigger_sfs(muons_raw_for_sf, year)
+
+            muon_id_vars = {
+                "MuonTightIDSF": pad_val(muon_id_sfs["nom"], num_leptons, 1.0, axis=1),
+                "MuonTightIDEventSF": ak.to_numpy(ak.prod(muon_id_sfs["nom"], axis=1)),
+            }
+            if self._systematics:
+                muon_id_vars.update(
+                    {
+                        "MuonTightIDSFUp": pad_val(muon_id_sfs["up"], num_leptons, 1.0, axis=1),
+                        "MuonTightIDSFDown": pad_val(muon_id_sfs["down"], num_leptons, 1.0, axis=1),
+                        "MuonTightIDEventSFUp": ak.to_numpy(ak.prod(muon_id_sfs["up"], axis=1)),
+                        "MuonTightIDEventSFDown": ak.to_numpy(ak.prod(muon_id_sfs["down"], axis=1)),
+                    }
+                )
+
+            for trigger, sf in muon_trigger_sfs.items():
+                muon_trigger_vars[f"MuonTrig_{trigger}"] = pad_val(sf["nom"], num_leptons, 1.0, axis=1)
+                if self._systematics:
+                    muon_trigger_vars[f"MuonTrig_{trigger}Up"] = pad_val(sf["up"], num_leptons, 1.0, axis=1)
+                    muon_trigger_vars[f"MuonTrig_{trigger}Down"] = pad_val(sf["down"], num_leptons, 1.0, axis=1)
+        
+        # ============================================================
+        # Muon correction checks
+        # ============================================================
+        debug_muon_corrections = False
+
+        if debug_muon_corrections:
+            print(f"\n========== Muon check: {year} ==========")
+            print("isData:", isData)
+
+            # Scale/smearing arrays correspond to the original Muon order
+            raw_pt_flat = ak.flatten(events.Muon.pt, axis=1)
+            raw_eta_flat = ak.flatten(events.Muon.eta, axis=1)
+            raw_phi_flat = ak.flatten(events.Muon.phi, axis=1)
+            raw_charge_flat = ak.flatten(events.Muon.charge, axis=1)
+            raw_nlayers_flat = ak.flatten(events.Muon.nTrackerLayers, axis=1)
+            corrected_pt_flat = ak.flatten(muons_corr.pt, axis=1)
+
+            muon_check_mask = (raw_pt_flat > 26.0) & (raw_pt_flat < 200.0)
+
+            print("\n--- Scale / smearing inputs ---")
+            print("raw pt:", ak.to_list(raw_pt_flat[muon_check_mask][:10]))
+            print("eta (signed):", ak.to_list(raw_eta_flat[muon_check_mask][:10]))
+            print("abs(eta):", ak.to_list(abs(raw_eta_flat)[muon_check_mask][:10]))
+            print("phi:", ak.to_list(raw_phi_flat[muon_check_mask][:10]))
+            print("charge:", ak.to_list(raw_charge_flat[muon_check_mask][:10]))
+            print("nTrackerLayers:", ak.to_list(raw_nlayers_flat[muon_check_mask][:10]))
+            print("raw number per event:", ak.to_list(ak.num(events.Muon, axis=1)[:10]))
+            print("corrected number per event:", ak.to_list(ak.num(muons_corr, axis=1)[:10]))
+            print("event number:", ak.to_list(events.event[:10]))
+            print("luminosity block:", ak.to_list(events.luminosityBlock[:10]))
+
+            print("\n--- Scale / smearing outputs ---")
+            print("nominal corrected pt:", ak.to_list(corrected_pt_flat[muon_check_mask][:10]))
+            print("corrected/raw:", ak.to_list((corrected_pt_flat[muon_check_mask] / raw_pt_flat[muon_check_mask])[:10]))
+
+            if not isData and muon_shifted_vars is not None:
+                muon_scale_up_flat = ak.flatten(muon_shifted_vars["pt"]["MuonScale_up"], axis=1)
+                muon_scale_down_flat = ak.flatten(muon_shifted_vars["pt"]["MuonScale_down"], axis=1)
+                muon_reso_up_flat = ak.flatten(muon_shifted_vars["pt"]["MuonReso_up"], axis=1)
+                muon_reso_down_flat = ak.flatten(muon_shifted_vars["pt"]["MuonReso_down"], axis=1)
+
+                print("scale up pt:", ak.to_list(muon_scale_up_flat[muon_check_mask][:10]))
+                print("scale down pt:", ak.to_list(muon_scale_down_flat[muon_check_mask][:10]))
+                print("resolution up pt:", ak.to_list(muon_reso_up_flat[muon_check_mask][:10]))
+                print("resolution down pt:", ak.to_list(muon_reso_down_flat[muon_check_mask][:10]))
+                print("scale up/nominal:", ak.to_list((muon_scale_up_flat[muon_check_mask] / corrected_pt_flat[muon_check_mask])[:10]))
+                print("scale down/nominal:", ak.to_list((muon_scale_down_flat[muon_check_mask] / corrected_pt_flat[muon_check_mask])[:10]))
+                print("resolution up/nominal:", ak.to_list((muon_reso_up_flat[muon_check_mask] / corrected_pt_flat[muon_check_mask])[:10]))
+                print("resolution down/nominal:", ak.to_list((muon_reso_down_flat[muon_check_mask] / corrected_pt_flat[muon_check_mask])[:10]))
+
+            # SF arrays correspond to muons after good_muons()
+            selected_pt_flat = ak.flatten(muons.pt, axis=1)
+            selected_eta_flat = ak.flatten(muons.eta, axis=1)
+            selected_phi_flat = ak.flatten(muons.phi, axis=1)
+            selected_charge_flat = ak.flatten(muons.charge, axis=1)
+
+            print("\n--- Selected muons ---")
+            print("selected pt:", ak.to_list(selected_pt_flat[:10]))
+            print("selected eta (signed):", ak.to_list(selected_eta_flat[:10]))
+            print("selected abs(eta):", ak.to_list(abs(selected_eta_flat)[:10]))
+            print("selected phi:", ak.to_list(selected_phi_flat[:10]))
+            print("selected charge:", ak.to_list(selected_charge_flat[:10]))
+            print("selected number per event:", ak.to_list(ak.num(muons, axis=1)[:10]))
+
+            if not isData and year in ["2022", "2022EE", "2023", "2023BPix", "2024"]:
+                print("\n--- Muon TightID SF ---")
+                print("nominal:", ak.to_list(ak.flatten(muon_id_sfs["nom"], axis=1)[:10]))
+                print("up:", ak.to_list(ak.flatten(muon_id_sfs["up"], axis=1)[:10]))
+                print("down:", ak.to_list(ak.flatten(muon_id_sfs["down"], axis=1)[:10]))
+                print("SF number per event:", ak.to_list(ak.num(muon_id_sfs["nom"], axis=1)[:10]))
+                print("event nominal:", ak.to_list(ak.prod(muon_id_sfs["nom"], axis=1)[:10]))
+                print("event up:", ak.to_list(ak.prod(muon_id_sfs["up"], axis=1)[:10]))
+                print("event down:", ak.to_list(ak.prod(muon_id_sfs["down"], axis=1)[:10]))
+
+                print("\n--- Muon trigger SFs ---")
+
+                if len(muon_trigger_sfs) == 0:
+                    print("No trigger SF corrections found.")
+
+                for trigger_name, trigger_sf in muon_trigger_sfs.items():
+                    print(f"\nTrigger: {trigger_name}")
+                    print("nominal:", ak.to_list(ak.flatten(trigger_sf["nom"], axis=1)[:10]))
+                    print("up:", ak.to_list(ak.flatten(trigger_sf["up"], axis=1)[:10]))
+                    print("down:", ak.to_list(ak.flatten(trigger_sf["down"], axis=1)[:10]))
+                    print("SF number per event:", ak.to_list(ak.num(trigger_sf["nom"], axis=1)[:10]))
+                    print("diagnostic event nominal:", ak.to_list(ak.prod(trigger_sf["nom"], axis=1)[:10]))
+                    print("diagnostic event up:", ak.to_list(ak.prod(trigger_sf["up"], axis=1)[:10]))
+                    print("diagnostic event down:", ak.to_list(ak.prod(trigger_sf["down"], axis=1)[:10]))
+
+            print("========================================\n")
+
+        # ============================================================
+        # Muon correction checks ending
+        # ============================================================
+
+        taus_corrected, tes_shifted_vars = get_tau_tes(events.Tau, year, isData=isData)
+        # Keep the original NanoAOD Tau index before good_taus().
+        # Selection and CA kinematics use TES-corrected taus, while Tau ID/trigger SFs are evaluated on the matched raw taus.
+        # rawIdx is only a temporary in-memory bridge and is not written to the skim.
+        taus_corrected = ak.with_field(taus_corrected, ak.local_index(events.Tau.pt, axis=1), "rawIdx")
+        taus, ttrigvars = objects.good_taus(events, taus_corrected, year)
+        taus_raw_for_sf = events.Tau[taus.rawIdx]
+
+        # TODO: tes_shifted_vars contains Tau TES up/down variations.
+        # They are computed here but not propagated to the selected taus, CA mass, MET, or skim output yet.
+
+        # print(f"\n========== Tau check: {year} ==========")
+
+        # # Raw Tau
+        # print("Raw Tau pt       :", ak.to_list(ak.flatten(events.Tau.pt)[:10]))
+        # print("Raw Tau mass     :", ak.to_list(ak.flatten(events.Tau.mass)[:10]))
+        # print("Raw Tau eta      :", ak.to_list(ak.flatten(events.Tau.eta)[:10]))
+        # print("Raw Tau DM       :", ak.to_list(ak.flatten(events.Tau.decayMode)[:10]))
+        # if not isData:
+        #     print("Raw Tau genmatch :", ak.to_list(ak.flatten(events.Tau.genPartFlav)[:10]))
+
+        # # TES nominal
+        # print("TES nominal pt   :", ak.to_list(ak.flatten(taus_corrected.pt)[:10]))
+        # print("TES nominal mass :", ak.to_list(ak.flatten(taus_corrected.mass)[:10]))
+
+        # # TES up/down
+        # if not isData and tes_shifted_vars is not None:
+        #     print("TES up pt        :", ak.to_list(ak.flatten(tes_shifted_vars["pt"]["TES_up"])[:10]))
+        #     print("TES down pt      :", ak.to_list(ak.flatten(tes_shifted_vars["pt"]["TES_down"])[:10]))
+        #     print("TES up mass      :", ak.to_list(ak.flatten(tes_shifted_vars["mass"]["TES_up"])[:10]))
+        #     print("TES down mass    :", ak.to_list(ak.flatten(tes_shifted_vars["mass"]["TES_down"])[:10]))
+
+        # # Tau after good_taus selection
+        # print("Selected Tau pt  :", ak.to_list(ak.flatten(taus.pt)[:10]))
+        # print("Selected Tau mass:", ak.to_list(ak.flatten(taus.mass)[:10]))
+        # print("Selected Tau eta :", ak.to_list(ak.flatten(taus.eta)[:10]))
+        # print("Selected Tau DM  :", ak.to_list(ak.flatten(taus.decayMode)[:10]))
+        # if not isData:
+        #     print("Selected Tau gen :", ak.to_list(ak.flatten(taus.genPartFlav)[:10]))
+        
+        # Tau ID/Trigger SF
+        tau_vsjet_sf = None
+        tauSFVars = {}
+        tauTriggerVars = {}
+
+        if not isData:
+            tau_vsjet_sf = get_tau_vsjet_sf(taus_raw_for_sf, year)
+
+            tauSFVars = {
+                "TauVSjetSF": pad_val(tau_vsjet_sf["nom"], num_leptons, 1.0, axis=1),
+                "TauVSjetSFEvent": ak.to_numpy(ak.prod(tau_vsjet_sf["nom"], axis=1)),
+            }
+            if self._systematics:
+                tauSFVars.update(
+                    {
+                        "TauVSjetSFUp": pad_val(tau_vsjet_sf["up"], num_leptons, 1.0, axis=1),
+                        "TauVSjetSFDown": pad_val(tau_vsjet_sf["down"], num_leptons, 1.0, axis=1),
+                        "TauVSjetSFEventUp": ak.to_numpy(ak.prod(tau_vsjet_sf["up"], axis=1)),
+                        "TauVSjetSFEventDown": ak.to_numpy(ak.prod(tau_vsjet_sf["down"], axis=1)),
+                    }
+                )
+
+            # print("\n--- Tau VSjet SF ---")
+            # print("VSjet nominal    :", ak.to_list(ak.flatten(tau_vsjet_sf["nom"])[:10]))
+            # print("VSjet up         :", ak.to_list(ak.flatten(tau_vsjet_sf["up"])[:10]))
+            # print("VSjet down       :", ak.to_list(ak.flatten(tau_vsjet_sf["down"])[:10]))
+            # print("VSjet Event nom  :", tauSFVars["TauVSjetSFEvent"][:10])
+            # print("VSjet Event up   :", tauSFVars["TauVSjetSFEventUp"][:10])
+            # print("VSjet Event down :", tauSFVars["TauVSjetSFEventDown"][:10])
+
+
+            if year == "2024":
+                tau_trig_types = ["ditau", "etau", "mutau", "ditaujet", "vbfditau", "vbfsingletau"]
+            else:
+                tau_trig_types = ["ditau", "etau", "mutau", "ditaujet", "vbftau", "vbfditau"]
+
+            for trigtype in tau_trig_types:
+                trig_sf = get_tau_trigger_sf(taus_raw_for_sf, year, trigtype)
+
+                name = {
+                    "ditau": "DiTau",
+                    "etau": "ETau",
+                    "mutau": "MuTau",
+                    "ditaujet": "DiTauJet",
+                    "vbftau": "VBFTau",
+                    "vbfditau": "VBFDiTau",
+                    "vbfsingletau": "VBFSingleTau",
+                }[trigtype]
+
+                # print(f"{name} nominal :", ak.to_list(ak.flatten(trig_sf["nom"])[:10]))
+                # print(f"{name} up      :", ak.to_list(ak.flatten(trig_sf["up"])[:10]))
+                # print(f"{name} down    :", ak.to_list(ak.flatten(trig_sf["down"])[:10]))
+                # print("========================================\n")
+
+                tauTriggerVars[f"TauTrig{name}SF"] = pad_val(trig_sf["nom"], num_leptons, 1.0, axis=1)
+                if self._systematics:
+                    tauTriggerVars[f"TauTrig{name}SFUp"] = pad_val(trig_sf["up"], num_leptons, 1.0, axis=1)
+                    tauTriggerVars[f"TauTrig{name}SFDown"] = pad_val(trig_sf["down"], num_leptons, 1.0, axis=1)
+
+        # taus, ttrigvars = objects.good_taus(events, events.Tau, year)
+
         boostedtaus = objects.good_boostedtaus(events, events.boostedTau)
 
         # SubJets
@@ -468,7 +843,13 @@ class bbtautauSkimmer(SkimmerABC):
 
         print("Leptons", f"{time.time() - start:.2f}")
 
-        # TODO: lepton systematics
+        if self._systematics and not isData:
+            # TODO: lepton/TES kinematic variations tes_shifted_vars are intentionally not written here yet.
+            # The nominal-corrected collections above are already used by object selection,
+            # CA mass, and saved nominal kinematics. The corresponding up/down branches
+            # should be added only after a consistent policy for shifted selection, MET,
+            # and CA-mass propagation is fixed.
+            pass
 
         # AK4 Jets
         num_ak4_jets = 4
@@ -477,16 +858,34 @@ class bbtautauSkimmer(SkimmerABC):
             events.Jet,
             year,
             isData,
-            jecs=utils.jecs,
+            jecs=utils.jecs if self._systematics and not isData else None,
             fatjets=False,
             applyData=True,
             dataset=dataset,
             nano_version=self._nano_version,
         )
 
+        # TODO: jec_shifted_jetvars contains AK4 JES/JER up/down variations when save_systematics=True.
+        # They are computed by the JEC/JER helper but not propagated to selections, derived variables, or skim output yet.
+
+        # # ============================================================
+        # # AK4 correction checks
+        # # ============================================================
+        # print("AK4 pt before JEC:", ak.to_list(events.Jet.pt[:2, :4]))
+        # print("AK4 pt after  JEC:", ak.to_list(jets.pt[:2, :4]))
+        # print("AK4 pt ratio:", ak.to_list((jets.pt / events.Jet.pt)[:2, :4]))
+        # print("AK4 JEC shift keys:", jec_shifted_jetvars["pt"].keys() if jec_shifted_jetvars else None)
+        # print("AK4 JES up pt:", ak.to_list(jec_shifted_jetvars["pt"]["JES_up"][:2, :4]))
+        # print("AK4 JER up pt:", ak.to_list(jec_shifted_jetvars["pt"]["JER_up"][:2, :4]))
+
+
+        # For NanoAOD v15, use PFMET directly.
+        # The current CorrectedMETFactory expects MetUnclustEnUpDeltaX/Y branches, which are not available in PFMET.
+        # MET/JEC systematic propagation to CA mass is left as a future TODO.
         if JEC_loader.met_factory is not None:
             if self._nano_version == "v15":
-                met = JEC_loader.met_factory.build(events.PFMET, jets, {}) if isData else events.PFMET
+                # met = JEC_loader.met_factory.build(events.PFMET, jets, {}) if isData else events.PFMET
+                met = events.PFMET
             else:
                 met = JEC_loader.met_factory.build(events.MET, jets, {}) if isData else events.MET
         else:
@@ -501,21 +900,52 @@ class bbtautauSkimmer(SkimmerABC):
         ht = ak.sum(jets.pt, axis=1)
         print("ak4", f"{time.time() - start:.2f}")
 
+        # btag_sfs = get_btag_sfs(jets[:, :num_ak4_jets], year) if not isData else None
+        # if btag_sfs is not None:
+        #     btagSFVars = {
+        #         "ak4JetBTagSF": pad_val(btag_sfs["nom"], num_ak4_jets, 1.0, axis=1),
+        #         "BTagEventSF": ak.to_numpy(ak.prod(btag_sfs["nom"], axis=1)),
+        #     }
+        # else:
+        #     btagSFVars = {}
+
+        # # if btag_sfs is not None and self._systematics:
+        # if btag_sfs is not None:
+        #     for source in ["hf", "lf", "hfstats1", "hfstats2", "lfstats1", "lfstats2", "cferr1", "cferr2"]:
+        #         btagSFVars[f"BTagEventSF_{source}Up"] = ak.to_numpy(ak.prod(btag_sfs[f"{source}_up"], axis=1))
+        #         btagSFVars[f"BTagEventSF_{source}Down"] = ak.to_numpy(ak.prod(btag_sfs[f"{source}_down"], axis=1))
+
+        #         # print(btag_sfs.keys())
+        #         # print(btag_sfs["nom"])
+        #         # print(btag_sfs["hf_up"])
+
         # AK8 Jets
         num_ak8_jets = 3
         # Added nano_version=self._nano_version for v12/v15
         fatjets = objects.get_ak8jets(events.FatJet, nano_version=self._nano_version)  # this adds all our extra variables e.g. TXbb
+        fatjets_before_jec = fatjets
         fatjets, jec_shifted_fatjetvars = JEC_loader.get_jec_jets(
             events,
             fatjets,
             year,
             isData,
-            jecs=utils.jecs,
+            jecs=utils.jecs if self._systematics and not isData else None,
             fatjets=True,
             applyData=True,
             dataset=dataset,
             nano_version=self._nano_version,
         )
+
+        # TODO: jec_shifted_fatjetvars contains AK8 JES/JER up/down variations when save_systematics=True.
+        # They are computed by the JEC/JER helper but not propagated to selections, CA mass, or skim output yet.
+
+        # # ============================================================
+        # # AK8 correction checks
+        # # ============================================================
+        # print("AK8 pt before JEC:", ak.to_list(fatjets_before_jec.pt[:20, :3]))
+        # print("AK8 pt after  JEC:", ak.to_list(fatjets.pt[:20, :3]))
+        # print("AK8 pt ratio:", ak.to_list((fatjets.pt / fatjets_before_jec.pt)[:20, :3]))
+
         print("ak8 JECs", f"{time.time() - start:.2f}")
 
         fatjets = objects.good_ak8jets(
@@ -529,6 +959,8 @@ class bbtautauSkimmer(SkimmerABC):
             events,
             **self.vbf_jet_selection,
             **self.vbf_veto_lepton_selection,
+            electrons=electrons_corr,
+            muons=muons_corr,
         )
 
         # # AK4 objects away from first two fatjets
@@ -538,6 +970,8 @@ class bbtautauSkimmer(SkimmerABC):
             events,
             **self.ak4_bjet_selection,
             **self.ak4_bjet_lepton_selection,
+            electrons=electrons_corr,
+            muons=muons_corr,
             sort_by="nearest",
         )
 
@@ -592,7 +1026,20 @@ class bbtautauSkimmer(SkimmerABC):
             f"BoostedTau{key}": pad_val(boostedtaus[var], num_leptons, axis=1)
             for (var, key) in self.skim_vars["BoostedTau"].items()
         }
-        leptonVars = {**electronVars, **muonVars, **tauVars, **boostedtauVars}
+        # leptonVars = {**electronVars, **electron_reco_vars, **electron_id_vars, **muonVars, **muon_trigger_vars, **muon_id_vars, **tauVars, **boostedtauVars}
+        leptonVars = {
+            **electronVars,
+            **electron_reco_vars,
+            **electron_id_vars,
+            **electron_trigger_vars,
+            **muonVars,
+            **muon_trigger_vars,
+            **muon_id_vars,
+            **tauVars,
+            **tauSFVars,
+            **tauTriggerVars,
+            **boostedtauVars,
+        }
 
         # Subjets
         subjetVars = {
@@ -743,6 +1190,7 @@ class bbtautauSkimmer(SkimmerABC):
             # **bbFatJetVars,
             # **trigObjFatJetVars,
             **vbfJetVars,
+            # **btagSFVars,
         }
 
         # if self._region == "signal":
@@ -889,7 +1337,18 @@ class bbtautauSkimmer(SkimmerABC):
         weights = Weights(len(events), storeIndividual=True)
         weights.add("genweight", gen_weights)
 
-        add_pileup_weight(weights, year, events.Pileup.nPU.to_numpy(), dataset)
+        pileup_input = (
+            events.Pileup.nPU.to_numpy()
+            if "Pu60" in dataset or "Pu70" in dataset
+            else events.Pileup.nTrueInt.to_numpy()
+        )
+        add_pileup_weight_update(weights, year, pileup_input, dataset)
+        # add_pileup_weight(
+        #     weights,
+        #     year,
+        #     events.Pileup.nPU.to_numpy(),
+        #     dataset,
+        # )
         add_ps_weight(weights, events.PSWeight)
 
         logger.debug("weights", extra=weights._weights.keys())
