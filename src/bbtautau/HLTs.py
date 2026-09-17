@@ -282,21 +282,21 @@ class HLTs:
         "ditau": [
             HLT(
                 name="HLT_DoubleMediumDeepTauPFTauHPS35_L2NN_eta2p1",
-                years=years,
+                years=years_all,
                 dataset="Tau",
             ),
         ],
         "muiso24": [
             HLT(
                 name="HLT_IsoMu24",
-                years=years,
+                years=years_all,
                 dataset="Muon",
             ),
         ],
         "ele30": [
             HLT(
                 name="HLT_Ele30_WPTight_Gsf",
-                years=years,
+                years=years_all,
                 dataset="EGamma",
             ),
         ],
