@@ -7,6 +7,7 @@ Authors: Ludovico Mori
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import gc
 import json
@@ -28,9 +29,13 @@ from bbtautau.postprocessing.bbtautau_types import LoadedSample
 from bbtautau.postprocessing.bdt_config import BDT_CONFIG
 from bbtautau.postprocessing.bdt_utils import (
     DEFAULT_BKG_ORDER,
+    _predict_with_best_iteration,
     bdt_eval_discriminant_vsall,
     bin_features,
     get_expected_sample_order,
+    get_sample_fold_assignments,
+    load_fold_lookup_from_dir,
+    load_training_wps_from_dir,
     predict_bdt,
     save_training_wps,
 )
@@ -72,6 +77,14 @@ DATA_DIR = Path(
 
 CAP_WEIGHTS = False
 
+# How the (already class-balanced) per-year weights are combined across years:
+#   events: each year normalized to mean weight 1, so a year counts in proportion to its
+#           number of events (historical behavior)
+#   global: a single normalization over all years, so a year counts in proportion to its
+#           signal statistics (per-event signal weights are ~equal across years)
+#   lumi:   each year's total weight set to its share of the integrated luminosity
+YEAR_WEIGHTINGS = ("events", "global", "lumi")
+
 
 class Trainer:
 
@@ -88,7 +101,12 @@ class Trainer:
         output_dir: str = None,
         tt_preselection: bool = False,
         tt_cut: float = 0.3,
+        year_weighting: str = "events",
     ) -> None:
+        if year_weighting not in YEAR_WEIGHTINGS:
+            raise ValueError(
+                f"year_weighting must be one of {YEAR_WEIGHTINGS}, got {year_weighting}"
+            )
         if years[0] == "all":
             print("Using all years")
             years = hh_vars.years
@@ -103,6 +121,7 @@ class Trainer:
         self.bdt_config = BDT_CONFIG
         self.tt_preselection = tt_preselection
         self.tt_cut = tt_cut
+        self.year_weighting = year_weighting
 
         # Set output_dir early (needed for resolving n_folds from saved metadata)
         if output_dir is not None:
@@ -258,7 +277,7 @@ class Trainer:
                 return "vbf"
         return "bkg"
 
-    def _process_samples_for_training(self, balance="bysample"):
+    def _process_samples_for_training(self, balance="bysample", write_stats=True):
         """Process samples and compute weights for training.
 
         This is the common data processing logic used by prepare_training_set().
@@ -272,9 +291,12 @@ class Trainer:
                 - 'equal_groups_equal_channels': like equal_groups, but within signal
                   groups each channel gets equal total weight; within backgrounds
                   weight is distributed proportionally to n_events
+            write_stats: Write weight_stats.csv into self.output_dir. Disable when
+                the trainer's output_dir is an existing model directory whose
+                training-time stats must not be overwritten (e.g. compare_models).
 
         Returns:
-            tuple: (X, y, weights, weights_rescaled) - processed data arrays
+            tuple: (X, y, weights, weights_rescaled, masks, event_ids_list, sample_names_labels)
         """
         if balance not in [
             "bysample",
@@ -291,6 +313,9 @@ class Trainer:
         event_ids_list = []  # List of (luminosityBlock, event) tuples
         masks_list = {"tt_mask": [], "bb_mask": [], "m_mask": [], "e_mask": []}
         weight_stats_by_stage_sample = {}
+
+        # (year, start index in weights_rescaled_list, total balanced weight, n_events)
+        year_info = []
 
         # Process each sample
         for year in self.years:
@@ -383,12 +408,34 @@ class Trainer:
                 total_weight_rescaled += np.sum(weights_rescaled)
                 N_events += len(weights_rescaled)
 
-            # Normalize so the average weight across all samples in this year is 1
-            global_rescale_factor = total_weight_rescaled / N_events
-            print(f"\nYear {year}: global rescale factor = {global_rescale_factor:.4g}")
+            year_info.append((year, year_start_idx, total_weight_rescaled, N_events))
+
+        # Normalize the balanced weights so the overall mean weight is 1 (keeps XGBoost's
+        # min_child_weight / regularization on a sensible scale). How years are weighted
+        # relative to each other depends on self.year_weighting (see YEAR_WEIGHTINGS).
+        n_total = sum(n for _, _, _, n in year_info)
+        if self.year_weighting == "events":
+            factors = {year: total / n for year, _, total, n in year_info}
+        elif self.year_weighting == "global":
+            global_factor = sum(total for _, _, total, _ in year_info) / n_total
+            factors = {year: global_factor for year, _, _, _ in year_info}
+        else:  # lumi
+            lumi_total = sum(hh_vars.LUMI[year] for year, _, _, _ in year_info)
+            factors = {
+                year: total / (n_total * hh_vars.LUMI[year] / lumi_total)
+                for year, _, total, _ in year_info
+            }
+        print(f"\nYear weighting: {self.year_weighting}")
+
+        for year, year_start_idx, total, n in year_info:
+            factor = factors[year]
+            print(
+                f"Year {year}: {n} events, global rescale factor = {factor:.4g}, "
+                f"share of total weight = {total / factor / n_total:.3f}"
+            )
             for i, sample in enumerate(self.events_dict[year].values()):
                 idx = year_start_idx + i
-                weights_rescaled_list[idx] = weights_rescaled_list[idx] / global_rescale_factor
+                weights_rescaled_list[idx] = weights_rescaled_list[idx] / factor
                 key = ("Global rescaling", sample.sample.label)
                 if key not in weight_stats_by_stage_sample:
                     weight_stats_by_stage_sample[key] = []
@@ -408,7 +455,8 @@ class Trainer:
                     "std_weight": np.std(all_weights),
                 }
             )
-        self.save_stats(weight_stats, self.output_dir / "weight_stats.csv")
+        if write_stats:
+            self.save_stats(weight_stats, self.output_dir / "weight_stats.csv")
 
         # Combine all samples
         X = pd.concat(X_list, axis=0).reset_index(drop=True)
@@ -2136,6 +2184,28 @@ def compare_models_light(
     return combined
 
 
+def _oof_predict(
+    boosters: list[xgb.Booster], X: pd.DataFrame, fold: np.ndarray, n_classes: int
+) -> np.ndarray:
+    """Out-of-fold class probabilities: event i is scored only by ``boosters[fold[i]]``.
+
+    Events with ``fold < 0`` were not part of the model's training data at all, so they are
+    held out by construction and are scored by the average of all fold models.
+    """
+    y_pred = np.zeros((len(X), n_classes))
+    for fold_idx, bst in enumerate(boosters):
+        idx = np.flatnonzero(fold == fold_idx)
+        if len(idx):
+            y_pred[idx] = _predict_with_best_iteration(bst, xgb.DMatrix(X.iloc[idx]))
+    unseen = np.flatnonzero(fold < 0)
+    if len(unseen):
+        d_unseen = xgb.DMatrix(X.iloc[unseen])
+        y_pred[unseen] = np.mean(
+            [_predict_with_best_iteration(bst, d_unseen) for bst in boosters], axis=0
+        )
+    return y_pred
+
+
 def compare_models(
     inputs: list[str | Path],
     years: list[str] = ("all",),
@@ -2161,6 +2231,12 @@ def compare_models(
     model was originally trained with -- so e.g. models trained at different
     ``tt_cut`` values can be compared fairly on a common (typically the tightest)
     preselection.
+
+    Evaluation is out-of-fold: every event is scored only by the fold model that did not
+    train on it, using each model's own saved ``fold_indices.npz`` (so this needs k-fold
+    models trained with a version of ``bdt.py`` that saves it). Events a model never saw are
+    scored by the fold-average. Feature binning is reproduced from the ``wps_ttpart.json``
+    saved next to each model.
 
     Args:
         inputs: Model files and/or directories to scan.
@@ -2222,8 +2298,26 @@ def compare_models(
         tr.events_dict = shared_events_dict
         tr.samples = shared_samples
         tr.sample_names = ref_sample_names
-        tr.prepare_training_set(save_buffer=False, prediction_only=True)
         tr.load_model()
+
+        if not tr.use_kfold:
+            raise ValueError(
+                f"Model '{label}' is not a k-fold model (n_folds=1). compare_models evaluates "
+                "out-of-fold predictions on a shared dataset and only supports k-fold models."
+            )
+        kfold_models.append(label)
+
+        # Reproduce the feature binning the model was trained with (WP edges are saved next
+        # to the model files). Work on a private copy of the config so the global BDT_CONFIG
+        # is not mutated (several models can share the same model name).
+        tr.bdt_config = {**BDT_CONFIG, model_name: copy.deepcopy(BDT_CONFIG[model_name])}
+        saved_wps = load_training_wps_from_dir(model_dir)
+        if saved_wps:
+            tr.bdt_config[model_name]["bin_features"] = list(saved_wps)
+            tr.bdt_config[model_name]["wps_ttpart"] = {k: v.tolist() for k, v in saved_wps.items()}
+            print(f"  Applying training-time feature binning: {list(saved_wps)}")
+
+        X, y, weights_all, _, _, event_ids, _ = tr._process_samples_for_training(write_stats=False)
 
         if tr.sample_names != ref_sample_names:
             raise ValueError(
@@ -2231,27 +2325,38 @@ def compare_models(
                 f"expected {ref_sample_names}"
             )
 
-        if tr.use_kfold:
-            kfold_models.append(label)
-
-        dval = tr.dval if hasattr(tr, "dval") else tr.fold_data["dval"][0]
-
-        # Extract labels/weights from the first model (same data, same split seed)
+        # Labels/weights are identical for all models (same shared dataset, same ordering)
         if y_labels is None:
-            y_labels = dval.get_label()
-            weights = dval.get_weight()
+            y_labels = y
+            weights = weights_all
             for class_idx, class_name in enumerate(ref_sample_names):
                 cls_mask = y_labels == class_idx
                 preds_dict[class_name] = LoadedSample(
                     sample=shared_samples[class_name],
                     events={"finalWeight": weights[cls_mask]},
                 )
+        elif not np.array_equal(y, y_labels):
+            raise ValueError(f"Model '{label}' saw a different event ordering than the first model")
 
-        # Predict
-        if len(tr.boosters) > 1:
-            y_pred = np.mean([bst.predict(dval) for bst in tr.boosters], axis=0)
-        else:
-            y_pred = tr.boosters[0].predict(dval)
+        # Out-of-fold predictions: each event is scored only by the fold model that did not
+        # train on it, using this model's *own* saved fold assignment (matched by
+        # (luminosityBlock, event)). Events this model never saw (fold = -1) are held-out by
+        # construction and get the average over all fold models.
+        fold_lookup = load_fold_lookup_from_dir(model_dir)
+        if fold_lookup is None:
+            raise FileNotFoundError(f"No fold_indices.npz found in {model_dir}")
+        lumi = np.fromiter((e[0] for e in event_ids), dtype=np.int64, count=len(event_ids))
+        evt = np.fromiter((e[1] for e in event_ids), dtype=np.int64, count=len(event_ids))
+        fold = get_sample_fold_assignments(
+            Path(model_dir), model_name, lumi, evt, fold_lookup=fold_lookup
+        )
+        y_pred = _oof_predict(tr.boosters, X, fold, len(ref_sample_names))
+        n_unseen = int(np.sum(fold < 0))
+        print(
+            f"  OOF evaluation: {len(y) - n_unseen}/{len(y)} events scored by their "
+            f"held-out fold model, {n_unseen} unseen by this model (fold-averaged)"
+        )
+        del X
 
         if y_pred.ndim != 2 or y_pred.shape[1] != len(ref_sample_names):
             raise ValueError(
@@ -2409,6 +2514,15 @@ if __name__ == "__main__":
         type=float,
         default=0.3,
         help="tt preselection cut value (only used if --tt-preselection is set)",
+    )
+    parser.add_argument(
+        "--year-weighting",
+        choices=YEAR_WEIGHTINGS,
+        default="events",
+        help="How years are weighted relative to each other in training: 'events' (each year "
+        "normalized separately, so weight follows event count; historical behavior), 'global' "
+        "(single normalization, weight follows signal statistics), 'lumi' (weight follows "
+        "integrated luminosity).",
     )
     parser.add_argument(
         "--output-dir",
@@ -2590,6 +2704,7 @@ if __name__ == "__main__":
         data_path=args.data_path,
         tt_preselection=args.tt_preselection,
         tt_cut=args.tt_cut,
+        year_weighting=args.year_weighting,
     )
 
     # Apply feature binning settings from CLI to config

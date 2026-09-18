@@ -57,7 +57,12 @@ def load_training_wps(model_dir: Path, modelname: str) -> dict[str, np.ndarray] 
     Looks for wps_ttpart.json in model_dir/modelname/.
     Returns None if the file does not exist.
     """
-    wps_path = model_dir / modelname / WPS_FILENAME
+    return load_training_wps_from_dir(model_dir / modelname)
+
+
+def load_training_wps_from_dir(artifact_dir: Path) -> dict[str, np.ndarray] | None:
+    """Like :func:`load_training_wps`, but takes the directory holding the model files."""
+    wps_path = Path(artifact_dir) / WPS_FILENAME
     if not wps_path.exists():
         return None
     with wps_path.open("r") as f:
@@ -1254,7 +1259,14 @@ def load_fold_lookup(
         Tuple of (sorted_keys, sorted_fold) ready for searchsorted, or None if
         no fold indices file exists.
     """
-    fold_indices_npz_path = model_dir / modelname / "fold_indices.npz"
+    return load_fold_lookup_from_dir(model_dir / modelname)
+
+
+def load_fold_lookup_from_dir(
+    artifact_dir: Path,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Like :func:`load_fold_lookup`, but takes the directory holding the model files."""
+    fold_indices_npz_path = Path(artifact_dir) / "fold_indices.npz"
     if not fold_indices_npz_path.exists():
         return None
 
