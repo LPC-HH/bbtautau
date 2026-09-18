@@ -87,6 +87,7 @@ class Trainer:
         data_path: str = None,
         output_dir: str = None,
         tt_preselection: bool = False,
+        tt_cut: float = 0.3,
     ) -> None:
         if years[0] == "all":
             print("Using all years")
@@ -101,6 +102,7 @@ class Trainer:
         self.modelname = modelname
         self.bdt_config = BDT_CONFIG
         self.tt_preselection = tt_preselection
+        self.tt_cut = tt_cut
 
         # Set output_dir early (needed for resolving n_folds from saved metadata)
         if output_dir is not None:
@@ -193,6 +195,7 @@ class Trainer:
                         channel=None,
                         in_filters=filters_dict,
                         num_fatjets=3,
+                        tt_cut=self.tt_cut,
                     )
 
                 columns = get_columns(year)
@@ -1363,6 +1366,7 @@ def study_rescaling(
     output_dir: str | None = None,
     data_path: str | None = None,
     tt_preselection: bool = False,
+    tt_cut: float = 0.3,
     importance_only: bool = False,
 ) -> dict:
     """Study the impact of different balance strategies on BDT performance.
@@ -1377,6 +1381,7 @@ def study_rescaling(
             gets its own subdirectory.
         data_path: Path to input data directories
         tt_preselection: Apply tt preselection
+        tt_cut: tt preselection cut value (only used if tt_preselection is True)
         importance_only: Only load existing models and compute feature importance
 
     Returns:
@@ -1391,6 +1396,7 @@ def study_rescaling(
         output_dir=output_dir,
         data_path=data_path,
         tt_preselection=tt_preselection,
+        tt_cut=tt_cut,
     )
 
     print(f"importance_only: {importance_only}")
@@ -1538,6 +1544,7 @@ def eval_bdt_preds(
     output_dir: str | None = None,
     data_path: str | None = None,
     tt_preselection: bool = False,
+    tt_cut: float = 0.3,
 ):
     """Evaluate BDT predictions on data.
 
@@ -1567,6 +1574,7 @@ def eval_bdt_preds(
         modelname=model,
         data_path=data_path,
         tt_preselection=tt_preselection,
+        tt_cut=tt_cut,
     ).load_model()
 
     evals = {year: {sample_name: {} for sample_name in samples} for year in years}
@@ -1579,6 +1587,7 @@ def eval_bdt_preds(
             modelname=model,
             data_path=data_path,
             tt_preselection=tt_preselection,
+            tt_cut=tt_cut,
         )
         trainer.load_data(force_reload=True)
 
@@ -2132,6 +2141,7 @@ def compare_models(
     years: list[str] = ("all",),
     data_path: str | None = None,
     tt_preselection: bool = False,
+    tt_cut: float = 0.3,
     output_dir: str | None = None,
 ) -> dict[str, dict[str, dict[str, float]]]:
     """Compare multiple trained BDT models by computing ROC curves and metrics.
@@ -2146,11 +2156,18 @@ def compare_models(
     Mixed lists are supported. All discovered model names are validated against
     :data:`BDT_CONFIG` before any data is loaded.
 
+    All models are evaluated against the *same* shared dataset -- loaded once with
+    this call's ``tt_preselection``/``tt_cut``, independent of whatever cut each
+    model was originally trained with -- so e.g. models trained at different
+    ``tt_cut`` values can be compared fairly on a common (typically the tightest)
+    preselection.
+
     Args:
         inputs: Model files and/or directories to scan.
         years: Years to include in the comparison.
         data_path: Optional path to data directory.
         tt_preselection: Whether to apply tt preselection.
+        tt_cut: tt preselection cut value for the shared evaluation dataset.
         output_dir: Output directory for results (default: "comparison").
 
     Returns:
@@ -2179,6 +2196,7 @@ def compare_models(
         output_dir=model_dirs[0],
         data_path=data_path,
         tt_preselection=tt_preselection,
+        tt_cut=tt_cut,
     )
     ref_trainer.load_data(force_reload=True)
     shared_events_dict = ref_trainer.events_dict
@@ -2199,6 +2217,7 @@ def compare_models(
             output_dir=model_dir,
             data_path=data_path,
             tt_preselection=tt_preselection,
+            tt_cut=tt_cut,
         )
         tr.events_dict = shared_events_dict
         tr.samples = shared_samples
@@ -2386,6 +2405,12 @@ if __name__ == "__main__":
         help="Apply tt preselection",
     )
     parser.add_argument(
+        "--tt-cut",
+        type=float,
+        default=0.3,
+        help="tt preselection cut value (only used if --tt-preselection is set)",
+    )
+    parser.add_argument(
         "--output-dir",
         type=str,
         default=None,
@@ -2495,6 +2520,7 @@ if __name__ == "__main__":
             output_dir=args.output_dir,
             data_path=args.data_path,
             tt_preselection=args.tt_preselection,
+            tt_cut=args.tt_cut,
             importance_only=args.importance_only,
         )
         exit()
@@ -2511,6 +2537,7 @@ if __name__ == "__main__":
                 output_dir=args.output_dir,
                 data_path=args.data_path,
                 tt_preselection=args.tt_preselection,
+                tt_cut=args.tt_cut,
             )
         exit()
 
@@ -2531,6 +2558,7 @@ if __name__ == "__main__":
             years=args.years,
             data_path=args.data_path,
             tt_preselection=args.tt_preselection,
+            tt_cut=args.tt_cut,
             output_dir=args.output_dir,
         )
         exit()
@@ -2561,6 +2589,7 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         data_path=args.data_path,
         tt_preselection=args.tt_preselection,
+        tt_cut=args.tt_cut,
     )
 
     # Apply feature binning settings from CLI to config
