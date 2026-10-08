@@ -24,13 +24,14 @@ from boostedhh.utils import Sample, ShapeVar, add_bool_arg
 from hist import Hist
 
 import bbtautau.postprocessing.utils as putils
-from bbtautau.postprocessing import Regions, Samples, plotting
+from bbtautau.postprocessing import Regions, Samples, corrections, plotting
 from bbtautau.postprocessing.bbtautau_types import Channel, LoadedSample
 from bbtautau.postprocessing.Samples import (
     CHANNELS,
     SAMPLES,
     SIGNALS,
     sig_keys_vbf,
+    single_h_keys,
 )
 from bbtautau.postprocessing.utils import load_data_channel
 from bbtautau.userConfig import (
@@ -42,6 +43,9 @@ from bbtautau.userConfig import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("boostedhh.utils")
+
+# backgrounds with a genuine H->bb jet, which get the TXbb SF like signal
+TXBB_SF_BG_KEYS = single_h_keys
 
 
 control_plot_vars = (
@@ -138,14 +142,12 @@ control_plot_vars = (
         )
         for i in range(3)
     ]
-    # ak8FatJetPNetXbbvsQCDLegacy
     + [
         ShapeVar(
-            var=f"ak8FatJetPNetXbbvsQCDLegacy{i}",
-            label=rf"PNet Legacy XbbvsQCD j{i+1}",
-            bins=[20, 0, 1],
+            var="bbFatJetParTXbbvsQCDTop",
+            label=r"ParT XbbvsQCDTop",
+            bins=[20, 0.3, 1],
         )
-        for i in range(3)
     ]
     # VBF dijet variables (padded/PAD_VAL for events with <2 VBF jets, falls outside
     # these ranges and lands in over/underflow, same convention as the ak8FatJet* vars above)
@@ -166,7 +168,7 @@ control_plot_vars = (
 
 # Control-plot variables whose values pile up near 1 (discriminator scores) are nicer to look
 # at under x -> -log(1 - x + eps). Edit this set to control which vars get transformed.
-TRANSFORM_EPS = 1e-4
+TRANSFORM_EPS = 1e-8
 TRANSFORM_VARS = {sv.var for sv in control_plot_vars if "vsQCD" in sv.var}
 
 
@@ -213,6 +215,13 @@ def main(args: argparse.Namespace):
     # pass_ggfbbtt (using ggfbbtt cuts) and pass_vbfbbtt (using vbfbbtt cuts), like vbfbbtt-k2v0.
     signal_regions = copy.deepcopy(SIGNAL_ORDERING) if args.do_vbf else ["ggfbbtt"]
 
+    if args.a_priori_production_mode is not None and not (args.do_vbf and args.a_priori_channels):
+        print(
+            f"--a-priori-production-mode={args.a_priori_production_mode} requires --do-vbf and "
+            "--a-priori-channels; ignoring (no cross-signal split to do)."
+        )
+        args.a_priori_production_mode = None
+
     if args.sigs is None:
         args.sigs = SIGNALS
 
@@ -220,12 +229,6 @@ def main(args: argparse.Namespace):
         args.bgs = {bkey: b for bkey, b in SAMPLES.items() if b.get_type() == "bg"}
 
     CHANNEL = CHANNELS[args.channel]
-
-    if args.a_priori_channels and args.do_vbf:
-        raise ValueError(
-            "--a-priori-channels does not yet support --do-vbf: the cross-signal (ggf-vs-vbf) "
-            "veto path hasn't been designed/tested against a priori channel splitting."
-        )
 
     if args.use_ParT and args.tt_glopart_cut is not None:
         print(
@@ -254,6 +257,8 @@ def main(args: argparse.Namespace):
                     sensitivity_disc_tag=args.sensitivity_disc_tag,
                     ggf_modelname=args.ggf_modelname,
                     tt_glopart_cut=args.tt_glopart_cut,
+                    a_priori_channels=args.a_priori_channels,
+                    a_priori_production_mode=args.a_priori_production_mode,
                 )
 
     models = None
@@ -285,6 +290,22 @@ def main(args: argparse.Namespace):
         for key, sample in events_dict.items():
             keep = sample.get_var("lepton_channel") == CHANNEL.key
             events_dict[key] = sample.copy_from_selection(keep)
+
+    # Precompute both ggf/vbf subsets once, reused for every (bmin, signal_key) pair
+    production_events_dict: dict[str, dict[str, LoadedSample]] | None = None
+    if args.a_priori_production_mode is not None:
+        putils.assign_production_mode(
+            events_dict,
+            CHANNEL,
+            method=args.a_priori_production_mode,
+            mjj_cut=args.vbf_mjj_cut,
+            deta_cut=args.vbf_deta_cut,
+        )
+        production_events_dict = {
+            mode: putils.filter_samples_by_column(events_dict, "production_mode", mode)
+            for mode in ("ggf", "vbf")
+        }
+
     args.sigs = {s + CHANNEL.key: SAMPLES[s + CHANNEL.key] for s in args.sigs}
     systematics: dict[str, dict] = {}
     systematics_path: Path | None = None
@@ -341,8 +362,17 @@ def main(args: argparse.Namespace):
             if plot_dir_bmin:
                 plot_dir_bmin.mkdir(parents=True, exist_ok=True)
 
+            if production_events_dict is not None:
+                # Same event-level split reused for every bmin value; only signal_key changes
+                # which of the two disjoint (ggf, vbf) subsets is used.
+                events_dict_for_signal = production_events_dict[
+                    "vbf" if signal_key == "vbfbbtt" else "ggf"
+                ]
+            else:
+                events_dict_for_signal = events_dict
+
             templates = get_templates(
-                events_dict,  # Same data for all bmin values
+                events_dict_for_signal,  # Same data for all bmin values
                 year_label,
                 args.sigs,
                 args.bgs,
@@ -368,6 +398,8 @@ def main(args: argparse.Namespace):
                 plot_dir=plot_dir_bmin,
                 show=False,
                 a_priori_channels=args.a_priori_channels,
+                a_priori_production_mode=args.a_priori_production_mode is not None,
+                apply_txbb_sf=args.txbb_sf,
                 selection_region_kwargs={
                     "sensitivity_dir": args.sensitivity_dir,
                     "bmin": bmin,  # Use loop variable, not args.bmin
@@ -382,6 +414,8 @@ def main(args: argparse.Namespace):
                     "ggf_modelname": args.ggf_modelname,
                     "control_region": args.control_region,
                     "tt_glopart_cut": args.tt_glopart_cut,
+                    "a_priori_channels": args.a_priori_channels,
+                    "a_priori_production_mode": args.a_priori_production_mode,
                 },
             )
 
@@ -454,10 +488,10 @@ def control_plots(
     if hists is None:
         hists = {}
     if sig_scale_dict is None:
-        sig_scale_dict = {sig_key: 2e4 for sig_key in sigs}
+        sig_scale_dict = {sig_key: 1e4 for sig_key in sigs}
         for key in sig_scale_dict:
             if "vbfbbtt" in key and "-" not in key:
-                sig_scale_dict[key] = 1e6
+                sig_scale_dict[key] = 3e5
 
     for shape_var in control_plot_vars:
         if shape_var.var not in hists:
@@ -692,6 +726,8 @@ def get_templates(
     show: bool = False,
     selection_region_kwargs: dict = None,
     a_priori_channels: bool = False,
+    a_priori_production_mode: bool = False,
+    apply_txbb_sf: bool = False,
 ) -> dict[str, Hist]:
     """
     (1) Makes histograms for each region in the ``selection_regions`` dictionary,
@@ -728,29 +764,50 @@ def get_templates(
     control_region = bool((selection_region_kwargs or {}).get("control_region", False))
 
     vetoes = []
-    found = False
-    # veto all channels/signals earlier in the ordering than the current one. Skipped under
-    # a_priori_channels: channel membership is already enforced upstream (see main()), and
-    # (ggf-only, enforced there too) there's no signal-ordering axis left to veto.
-    if not control_region and not a_priori_channels:
-        for channel_iter in CHANNEL_ORDERING:
+    if not control_region and not a_priori_production_mode:
+        if a_priori_channels:
             for signal_iter in signal_regions:
-                if channel_iter == channel.key and signal_iter == signal:
-                    found = True
+                if signal_iter == signal:
                     break
                 vetoes.append(
-                    Regions.get_selection_regions(
-                        signal_iter, CHANNELS[channel_iter], **selection_region_kwargs
-                    )
+                    Regions.get_selection_regions(signal_iter, channel, **selection_region_kwargs)
                 )
-            if found:
-                break
+        else:
+            found = False
+            for channel_iter in CHANNEL_ORDERING:
+                for signal_iter in signal_regions:
+                    if channel_iter == channel.key and signal_iter == signal:
+                        found = True
+                        break
+                    vetoes.append(
+                        Regions.get_selection_regions(
+                            signal_iter, CHANNELS[channel_iter], **selection_region_kwargs
+                        )
+                    )
+                if found:
+                    break
 
     # Now a pass/fail region is defined for ggf and vbf. In each we will load all signal samples
     # Apply vetoes from regions that were optimized earlier in the ordering
     selection_regions = Regions.get_selection_regions(
         signal, channel, vetoes=vetoes, **selection_region_kwargs
     )
+
+    # TXbb SF: applied in every region to any jet passing the pass-region TXbb cut (the fail
+    # region is an OR of failed cuts, so it contains bb-passing jets too)
+    do_txbb_sf = apply_txbb_sf and not do_jshift and not control_region
+    txbb_sf_keys, txbb_variations = [], []
+    if do_txbb_sf:
+        bb_disc_arg = (selection_region_kwargs or {}).get("bb_disc", "ak8FatJetParTXbbvsQCDTop")
+        bb_disc_col = "bb" + bb_disc_arg[len("ak8") :]
+        txbb_cut = selection_regions["pass"].cuts[bb_disc_col][0]
+        txbb_sf_keys = [key for key in [*sig_keys, *TXBB_SF_BG_KEYS] if key in events_dict]
+        txbb_variations = [
+            f"txbb_{label}_{shift}"
+            for label in corrections.txbb_pt_labels(year)
+            for shift in ["down", "up"]
+        ]
+        print(f"TXbb SF at cut {txbb_cut:.4f} for {txbb_sf_keys}")
 
     for rname, region in selection_regions.items():
         pass_region = rname.startswith("pass")
@@ -781,18 +838,15 @@ def get_templates(
         #     systematics[year][rname]["trig_total_err"] = total_err
         #     print(f"Trigger SF Unc.: {total_err / total:.3f}\n")
 
-        # ParticleNetMD Txbb and ParT LP SFs
         sig_events = {}
-        for sig_key in sig_keys:
-            lsample = events_dict[sig_key]
-            sig_events[sig_key] = lsample.copy_from_selection(sel[sig_key], do_deepcopy=True)
+        for skey in dict.fromkeys([*sig_keys, *txbb_sf_keys]):
+            lsample = events_dict[skey]
+            sig_events[skey] = lsample.copy_from_selection(sel[skey], do_deepcopy=True)
 
-            # if region.signal:
-            #     corrections.apply_txbb_sfs(
-            #         sig_events[sig_key], sig_bb_mask, year, weight_key, do_shifts=not do_jshift
-            #     )
-
-            #     print(f"Txbb SFs: {time.time() - start:.2f}")
+            if do_txbb_sf and skey in txbb_sf_keys:
+                corrections.apply_txbb_sfs(
+                    sig_events[skey], year, txbb_cut, bb_disc_col, weight_key
+                )
 
         # set up samples
         hist_samples = list(events_dict.keys())
@@ -806,13 +860,11 @@ def get_templates(
         for sig_key in sig_keys:
             hist_samples += [f"{sig_key}__true{origin}" for origin in putils.TRUTH_ORIGINS]
 
-        # if not do_jshift:
-        #     # add all weight-based variations to histogram axis
-        #     for shift in ["down", "up"]:
-        #         if region.signal:
-        #             for sig_key in sig_keys:
-        #                 hist_samples.append(f"{sig_key}_txbb_{shift}")
+        for skey in txbb_sf_keys:
+            hist_samples += [f"{skey}_{var}" for var in txbb_variations]
 
+        # if not do_jshift:
+        #     for shift in ["down", "up"]:
         #         for wshift, wsyst in weight_shifts.items():
         #             # if year in wsyst.years:
         #             # add to the axis even if not applied to this year to make it easier to sum later
@@ -829,7 +881,7 @@ def get_templates(
 
         # fill histograms
         for skey, lsample in events_dict.items():
-            if skey in sig_keys:
+            if skey in sig_events:
                 sample = sig_events[skey]
             else:
                 sample = lsample.copy_from_selection(sel[skey])
@@ -844,6 +896,14 @@ def get_templates(
 
             # breakpoint()
             h.fill(Sample=skey, **fill_data, weight=weight)
+
+            if skey in txbb_sf_keys:
+                for var in txbb_variations:
+                    h.fill(
+                        Sample=f"{skey}_{var}",
+                        **fill_data,
+                        weight=sample.get_var(f"{weight_key}_{var}"),
+                    )
 
             if skey in sig_keys:
                 # diagnostic truth-origin breakdown (nominal weight only, no shape
@@ -913,20 +973,6 @@ def get_templates(
             for i, shape_var in enumerate(shape_vars):
                 if shape_var.blind_window is not None:
                     utils.blindBins(h, shape_var.blind_window, data_key, axis=i)
-
-        # if region.signal and not do_jshift:
-        #     for sig_key in sig_keys:
-        #         if not len(sig_events[sig_key].events):
-        #             continue
-
-        #         # ParticleNetMD Txbb SFs
-        #         fill_data = utils.get_fill_data(sig_events[sig_key], shape_vars)
-        #         for shift in ["down", "up"]:
-        #             h.fill(
-        #                 Sample=f"{sig_key}_txbb_{shift}",
-        #                 **fill_data,
-        #                 weight=sig_events[sig_key].get_var(f"{weight_key}_txbb_{shift}"),
-        #             )
 
         templates[rname + jlabel] = h
 
@@ -1009,15 +1055,6 @@ def get_templates(
                                 name=f"{plot_name}_{wshift}_{shift}.pdf",
                                 plot_ratio=False,
                             )
-
-                    if region.signal:
-                        plotting.ratioHistPlot(
-                            **plot_params,
-                            bg_keys=p_bg_keys,
-                            sig_err="txbb",
-                            title=rf"{region.label} Region $T_{{Xbb}}$ Shapes",
-                            name=f"{plot_name}_txbb.pdf",
-                        )
 
     return templates
 
@@ -1189,9 +1226,48 @@ def parse_args(parser=None):
         "dev_channel_separation: classify hh/hm/he a priori from lepton content instead of the "
         "CHANNEL_ORDERING veto chain -- hm if a tight muon is within userConfig.LEPTON_CONE_DR "
         "of the ttFatJet, else he if a tight electron is, else hh (exhaustive by construction, "
-        "see utils.assign_lepton_channel). Not yet compatible with --do-vbf (cross-signal, i.e. "
-        "ggf-vs-vbf, veto handling is unaffected by this flag and untested in combination with "
-        "it).",
+        "see utils.assign_lepton_channel). Compatible with --do-vbf: the cross-signal "
+        "(ggf-vs-vbf) veto still runs, restricted to within the current a-priori-assigned "
+        "channel (SIGNAL_ORDERING order, i.e. ggf claims events first) instead of across the "
+        "full CHANNEL_ORDERING x SIGNAL_ORDERING chain.",
+        default=False,
+    )
+    parser.add_argument(
+        "--a-priori-production-mode",
+        type=str,
+        default="kinematic",
+        choices=["bdt", "kinematic", "none"],
+        help=(
+            "Classify ggf/vbf production mode a priori (per event, symmetric), instead of the "
+            "SIGNAL_ORDERING veto chain -- mirrors --a-priori-channels but for the ggf-vs-vbf "
+            "axis (see utils.assign_production_mode). 'bdt': whichever of "
+            "BDTggfbb<channel>/BDTvbfbb<channel> (raw, pre-vsAll class scores) is higher -- "
+            "requires a *unified* ggf+vbf model's predictions, i.e. the same modelname passed "
+            "to both --ggf-modelname and --vbf-modelname. 'kinematic': VBFMassjj > "
+            "--vbf-mjj-cut and |VBFJetDeltaEta| > --vbf-deta-cut (always available, no BDT "
+            "dependency). 'none': use the old SIGNAL_ORDERING veto chain instead (ggf claims "
+            "events first). No-op without --do-vbf and --a-priori-channels (no cross-signal "
+            "split to do), so this defaults to 'kinematic' even for runs that don't pass "
+            "--do-vbf -- it only takes effect once both of those are also on."
+        ),
+    )
+    parser.add_argument(
+        "--vbf-mjj-cut",
+        type=float,
+        default=500.0,
+        help="mjj threshold (GeV) for --a-priori-production-mode kinematic. Default: 500.",
+    )
+    parser.add_argument(
+        "--vbf-deta-cut",
+        type=float,
+        default=3.5,
+        help="|VBFJetDeltaEta| threshold for --a-priori-production-mode kinematic. Default: 3.5.",
+    )
+    add_bool_arg(
+        parser,
+        "txbb-sf",
+        "Apply TXbb tagger SFs (corrections.apply_txbb_sfs) to signal + TXBB_SF_BG_KEYS, with "
+        "per-pT-bin up/down template variations",
         default=False,
     )
 
@@ -1306,6 +1382,9 @@ def parse_args(parser=None):
 
     args = parser.parse_args()
     # save_args = deepcopy(args)
+
+    if args.a_priori_production_mode == "none":
+        args.a_priori_production_mode = None
 
     args.model_dir = Path(args.model_dir)
 
