@@ -4,8 +4,12 @@ import argparse
 import copy
 import json
 import logging
+import shlex
+import socket
+import subprocess
+import sys
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -328,7 +332,13 @@ class Analyser:
                     zip(
                         # ["Msd", "PNetmassLegacy", "ParTmassResApplied", "ParTmassVisApplied", "CAglobalParT_massVisApplied_with_delta_axis_merged", "CAglobalParT_massVisApplied_merged"],
                         # ["SoftDrop", "PNetLegacy", "ParT Res", "ParT Vis", "CAMass", "CAMass_old"],
-                        ["Msd", "PNetmassLegacy", "ParTmassResApplied", "ParTmassVisApplied", "CAglobalParT_massVisApplied_with_delta_axis_merged"],
+                        [
+                            "Msd",
+                            "PNetmassLegacy",
+                            "ParTmassResApplied",
+                            "ParTmassVisApplied",
+                            "CAglobalParT_massVisApplied_with_delta_axis_merged",
+                        ],
                         ["SoftDrop", "PNetLegacy", "ParT Res", "ParT Vis", "CAMass"],
                     )
                 ):
@@ -1547,6 +1557,8 @@ def get_plot_dir(
     sr_config: SRConfig,
     ggf_modelname: str | None = None,
     tt_glopart_cut: float | None = None,
+    a_priori_channels: bool = False,
+    a_priori_production_mode: str | None = None,
 ):
 
     if test_mode:
@@ -1558,15 +1570,46 @@ def get_plot_dir(
 
     disc_tag = "ParT" if use_ParT else ggf_modelname if ggf_modelname else "BDT"
     if tt_glopart_cut is not None:
-        disc_tag += f"_ttglopart{tt_glopart_cut:.2f}"
+        disc_tag += f"_ttglopart{tt_glopart_cut:.4f}"
 
     tag = f"{disc_tag}/"
-    tag += "do_vbf/" if do_vbf else "ggf_only/"
+    if do_vbf:
+        tag += "do_vbf/"
+        if a_priori_production_mode is not None:
+            tag += f"apriori_production_{a_priori_production_mode}/"
+        elif a_priori_channels:
+            tag += "apriori_channels_veto/"
+        else:
+            tag += "channel_ordering_veto/"
+    else:
+        tag += "ggf_only/"
     tag += "sm_signals/" if use_sm_signals else "separate_signals/"
     tag += "overlapping_channels/" if overlapping_channels else "orthogonal_channels/"
     tag += f"{sr_config.name}/{sr_config.channel}"
 
     return Path(PLOT_DIR) / f"SensitivityStudy/{TODAY}/{test_dir}/{tag}"
+
+
+def write_run_args(run_dir: Path):
+    """Append date, host, git state and the exact command line to ``run_dir/run_args.txt``."""
+
+    def _git(*cmd):
+        try:
+            return subprocess.run(
+                ["git", "-C", str(Path(__file__).parent), *cmd],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        except (OSError, subprocess.CalledProcessError):
+            return ""
+
+    n_dirty = len(_git("status", "--porcelain").splitlines())
+    with (run_dir / "run_args.txt").open("a") as f:
+        now = datetime.now().astimezone()
+        f.write(f"=== {now:%Y-%m-%d %H:%M:%S %Z} on {socket.gethostname()}\n")
+        f.write(f"git: {_git('rev-parse', 'HEAD').strip()} ({n_dirty} uncommitted changes)\n")
+        f.write(f"cmd: {shlex.join([sys.executable, *sys.argv])}\n")
 
 
 def main(args):
@@ -1579,6 +1622,16 @@ def main(args):
     # Signal regions to optimize: GGF first, then VBF (if enabled)
     signal_regions = SIGNAL_ORDERING if args.do_vbf else ["ggfbbtt"]
 
+    if args.a_priori_production_mode is not None:
+        if not args.do_vbf:
+            raise ValueError("--a-priori-production-mode requires --do-vbf.")
+        if not args.a_priori_channels:
+            raise ValueError(
+                "--a-priori-production-mode requires --a-priori-channels (fully symmetric "
+                "a-priori split on both axes); combining it with the CHANNEL_ORDERING veto "
+                "chain isn't implemented."
+            )
+
     # BDT models to load (None if using ParT)
     models = None
     if not args.use_ParT:
@@ -1590,16 +1643,14 @@ def main(args):
         # preserve order but drop duplicates
         models = list(dict.fromkeys(models))
 
-    if args.a_priori_channels and args.do_vbf:
-        raise ValueError(
-            "--a-priori-channels does not yet support --do-vbf: the cross-signal (ggf-vs-vbf) "
-            "veto path hasn't been designed/tested against a priori channel splitting."
-        )
-
-    # Track optimized regions for vetoes (key = signal_channel, e.g., "ggfbbtthh")
-    optimized_regions: dict[str, SRConfig] = {}
+    tt_glopart_cuts = args.tt_glopart_cut  # list, possibly [None]
+    optimized_regions_by_cut: dict[float | None, dict[str, SRConfig]] = {
+        cut: {} for cut in tt_glopart_cuts
+    }
 
     tt_disc_map = TT_DISC_NAMES_PART if args.use_ParT else TT_DISC_NAMES_BDT
+
+    run_args_written: set[Path] = set()  # one run_args.txt per run (top dir, see below)
 
     for channel_key in args.channels:
         print(f"\n{'='*60}\nProcessing channel: {channel_key}\n{'='*60}")
@@ -1624,79 +1675,111 @@ def main(args):
         )
 
         if args.a_priori_channels:
-            # Classify every sample (data/background/signal alike) by lepton content and keep
-            # only this channel's events -- replaces the CHANNEL_ORDERING veto chain below.
-            # copy_from_selection doesn't preserve e_mask/m_mask (see LoadedSample), but that's
-            # fine here: BDT prediction (the only consumer of ttMuon*/ttElectron* features,
-            # which need e_mask/m_mask) already ran inside load_data_channel above, and nothing
-            # downstream in SensitivityStudy.py touches e_mask/m_mask or ttMuon*/ttElectron*
-            # directly.
             for year in events_dict:
                 utils.assign_lepton_channel(events_dict[year])
                 for key, sample in events_dict[year].items():
                     keep = sample.get_var("lepton_channel") == channel_key
                     events_dict[year][key] = sample.copy_from_selection(keep)
 
-        channel_regions: list[SRConfig] = []  # within current channel (overlapping mode)
-
-        for signal_name in signal_regions:
-            print(f"\n  Optimizing: {signal_name} in {channel_key}")
-
-            sr_config = SRConfig(
-                name=signal_name,
-                signals=SM_SIGNALS if args.use_sm_signals else [signal_name],
-                channel=channel_key,
-                bb_disc_name=args.bb_disc,
-                tt_disc_name=tt_disc_map[signal_name],
-            )
-
-            # Add veto regions from previously optimized regions. Skipped under
-            # --a-priori-channels: channel membership is already enforced above, and (ggf-only,
-            # enforced at the top of main()) there's no signal-ordering axis left to veto.
-            regions_to_veto = (
-                []
-                if args.a_priori_channels
-                else (
-                    optimized_regions.values() if not args.overlapping_channels else channel_regions
+        production_events_dict: dict[str, dict[str, dict]] | None = None
+        if args.a_priori_production_mode is not None:
+            for year in events_dict:
+                utils.assign_production_mode(
+                    events_dict[year],
+                    CHANNELS[channel_key],
+                    method=args.a_priori_production_mode,
+                    mjj_cut=args.vbf_mjj_cut,
+                    deta_cut=args.vbf_deta_cut,
                 )
-            )
-            for veto_region in regions_to_veto:
-                sr_config.add_veto_region(veto_region)
+            production_events_dict = {
+                mode: {
+                    year: utils.filter_samples_by_column(events_dict[year], "production_mode", mode)
+                    for year in events_dict
+                }
+                for mode in ("ggf", "vbf")
+            }
 
-            plot_dir = get_plot_dir(
-                args.test_mode,
-                args.tt_pres,
-                args.use_ParT,
-                args.do_vbf,
-                args.use_sm_signals,
-                args.overlapping_channels,
-                sr_config,
-                ggf_modelname=args.ggf_modelname,
-                tt_glopart_cut=args.tt_glopart_cut,
-            )
-            plot_dir.mkdir(parents=True, exist_ok=True)
+        channel_regions_by_cut: dict[float | None, list[SRConfig]] = {
+            cut: [] for cut in tt_glopart_cuts
+        }  # within current channel (overlapping mode), separate per cut value
 
-            sr_config.optima = analyse_channel(
-                events_dict=events_dict,
-                sr_config=sr_config,
-                test_mode=args.test_mode,
-                tt_pres=args.tt_pres,
-                use_ParT=args.use_ParT,
-                actions=args.actions,
-                at_inference=args.at_inference,
-                plot_dir=plot_dir,
-                cuts_file=args.cuts_file,
-                eval_bmin=args.eval_bmin,
-                outfile=args.outfile,
-                dataMinusSimABCD=args.dataMinusSimABCD,
-                showNonDataDrivenPortion=args.showNonDataDrivenPortion,
-                tt_glopart_cut=args.tt_glopart_cut,
-            )
+        for tt_glopart_cut in tt_glopart_cuts:
+            if len(tt_glopart_cuts) > 1:
+                print(f"\n  --- tt_glopart_cut = {tt_glopart_cut} ---")
 
-            # Register for future vetoes (key includes channel to avoid overwrites)
-            channel_regions.append(sr_config)
-            if not args.overlapping_channels:
-                optimized_regions[f"{sr_config.name}{sr_config.channel}"] = sr_config
+            for signal_name in signal_regions:
+                print(f"\n  Optimizing: {signal_name} in {channel_key}")
+
+                sr_config = SRConfig(
+                    name=signal_name,
+                    signals=SM_SIGNALS if args.use_sm_signals else [signal_name],
+                    channel=channel_key,
+                    bb_disc_name=args.bb_disc,
+                    tt_disc_name=tt_disc_map[signal_name],
+                )
+
+                if args.a_priori_production_mode is not None:
+                    regions_to_veto = []
+                elif args.a_priori_channels:
+                    regions_to_veto = channel_regions_by_cut[tt_glopart_cut]
+                elif not args.overlapping_channels:
+                    regions_to_veto = optimized_regions_by_cut[tt_glopart_cut].values()
+                else:
+                    regions_to_veto = channel_regions_by_cut[tt_glopart_cut]
+                for veto_region in regions_to_veto:
+                    sr_config.add_veto_region(veto_region)
+
+                plot_dir = get_plot_dir(
+                    args.test_mode,
+                    args.tt_pres,
+                    args.use_ParT,
+                    args.do_vbf,
+                    args.use_sm_signals,
+                    args.overlapping_channels,
+                    sr_config,
+                    ggf_modelname=args.ggf_modelname,
+                    tt_glopart_cut=tt_glopart_cut,
+                    a_priori_channels=args.a_priori_channels,
+                    a_priori_production_mode=args.a_priori_production_mode,
+                )
+                plot_dir.mkdir(parents=True, exist_ok=True)
+
+                # Top dir of this run (above <sm|separate>_signals/<overlap>_channels/<sig>/<ch>/),
+                # i.e. one per (date, presel, disc tag incl. tt_glopart_cut, vbf mode).
+                run_dir = plot_dir.parents[3]
+                if run_dir not in run_args_written:
+                    write_run_args(run_dir)
+                    run_args_written.add(run_dir)
+
+                events_dict_for_signal = (
+                    production_events_dict["vbf" if signal_name.startswith("vbf") else "ggf"]
+                    if production_events_dict is not None
+                    else events_dict
+                )
+
+                sr_config.optima = analyse_channel(
+                    events_dict=events_dict_for_signal,
+                    sr_config=sr_config,
+                    test_mode=args.test_mode,
+                    tt_pres=args.tt_pres,
+                    use_ParT=args.use_ParT,
+                    actions=args.actions,
+                    at_inference=args.at_inference,
+                    plot_dir=plot_dir,
+                    cuts_file=args.cuts_file,
+                    eval_bmin=args.eval_bmin,
+                    outfile=args.outfile,
+                    dataMinusSimABCD=args.dataMinusSimABCD,
+                    showNonDataDrivenPortion=args.showNonDataDrivenPortion,
+                    tt_glopart_cut=tt_glopart_cut,
+                )
+
+                # Register for future vetoes (key includes channel to avoid overwrites)
+                channel_regions_by_cut[tt_glopart_cut].append(sr_config)
+                if not args.overlapping_channels:
+                    optimized_regions_by_cut[tt_glopart_cut][
+                        f"{sr_config.name}{sr_config.channel}"
+                    ] = sr_config
 
 
 if __name__ == "__main__":
@@ -1853,10 +1936,42 @@ Examples:
             "dev_channel_separation: classify hh/hm/he a priori from lepton content instead of "
             "the CHANNEL_ORDERING veto chain -- hm if a tight muon is within "
             "userConfig.LEPTON_CONE_DR of the ttFatJet, else he if a tight electron is, else hh "
-            "(exhaustive by construction, see utils.assign_lepton_channel). Not yet compatible "
-            "with --do-vbf (cross-signal, i.e. ggf-vs-vbf, veto handling is unaffected by this "
-            "flag and untested in combination with it)."
+            "(exhaustive by construction, see utils.assign_lepton_channel). Compatible with "
+            "--do-vbf: the cross-signal (ggf-vs-vbf) veto still runs, restricted to within the "
+            "current a-priori-assigned channel (SIGNAL_ORDERING order, i.e. ggf claims events "
+            "first) instead of across the full CHANNEL_ORDERING x SIGNAL_ORDERING chain."
         ),
+    )
+    sr_group.add_argument(
+        "--a-priori-production-mode",
+        type=str,
+        default=None,
+        choices=["bdt", "kinematic"],
+        help=(
+            "Classify ggf/vbf production mode a priori (per event, symmetric), instead of the "
+            "SIGNAL_ORDERING veto chain -- mirrors --a-priori-channels but for the ggf-vs-vbf "
+            "axis (see utils.assign_production_mode). 'bdt': whichever of "
+            "BDTggfbb<channel>/BDTvbfbb<channel> (raw, pre-vsAll class scores) is higher -- "
+            "requires a *unified* ggf+vbf model's predictions, i.e. the same modelname passed "
+            "to both --ggf-modelname and --vbf-modelname. 'kinematic': VBFMassjj > "
+            "--vbf-mjj-cut and |VBFJetDeltaEta| > --vbf-deta-cut (always available, no BDT "
+            "dependency). Requires --do-vbf and --a-priori-channels (fully symmetric split on "
+            "both axes; combining this with the CHANNEL_ORDERING veto chain isn't implemented). "
+            "Default: None, i.e. use the existing SIGNAL_ORDERING veto chain (ggf claims events "
+            "first)."
+        ),
+    )
+    sr_group.add_argument(
+        "--vbf-mjj-cut",
+        type=float,
+        default=500.0,
+        help="mjj threshold (GeV) for --a-priori-production-mode kinematic. Default: 500.",
+    )
+    sr_group.add_argument(
+        "--vbf-deta-cut",
+        type=float,
+        default=3.5,
+        help="|VBFJetDeltaEta| threshold for --a-priori-production-mode kinematic. Default: 3.5.",
     )
     sr_group.add_argument(  # leave there for testing/legacy purposes
         "--overlapping-channels",
@@ -1922,9 +2037,10 @@ Examples:
     disc_group.add_argument(
         "--tt-glopart-cut",
         type=float,
-        default=None,
+        nargs="+",
+        default=[None],
         help=(
-            "Extra fixed cut on the tt GloParT tagger, cross-normalized across channels: "
+            "Extra fixed cut(s) on the tt GloParT tagger, cross-normalized across channels: "
             "for the channel currently being processed, "
             "ttFatJetParTX<channel> / (ttFatJetParTXtauhtaue + ttFatJetParTXtauhtauh + "
             "ttFatJetParTXtauhtaum + ttFatJetParTQCD + ttFatJetParTTop), i.e. the self "
@@ -1933,9 +2049,11 @@ Examples:
             "optimized (BDT or ParT, per --use-ParT). Same cut threshold is used across "
             "channels but the value is channel-specific, penalizing jets that look "
             "ambiguous with another tau channel and not just background-like jets. "
-            "Useful to test combining a BDT cut with an additional GloParT cut. Only "
-            "respected by the 'sensitivity' and 'evaluate' actions (default: None, i.e. "
-            "no extra cut)."
+            "Useful to test combining a BDT cut with an additional GloParT cut. Accepts one "
+            "or more values (e.g. --tt-glopart-cut 0.1 0.2 0.3); each is run as a separate "
+            "full sensitivity scan (own plot dir, tagged via disc_tag) but data is loaded "
+            "only once per channel and reused across all values. Only respected by the "
+            "'sensitivity' and 'evaluate' actions (default: [None], i.e. no extra cut)."
         ),
     )
     disc_group.add_argument(
@@ -1961,48 +2079,3 @@ Examples:
     args = parser.parse_args()
 
     main(args)
-
-    # def update_cuts_from_csv_file(self, sensitivity_dir):
-    #     # read the first available FOM CSV file
-    #         csv_dir = Path(sensitivity_dir).joinpath(
-    #             f"full_presel/{self.modelname if self.use_bdt else 'ParT'}/{self.channel.key}"
-    #         )
-
-    #         # Look for any FOM-specific CSV files
-    #         csv_files = list(csv_dir.glob("*_opt_results_*.csv"))
-
-    #         if len(csv_files) == 0:
-    #             raise ValueError(f"No sensitivity CSV files found in {csv_dir}")
-
-    #         # Take the first CSV file found and extract FOM name
-    #         csv_file = sorted(csv_files)[0]  # Sort for reproducible behavior
-    #         print(f"Reading CSV: {csv_file}")
-
-    #         # Extract FOM name from filename like "2022_2022EE_opt_results_2sqrtB_S_var.csv"
-    #         if "_opt_results_" in csv_file.name:
-    #             fom_name = csv_file.name.split("_opt_results_")[1].replace(".csv", "")
-    #         else:
-    #             fom_name = "unknown"
-
-    #         # Read as simple CSV (no multi-level headers)
-    #         opt_results = pd.read_csv(csv_file, index_col=0)
-    #         print(f"Using FOM: {fom_name}")
-    #         print(f"Available B_min values: {opt_results.columns.tolist()}")
-
-    #         # Check if the target Bmin column exists
-    #         target_col = f"Bmin={self.bmin}"
-    #         if target_col not in opt_results.columns:
-    #             raise ValueError(
-    #                 f"B_min={args.bmin} not found in CSV. Available: {opt_results.columns.tolist()}"
-    #             )
-
-    #         # update the CHANNEL cuts
-    #         self.channel.txbb_cut = float(opt_results.loc["Cut_Xbb", target_col])
-    #         if args.use_bdt:
-    #             self.channel.txtt_BDT_cut = float(opt_results.loc["Cut_Xtt", target_col])
-    #         else:
-    #             self.channel.txtt_cut = float(opt_results.loc["Cut_Xtt", target_col])
-
-    #         print(
-    #             f"Updated TXbb and Txtt cuts to {self.channel.txbb_cut} and {self.channel.txtt_cut if not self.use_bdt else self.channel.txtt_BDT_cut} for {self.channel.key}"
-    #         )

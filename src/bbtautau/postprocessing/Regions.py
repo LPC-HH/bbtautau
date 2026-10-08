@@ -72,7 +72,7 @@ def _sensitivity_disc_folder(
         return sensitivity_disc_tag
     disc = ggf_modelname or "BDT"
     if tt_glopart_cut is not None:
-        disc += f"_ttglopart{tt_glopart_cut:.2f}"
+        disc += f"_ttglopart{tt_glopart_cut:.4f}"
     return disc
 
 
@@ -91,6 +91,8 @@ def extract_optimal_cuts_from_csv(
     sensitivity_disc_tag: str | None = None,
     ggf_modelname: str | None = None,
     tt_glopart_cut: float | None = None,
+    a_priori_channels: bool = False,
+    a_priori_production_mode: str | None = None,
 ):
     """
     Extract optimal cuts for a given bmin value from sensitivity study CSV files.
@@ -117,13 +119,26 @@ def extract_optimal_cuts_from_csv(
             ``_ttglopart<cut:.2f>`` to the disc folder, matching
             ``SensitivityStudy.get_plot_dir``). Not used to build the cut itself here --
             see ``get_selection_regions`` for that.
+        a_priori_channels: Matches ``SensitivityStudy.py --a-priori-channels`` -- only affects
+            the path when ``do_vbf`` (ggf-only paths are unchanged regardless of this flag).
+        a_priori_production_mode: Matches ``SensitivityStudy.py --a-priori-production-mode``
+            (``"bdt"``/``"kinematic"``/``None``); only affects the path when ``do_vbf``.
 
     Returns:
         tuple: (txbb_cut, txtt_cut) - The optimal cuts for the given bmin
     """
     presel = _sensitivity_presel_dir(test_mode, tt_pres)
     disc = _sensitivity_disc_folder(use_ParT, sensitivity_disc_tag, ggf_modelname, tt_glopart_cut)
-    vbf_part = "do_vbf" if do_vbf else "ggf_only"
+    if do_vbf:
+        if a_priori_production_mode is not None:
+            veto_mode_part = f"apriori_production_{a_priori_production_mode}"
+        elif a_priori_channels:
+            veto_mode_part = "apriori_channels_veto"
+        else:
+            veto_mode_part = "channel_ordering_veto"
+        vbf_part = Path("do_vbf") / veto_mode_part
+    else:
+        vbf_part = Path("ggf_only")
     ch_part = "overlapping_channels" if overlapping_channels else "orthogonal_channels"
     csv_dir = Path(sensitivity_dir).joinpath(
         presel, disc, vbf_part, combined_signals, ch_part, signal, channel_name
@@ -167,6 +182,8 @@ def get_selection_regions(
     ggf_modelname: str | None = None,
     control_region: bool = False,
     tt_glopart_cut: float | None = None,
+    a_priori_channels: bool = False,
+    a_priori_production_mode: str | None = None,
 ):
     """
     Get the selection regions for a given signal and channel.
@@ -205,6 +222,8 @@ def get_selection_regions(
             sensitivity_disc_tag=sensitivity_disc_tag,
             ggf_modelname=ggf_modelname,
             tt_glopart_cut=None if use_ParT else tt_glopart_cut,
+            a_priori_channels=a_priori_channels,
+            a_priori_production_mode=a_priori_production_mode,
         )
     else:
         txbb_cut = channel.txbb_cut

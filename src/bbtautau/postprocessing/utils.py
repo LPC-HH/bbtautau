@@ -790,8 +790,6 @@ def bbtautau_assignment(
     channel: Channel = None,
     ttvsbb: bool = True,  # This is now by default
     agnostic: bool = False,
-    # 2024, v15, the ParT score is different from v12
-    is_2024: bool = False,
 ):
     """Assign bb and tautau jets per each event."""
 
@@ -824,7 +822,6 @@ def bbtautau_assignment(
             tautau_pick = np.argmax(combined_score, axis=1)
 
         ### Legacy, not used anymore, keep for record
-
         # assign tautau jet as the one with the highest ParTtautauvsQCD score
         elif agnostic:
             sig_labels = [ch.tagger_label for ch in CHANNELS.values()]
@@ -1058,6 +1055,76 @@ def assign_lepton_channel(events_dict: dict[str, LoadedSample]) -> None:
         lepton_channel[has_muon] = "hm"
         lepton_channel[(~has_muon) & has_electron] = "he"
         sample.events["lepton_channel"] = lepton_channel
+
+
+def assign_production_mode(
+    events_dict: dict[str, LoadedSample],
+    channel: Channel,
+    method: str,
+    mjj_cut: float = 500.0,
+    deta_cut: float = 3.5,
+) -> None:
+    """A priori ggf/vbf production-mode classification, replacing the SIGNAL_ORDERING veto
+    chain the same way ``assign_lepton_channel`` replaces the CHANNEL_ORDERING one.
+
+    method="bdt": event assigned to whichever of {ggf, vbf} has the higher raw BDT class score
+        for this channel -- ``BDTggfbb<channel.tagger_label>`` / ``BDTvbfbb<channel.tagger_label>``,
+        the raw (pre-vsAll) per-class columns added by ``bdt_utils._add_bdt_scores``. Requires a
+        *unified* ggf+vbf model's predictions already loaded on ``events_dict`` (e.g. by passing
+        the same modelname to both ``--ggf-modelname``/``--vbf-modelname``, which
+        ``load_data_channel`` dedupes into a single ``compute_or_load_bdt_preds`` call).
+    method="kinematic": event assigned "vbf" if ``VBFMassjj > mjj_cut`` and
+        ``|VBFJetDeltaEta| > deta_cut`` (from ``derive_vbf_variables``, always available), else
+        "ggf". Simple, interpretable, no BDT dependency.
+
+    Sets a new "production_mode" column (values in ``{"ggf","vbf"}``) on each sample's events.
+    """
+    if method not in ("bdt", "kinematic"):
+        raise ValueError(f"Unknown production-mode assignment method: {method!r}")
+
+    ggf_col = f"BDTggfbb{channel.tagger_label}"
+    vbf_col = f"BDTvbfbb{channel.tagger_label}"
+
+    for sample in events_dict.values():
+        if method == "bdt":
+            if ggf_col not in sample.events or vbf_col not in sample.events:
+                raise ValueError(
+                    f"{ggf_col}/{vbf_col} not found on {sample.sample} -- run a *unified* "
+                    "ggf+vbf BDT model's predictions first (pass the same modelname to both "
+                    "--ggf-modelname and --vbf-modelname)."
+                )
+            is_vbf = sample.get_var(vbf_col) > sample.get_var(ggf_col)
+        else:
+            mjj = sample.get_var("VBFMassjj")
+            deta = sample.get_var("VBFJetDeltaEta")
+            is_vbf = (mjj > mjj_cut) & (np.abs(deta) > deta_cut)
+
+        production_mode = np.full(len(sample.events), "ggf", dtype=object)
+        production_mode[is_vbf] = "vbf"
+        # events_dict here is often already an a-priori-channel slice (copy_from_selection's
+        # boolean-mask indexing always returns an independent copy, but pandas' internal
+        # bookkeeping still flags plain assignment on it as a possible chained-indexing bug) --
+        # known false positive, safe to silence rather than churn memory with an explicit
+        # .copy() just to clear pandas' flag.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", pd.errors.SettingWithCopyWarning)
+            sample.events["production_mode"] = production_mode
+
+
+def filter_samples_by_column(
+    events_dict: dict[str, LoadedSample], column: str, value
+) -> dict[str, LoadedSample]:
+    """Return a new events_dict with each sample restricted to rows where ``get_var(column) ==
+    value``.
+
+    Non-mutating (``copy_from_selection`` makes a fresh copy per sample), so multiple disjoint
+    subsets sharing the same source (e.g. ``production_mode`` "ggf" vs "vbf") can be derived
+    from one loaded ``events_dict`` without stepping on each other.
+    """
+    return {
+        key: sample.copy_from_selection(sample.get_var(column) == value)
+        for key, sample in events_dict.items()
+    }
 
 
 def derive_variables(
