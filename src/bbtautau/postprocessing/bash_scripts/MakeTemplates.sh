@@ -28,16 +28,18 @@ sigs_values=()  # Can be set with --sigs; empty means let postprocessing.py use 
 MAIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 SCRIPT_DIR="${MAIN_DIR}/src/bbtautau/postprocessing"
 DATA_DIR="/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
-SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2026-08-27/"
+SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2026-09-22/"
 COMBINED_SIGNALS="separate_signals"
 TAG=""
 USE_PART=0
 DO_VBF=0
-A_PRIORI_CHANNELS=0
+A_PRIORI_CHANNELS=1
 USE_SENSITIVITY_DIR=1  # Flag to control --sensitivity-dir argument (default: on)
 TEST_MODE=0
 TT_PRES=0
 CONTROL_REGION=0  # Build CR (annulus) templates for QCD+DY validation
+TXBB_SF=0  # Apply TXbb SFs + per-pT-bin variations (postprocessing.py --txbb-sf)
+APRIORI_PROD_MODE=""  # --a-priori-production-mode {kinematic,bdt,none}; empty = postprocessing.py default
 GGF_MODEL="May4_optimized_ggf"
 #"19oct25_ak4away_ggfbbtt"
 VBF_MODEL="May4_optimized_vbfk2v0"
@@ -58,9 +60,13 @@ show_help() {
     echo "  --use-part             Use ParT tagger instead of BDT"
     echo "  --do-vbf               Include VBF signal regions"
     echo "  --a-priori-channels    Classify hh/hm/he by lepton content instead of the"
-    echo "                         CHANNEL_ORDERING veto chain (dev_channel_separation;"
-    echo "                         not yet compatible with --do-vbf)"
+    echo "                         CHANNEL_ORDERING veto chain (dev_channel_separation)."
+    echo "                         Combined with --do-vbf, postprocessing.py also defaults"
+    echo "                         --a-priori-production-mode to 'kinematic' (a priori"
+    echo "                         ggf/vbf split instead of the SIGNAL_ORDERING veto chain)."
     echo "  --control-region       Build CR (annulus) templates for QCD+DY validation"
+    echo "  --txbb-sf              Apply TXbb tagger SFs with per-pT-bin variations"
+    echo "  --a-priori-production-mode MODE  kinematic|bdt|none (none = ggF/VBF veto chain)"
     echo "  --sensitivity-dir DIR  Directory for --sensitivity-dir (default: /home/users/lumori/bbtautau/plots/SensitivityStudy/2025-12-27/)"
     echo "  --no-sensitivity-dir   Disable the --sensitivity-dir argument (default: enabled)"
     echo "  --test-mode            Run in test mode (reduced data size)"
@@ -89,6 +95,9 @@ show_help() {
     echo "  $0 --tag my_analysis --year 2022 --channel hh --use-part --bmin 1 5 8"
     echo "  $0 --tag my_analysis --do-vbf --bmin 10"
 }
+
+# Exact invocation, captured before the parser below shifts "$@" away (recorded in run_args.txt)
+INVOCATION="$(printf '%q ' "$0" "$@")"
 
 # Parse arguments manually to handle multiple bmin values
 while [[ $# -gt 0 ]]; do
@@ -164,6 +173,15 @@ while [[ $# -gt 0 ]]; do
             CONTROL_REGION=1
             shift
             ;;
+        --txbb-sf)
+            TXBB_SF=1
+            shift
+            ;;
+        --a-priori-production-mode)
+            shift
+            APRIORI_PROD_MODE=$1
+            shift
+            ;;
         --ggf-model)
             shift
             GGF_MODEL=$1
@@ -220,6 +238,16 @@ if [[ ${#bmin_values[@]} -eq 0 ]]; then
   bmin_values=(1)
 fi
 
+# Record how this run was invoked (appended: a tag may be re-run, e.g. for a single year)
+TEMPLATE_DIR="${MAIN_DIR}/src/bbtautau/postprocessing/templates/$TAG"
+mkdir -p "$TEMPLATE_DIR"
+{
+    echo "=== $(date '+%Y-%m-%d %H:%M:%S %Z') on $(hostname)"
+    echo "git: $(git -C "$MAIN_DIR" rev-parse HEAD 2>/dev/null) ($(git -C "$MAIN_DIR" status --porcelain 2>/dev/null | wc -l) uncommitted changes)"
+    echo "cwd: $PWD"
+    echo "cmd: ${INVOCATION% }"
+} >> "$TEMPLATE_DIR/run_args.txt"
+
 echo "TAG: $TAG"
 echo "BMIN VALUES: ${bmin_values[*]}"
 echo "YEARS: ${years[*]}"
@@ -231,6 +259,8 @@ echo "USE_SENSITIVITY_DIR: $USE_SENSITIVITY_DIR"
 echo "SENSITIVITY_DIR: $SENSITIVITY_DIR"
 echo "TEST_MODE: $TEST_MODE"
 echo "TT_PRES: $TT_PRES"
+echo "TXBB_SF: $TXBB_SF"
+echo "APRIORI_PROD_MODE: ${APRIORI_PROD_MODE:-<postprocessing.py default>}"
 echo "GGF_MODEL: $GGF_MODEL"
 echo "VBF_MODEL: $VBF_MODEL"
 echo "COMBINED_SIGNALS: $COMBINED_SIGNALS"
@@ -253,7 +283,7 @@ do
             --channel "$channel"
             --data-dir "$DATA_DIR"
             --plot-dir "${MAIN_DIR}/plots/Templates/$TAG"
-            --template-dir "${MAIN_DIR}/src/bbtautau/postprocessing/templates/$TAG"
+            --template-dir "$TEMPLATE_DIR"
             --templates
             --ggf-modelname "$GGF_MODEL"
             --vbf-modelname "$VBF_MODEL"
@@ -292,6 +322,14 @@ do
         # Add --control-region if enabled (CR annulus templates)
         if [[ $CONTROL_REGION -eq 1 ]]; then
             cmd+=(--control-region)
+        fi
+
+        if [[ $TXBB_SF -eq 1 ]]; then
+            cmd+=(--txbb-sf)
+        fi
+
+        if [[ -n "$APRIORI_PROD_MODE" ]]; then
+            cmd+=(--a-priori-production-mode "$APRIORI_PROD_MODE")
         fi
 
         # Add --combined-signals when set (non-empty string)

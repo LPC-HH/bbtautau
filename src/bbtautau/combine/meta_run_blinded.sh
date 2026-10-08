@@ -5,7 +5,7 @@
 # Usage: ./meta_run_blinded.sh [combined|individual|both] [--cmds <commands>]
 
 # Configuration
-CARDS_BASE_DIR="/home/users/lumori/bbtautau/src/bbtautau/cards/26July10_fullsig"
+CARDS_BASE_DIR="/home/users/lumori/bbtautau/src/bbtautau/cards/2026-08-28-ggf-apriori-ttpart0p99"
 SCRIPT_PATH="/home/users/lumori/bbtautau/src/bbtautau/combine/run_blinded_bbtt.sh"
 CHANNELS=("hh" "hm" "he")
 
@@ -19,6 +19,10 @@ skip_confirm=0
 # Parse named arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --cards-dir)
+            CARDS_BASE_DIR="${2%/}"
+            shift 2
+            ;;
         --only)
             only_dirs="$2"
             shift 2
@@ -48,6 +52,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --cmds: commands to pass to analysis script (default: '$DEFAULT_CMDS')"
             echo "          Use 'dfit' as shorthand for '--dfit'"
             echo "  --do-vbf: include VBF regions"
+            echo "  --cards-dir DIR: card base dir (contains bmin_* subdirs), overrides CARDS_BASE_DIR"
             echo "  --only DIR: run only for specified dir(s), comma-separated (e.g. --only bmin_10 or --only bmin_10,bmin_12)"
             echo "  -y, --yes: skip confirmation prompt"
             echo ""

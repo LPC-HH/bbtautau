@@ -66,7 +66,7 @@ _user = _username()
 _repo_name = _REPO_ROOT.name
 # Skimmer ntuple path (shared bbtautau skimmer tag on ceph)
 
-#for 2024:
+# for 2024:
 # _default_data_dir = (
 #     "/eos/user/j/jinwa/bbtautau/skimmer/25Sep24QCD_v15_signal"
 # )
@@ -113,10 +113,10 @@ CHANNEL_ORDERING = ["hh", "hm", "he"]  # order of applying selection and vetoes
 SIGNAL_ORDERING = ["ggfbbtt", "vbfbbtt"]  # order of applying selection and vetoes
 
 
-CR_LOOSE_CUTS: dict[str, dict[str, float]] = {
-    "hh": {"txbb": 0.5, "txtt": 0.5},  # SR: txbb=0.91, txtt_BDT=0.996
-    "hm": {"txbb": 0.5, "txtt": 0.5},  # SR: txbb=0.85, txtt_BDT=0.8
-    "he": {"txbb": 0.5, "txtt": 0.5},  # SR: txbb=0.91, txtt_BDT=0.9918
+VR_LOOSE_CUTS: dict[str, dict[str, float]] = {
+    "hh": {"txbb": 0.4, "txtt": 0.4},
+    "hm": {"txbb": 0.4, "txtt": 0.4},
+    "he": {"txbb": 0.4, "txtt": 0.4},
 }
 
 
