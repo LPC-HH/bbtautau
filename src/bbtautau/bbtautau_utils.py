@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from boostedhh.utils import add_bool_arg
-
 
 def parse_common_run_args(parser):
     parser.add_argument(
@@ -37,8 +35,21 @@ def parse_common_run_args(parser):
         help="pt cut for fatjets in skimmer",
     )
 
-    add_bool_arg(
-        parser, "fatjet-bb-preselection", default=False, help="apply bb preselection to fatjets"
+    parser.add_argument(
+        "--fatjet-bb-preselection-cut",
+        type=float,
+        default=None,
+        help="if set, require >=1 fatjet with ParTXbbvsQCDTop >= this cut",
+    )
+
+    parser.add_argument(
+        "--fatjet-tt-preselection-cut",
+        type=float,
+        default=None,
+        help=(
+            "if set, require >=1 fatjet with "
+            "max(ParTXtauhtauevsQCDTop, ParTXtauhtaumvsQCDTop, ParTXtauhtauhvsQCDTop) >= this cut"
+        ),
     )
 
     parser.add_argument(
