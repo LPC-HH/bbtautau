@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import awkward as ak
 import numpy as np
+
 # added v15
-from boostedhh.processors.objects import jetid_v12,jetid_v15
+from boostedhh.processors.objects import jetid_v12, jetid_v15
 from boostedhh.processors.utils import PDGID
 from coffea.nanoevents.methods.nanoaod import (
     ElectronArray,
@@ -22,12 +23,31 @@ from coffea.nanoevents.methods.nanoaod import (
 
 from bbtautau.HLTs import HLTs
 
+# Trigger-catalog-type -> HLTs.MENU key, for the (type, filterbit, ptcut) combos that have an analysis-menu equivalent.
+_MENU_KEY_BY_TRIGGER_TYPE = {
+    "EGamma": "ele30",
+    "Muon": "muiso24",
+    "DiTau": "ditau",
+}
 
-def trig_match_sel(events, leptons, trig_leptons, year, trigger, filterbit, ptcut, trig_dR=0.2):
+
+def trig_match_sel(
+    events, leptons, trig_leptons, year, trigger, filterbit, ptcut, trig_dR=0.2, menu_key=None
+):
     """
     Returns selection for leptons which are trigger matched to the specified trigger.
+
+    If `menu_key` is given (a key in `HLTs.MENU`), the physical HLT path is resolved via
+    `HLTs.resolve_menu(year, menu_key, ...)` instead of the catalog-type lookup. Otherwise,
+    falls back to the legacy `HLTs.hlts_by_type(year, trigger, ...)[0]` resolution (whatever
+    happens to be first in that trigger-type's catalog list).
     """
-    trigger = HLTs.hlts_by_type(year, trigger, hlt_prefix=False)[0]  # picking first trigger in list
+    if menu_key is not None:
+        trigger = HLTs.resolve_menu(year, menu_key, hlt_prefix=False)[0]
+    else:
+        trigger = HLTs.hlts_by_type(year, trigger, hlt_prefix=False)[
+            0
+        ]  # picking first trigger in list
     trig_fired = events.HLT[trigger]
     # print(f"{trigger} rate: {ak.mean(trig_fired)}")
 
@@ -38,6 +58,7 @@ def trig_match_sel(events, leptons, trig_leptons, year, trigger, filterbit, ptcu
     trig_l_matched = ak.any(leptons.metric_table(trig_l) < trig_dR, axis=2)
     trig_l_sel = trig_fired & trig_l_matched & (leptons.pt > ptcut)
     return trig_l_sel
+
 
 # added v15
 def get_ak8jets(fatjets: FatJetArray, nano_version: str):
@@ -70,11 +91,19 @@ def get_ak8jets(fatjets: FatJetArray, nano_version: str):
                 fatjets[f"globalParT_X{tautau}"] + fatjets["globalParT_QCD"]
             )
             fatjets[f"globalParT_X{tautau}vsQCDTop"] = fatjets[f"globalParT_X{tautau}"] / (
-                fatjets[f"globalParT_X{tautau}"] + fatjets["globalParT_QCD"] + fatjets["globalParT_Top"]
+                fatjets[f"globalParT_X{tautau}"]
+                + fatjets["globalParT_QCD"]
+                + fatjets["globalParT_Top"]
             )
     elif nano_version.startswith("v15"):
         fatjets["globalParT_QCD"] = fatjets.globalParT3_QCD
-        fatjets["globalParT_Top"] = fatjets.globalParT3_TopbWev + fatjets.globalParT3_TopbWmv + fatjets.globalParT3_TopbWq + fatjets.globalParT3_TopbWqq + fatjets.globalParT3_TopbWtauhv
+        fatjets["globalParT_Top"] = (
+            fatjets.globalParT3_TopbWev
+            + fatjets.globalParT3_TopbWmv
+            + fatjets.globalParT3_TopbWq
+            + fatjets.globalParT3_TopbWqq
+            + fatjets.globalParT3_TopbWtauhv
+        )
         fatjets["globalParT_TopbWev"] = fatjets.globalParT3_TopbWev
         fatjets["globalParT_TopbWmv"] = fatjets.globalParT3_TopbWmv
         fatjets["globalParT_TopbWq"] = fatjets.globalParT3_TopbWq
@@ -95,7 +124,9 @@ def get_ak8jets(fatjets: FatJetArray, nano_version: str):
                 fatjets[f"globalParT3_X{tautau}"] + fatjets["globalParT_QCD"]
             )
             fatjets[f"globalParT_X{tautau}vsQCDTop"] = fatjets[f"globalParT3_X{tautau}"] / (
-                fatjets[f"globalParT3_X{tautau}"] + fatjets["globalParT_QCD"] + fatjets["globalParT_Top"]
+                fatjets[f"globalParT3_X{tautau}"]
+                + fatjets["globalParT_QCD"]
+                + fatjets["globalParT_Top"]
             )
             fatjets[f"globalParT_X{tautau}"] = fatjets[f"globalParT3_X{tautau}"]
 
@@ -131,7 +162,7 @@ def good_ak8jets(
     eta: float,
     msd: float,  # noqa: ARG001
     mreg: float,  # noqa: ARG001
-    nano_version: str,  # noqa: ARG001
+    nano_version: str,
     mreg_str: str = "particleNet_mass_legacy",  # noqa: ARG001
 ):
     # if nano_version.startswith("v12"):
@@ -209,7 +240,14 @@ def good_electrons(events, leptons: ElectronArray, year: str):
 
     TrigMatchDict = {
         f"ElectronTrigMatch{trigger}": trig_match_sel(
-            events, leptons, trig_leptons, year, trigger, filterbit, ptcut
+            events,
+            leptons,
+            trig_leptons,
+            year,
+            trigger,
+            filterbit,
+            ptcut,
+            menu_key=_MENU_KEY_BY_TRIGGER_TYPE.get(trigger),
         )
         for trigger, (filterbit, ptcut) in triggers.items()
     }
@@ -254,7 +292,14 @@ def good_muons(events, leptons: MuonArray, year: str):
 
     TrigMatchDict = {
         f"MuonTrigMatch{trigger}": trig_match_sel(
-            events, leptons, trig_leptons, year, trigger, filterbit, ptcut
+            events,
+            leptons,
+            trig_leptons,
+            year,
+            trigger,
+            filterbit,
+            ptcut,
+            menu_key=_MENU_KEY_BY_TRIGGER_TYPE.get(trigger),
         )
         for trigger, (filterbit, ptcut) in triggers.items()
     }
@@ -306,7 +351,14 @@ def good_taus(events, leptons: TauArray, year: str):
 
     TrigMatchDict = {
         f"TauTrigMatch{trigger}": trig_match_sel(
-            events, leptons, trig_leptons, year, trigger, filterbit, ptcut
+            events,
+            leptons,
+            trig_leptons,
+            year,
+            trigger,
+            filterbit,
+            ptcut,
+            menu_key=_MENU_KEY_BY_TRIGGER_TYPE.get(trigger),
         )
         for trigger, (filterbit, ptcut) in triggers.items()
     }
