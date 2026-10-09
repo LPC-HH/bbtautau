@@ -146,19 +146,24 @@ def build_pred_hist(templates: dict, res: dict) -> tuple[Hist, list[str]]:
     and the observed CR-pass data goes into ``data``.
     Returns (hist, ordered background keys to stack).
     """
-    hp = templates["pass"]
-    present = list(hp.axes["Sample"])
+    return _stack_hist(templates["pass"], res["pred_qcd_dy_pass"])
+
+
+def _stack_hist(h_region, qcd_dy_vals: np.ndarray) -> tuple[Hist, list[str]]:
+    """New Hist with the region's non-QCD/DY MC samples, ``qcd_dy_vals`` as the ``qcddy``
+    sample and the region's data. Returns (hist, ordered background keys to stack)."""
+    present = list(h_region.axes["Sample"])
     mc_keys = [k for k in NONQCDDY_BG_KEYS if k in present]
     bg_keys = mc_keys + [QCDDY_KEY]
 
-    mass_axis = hp[DATA_KEY, :].axes[0]
+    mass_axis = h_region[DATA_KEY, :].axes[0]
     samples = bg_keys + [DATA_KEY]
     h = Hist(hist.axis.StrCategory(samples, name="Sample"), mass_axis, storage="double")
 
     for k in mc_keys:
-        h.view()[samples.index(k), :] = _vals(hp, k)
-    h.view()[samples.index(QCDDY_KEY), :] = res["pred_qcd_dy_pass"]
-    h.view()[samples.index(DATA_KEY), :] = res["data_pass"]
+        h.view()[samples.index(k), :] = _vals(h_region, k)
+    h.view()[samples.index(QCDDY_KEY), :] = qcd_dy_vals
+    h.view()[samples.index(DATA_KEY), :] = _vals(h_region, DATA_KEY)
 
     return h, bg_keys
 
@@ -199,6 +204,33 @@ def plot_closure(
         print(f"Saved closure plot to {out}")
 
 
+def plot_fail(templates: dict, channel: str, year_label: str, out: Path):
+    """CR-fail data vs the non-QCD/DY MC stack plus the data-driven QCD+DY (data - MC).
+    Shows the stats and composition of the region the QCD+DY shape is taken from; the
+    stack equals data by construction, so the ratio panel is 1 (except where QCD+DY < 0)."""
+    hf = templates["fail"]
+    h, bg_keys = _stack_hist(hf, qcd_dy_shape(hf))
+
+    cms_year = year_label if year_label in LUMI else "all"
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    plotting.ratioHistPlot(
+        h,
+        cms_year,
+        CHANNELS[channel],
+        sig_keys=[],
+        bg_keys=bg_keys,
+        data_err=True,
+        region_label=f"{CHANNELS[channel].label} CR Fail",
+        name=str(out),
+        show=False,
+        ratio_ylims=[0, 3],
+        cmslabel="Work in progress",
+        leg_args={"fontsize": 16, "ncol": 2},
+    )
+    print(f"Saved CR-fail plot to {out}")
+
+
 def _chi2(res: dict) -> tuple[float, int]:
     """Simple chi2 of data vs prediction using Poisson data errors (bins with data>0)."""
     data, pred = res["data_pass"], res["pred_pass"]
@@ -215,6 +247,11 @@ def main():
     parser.add_argument("--signal", default="ggfbbtt")
     parser.add_argument("--bmin", type=int, default=10)
     parser.add_argument("--out", type=Path, default=None, help="output plot path (png)")
+    parser.add_argument(
+        "--plot-fail",
+        action="store_true",
+        help="also plot CR-fail data vs MC + data-driven QCD+DY, saved as <out stem>_fail<suffix>",
+    )
     args = parser.parse_args()
 
     templates = load_cr_templates(
@@ -240,6 +277,11 @@ def main():
         args.template_dir / "control" / f"closure_{args.channel}_{year_label}_bmin{args.bmin}.png"
     )
     plot_closure(templates, res, channel=args.channel, year_label=year_label, out=out)
+
+    if args.plot_fail:
+        print(f"  CR-fail data={_vals(templates['fail'], DATA_KEY).sum():.0f}")
+        fail_out = out.with_name(f"{out.stem}_fail{out.suffix}")
+        plot_fail(templates, channel=args.channel, year_label=year_label, out=fail_out)
 
 
 if __name__ == "__main__":

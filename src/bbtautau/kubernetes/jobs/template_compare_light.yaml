@@ -14,7 +14,7 @@ spec:
           - "/bin/bash"
           - "-c"
           - >
-            git clone --single-branch --recurse-submodules --branch dev-bdt https://github.com/LPC-HH/bbtautau.git /opt/repo/bbtautau &&
+            git clone --single-branch --recurse-submodules --branch main https://github.com/LPC-HH/bbtautau.git /opt/repo/bbtautau &&
             mkdir -p $output_dir &&
             pip install -e /opt/repo/bbtautau &&
             pip install -e /opt/repo/bbtautau/boostedhh &&
