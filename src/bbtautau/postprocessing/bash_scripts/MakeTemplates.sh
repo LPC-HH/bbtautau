@@ -37,7 +37,6 @@ A_PRIORI_CHANNELS=1
 USE_SENSITIVITY_DIR=1  # Flag to control --sensitivity-dir argument (default: on)
 TEST_MODE=0
 TT_PRES=0
-CONTROL_REGION=0  # Build CR (annulus) templates for QCD+DY validation
 TXBB_SF=0  # Apply TXbb SFs + per-pT-bin variations (postprocessing.py --txbb-sf)
 APRIORI_PROD_MODE=""  # --a-priori-production-mode {kinematic,bdt,none}; empty = postprocessing.py default
 GGF_MODEL="May4_optimized_ggf"
@@ -64,7 +63,6 @@ show_help() {
     echo "                         Combined with --do-vbf, postprocessing.py also defaults"
     echo "                         --a-priori-production-mode to 'kinematic' (a priori"
     echo "                         ggf/vbf split instead of the SIGNAL_ORDERING veto chain)."
-    echo "  --control-region       Build CR (annulus) templates for QCD+DY validation"
     echo "  --txbb-sf              Apply TXbb tagger SFs with per-pT-bin variations"
     echo "  --a-priori-production-mode MODE  kinematic|bdt|none (none = ggF/VBF veto chain)"
     echo "  --sensitivity-dir DIR  Directory for --sensitivity-dir (default: /home/users/lumori/bbtautau/plots/SensitivityStudy/2025-12-27/)"
@@ -167,10 +165,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --tt-pres)
             TT_PRES=1
-            shift
-            ;;
-        --control-region)
-            CONTROL_REGION=1
             shift
             ;;
         --txbb-sf)
@@ -317,11 +311,6 @@ do
         # Add --tt-pres if enabled
         if [[ $TT_PRES -eq 1 ]]; then
             cmd+=(--tt-pres)
-        fi
-
-        # Add --control-region if enabled (CR annulus templates)
-        if [[ $CONTROL_REGION -eq 1 ]]; then
-            cmd+=(--control-region)
         fi
 
         if [[ $TXBB_SF -eq 1 ]]; then

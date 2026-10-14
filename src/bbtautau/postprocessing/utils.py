@@ -1057,6 +1057,9 @@ def assign_lepton_channel(events_dict: dict[str, LoadedSample]) -> None:
         sample.events["lepton_channel"] = lepton_channel
 
 
+PRODUCTION_CATEGORY_COL = "isVBFCategory"
+
+
 def assign_production_mode(
     events_dict: dict[str, LoadedSample],
     channel: Channel,
@@ -1077,7 +1080,8 @@ def assign_production_mode(
         ``|VBFJetDeltaEta| > deta_cut`` (from ``derive_vbf_variables``, always available), else
         "ggf". Simple, interpretable, no BDT dependency.
 
-    Sets a new "production_mode" column (values in ``{"ggf","vbf"}``) on each sample's events.
+    Sets a new "production_mode" column (values in ``{"ggf","vbf"}``) on each sample's events,
+    and its numeric twin ``PRODUCTION_CATEGORY_COL`` (1.0 = vbf, 0.0 = ggf).
     """
     if method not in ("bdt", "kinematic"):
         raise ValueError(f"Unknown production-mode assignment method: {method!r}")
@@ -1109,6 +1113,8 @@ def assign_production_mode(
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", pd.errors.SettingWithCopyWarning)
             sample.events["production_mode"] = production_mode
+            # numeric copy, cuttable by make_selection (Regions adds it to the SR pass/veto cuts)
+            sample.events[PRODUCTION_CATEGORY_COL] = is_vbf.astype(float)
 
 
 def filter_samples_by_column(

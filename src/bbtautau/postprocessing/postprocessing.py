@@ -291,8 +291,8 @@ def main(args: argparse.Namespace):
             keep = sample.get_var("lepton_channel") == CHANNEL.key
             events_dict[key] = sample.copy_from_selection(keep)
 
-    # Precompute both ggf/vbf subsets once, reused for every (bmin, signal_key) pair
-    production_events_dict: dict[str, dict[str, LoadedSample]] | None = None
+    # A priori ggf/vbf category per event. Applied as a cut on each SR pass (Regions._get_sr_cuts),
+    # not by splitting events_dict: FR and VR are filled from all events of the channel.
     if args.a_priori_production_mode is not None:
         putils.assign_production_mode(
             events_dict,
@@ -301,10 +301,12 @@ def main(args: argparse.Namespace):
             mjj_cut=args.vbf_mjj_cut,
             deta_cut=args.vbf_deta_cut,
         )
-        production_events_dict = {
-            mode: putils.filter_samples_by_column(events_dict, "production_mode", mode)
-            for mode in ("ggf", "vbf")
-        }
+
+    if not args.a_priori_channels:
+        print(
+            "WARNING: the validation region (vrpass) is only supported with --a-priori-channels; "
+            "not filling it in this run."
+        )
 
     args.sigs = {s + CHANNEL.key: SAMPLES[s + CHANNEL.key] for s in args.sigs}
     systematics: dict[str, dict] = {}
@@ -339,22 +341,15 @@ def main(args: argparse.Namespace):
 
         for signal_key in signal_regions:
 
-            # Create bmin-specific directories ("control" subdir keeps CR templates
-            # from colliding with the nominal SR ones).
-            cr_seg = "control" if args.control_region else ""
+            # Create bmin-specific directories
             template_dir_bmin = (
                 args.template_dir
-                / cr_seg
                 / f"bmin_{bmin}"
                 / signal_key
                 / (CHANNEL.key if args.template_dir else "")
             )
             plot_dir_bmin = (
-                args.plot_dir
-                / cr_seg
-                / f"bmin_{bmin}"
-                / signal_key
-                / (CHANNEL.key if args.plot_dir else "")
+                args.plot_dir / f"bmin_{bmin}" / signal_key / (CHANNEL.key if args.plot_dir else "")
             )
 
             if template_dir_bmin:
@@ -362,17 +357,8 @@ def main(args: argparse.Namespace):
             if plot_dir_bmin:
                 plot_dir_bmin.mkdir(parents=True, exist_ok=True)
 
-            if production_events_dict is not None:
-                # Same event-level split reused for every bmin value; only signal_key changes
-                # which of the two disjoint (ggf, vbf) subsets is used.
-                events_dict_for_signal = production_events_dict[
-                    "vbf" if signal_key == "vbfbbtt" else "ggf"
-                ]
-            else:
-                events_dict_for_signal = events_dict
-
             templates = get_templates(
-                events_dict_for_signal,  # Same data for all bmin values
+                events_dict,  # Same data for all bmin values
                 year_label,
                 args.sigs,
                 args.bgs,
@@ -412,7 +398,6 @@ def main(args: argparse.Namespace):
                     "overlapping_channels": args.overlapping_channels,
                     "sensitivity_disc_tag": args.sensitivity_disc_tag,
                     "ggf_modelname": args.ggf_modelname,
-                    "control_region": args.control_region,
                     "tt_glopart_cut": args.tt_glopart_cut,
                     "a_priori_channels": args.a_priori_channels,
                     "a_priori_production_mode": args.a_priori_production_mode,
@@ -759,18 +744,17 @@ def get_templates(
     # do TXbb SFs + uncs. for signals and Hbb samples only
     # txbb_samples = sig_keys + [key for key in bg_keys if key in hbb_bg_keys]
 
-    # Inter-channel/-signal vetoes enforce SR orthogonality; the CR is a per-channel
-    # validation region, so skip them when building control-region templates.
-    control_region = bool((selection_region_kwargs or {}).get("control_region", False))
-
+    # Inter-channel/-signal vetoes (SR complements of the SRs earlier in the ordering) enforce
+    # SR orthogonality; they apply to the SR pass only. With an a priori production-mode split
+    # the SRs are already disjoint through their category cut (see Regions._get_sr_cuts).
     vetoes = []
-    if not control_region and not a_priori_production_mode:
+    if not a_priori_production_mode:
         if a_priori_channels:
             for signal_iter in signal_regions:
                 if signal_iter == signal:
                     break
                 vetoes.append(
-                    Regions.get_selection_regions(signal_iter, channel, **selection_region_kwargs)
+                    Regions.get_sr_veto_cuts(signal_iter, channel, **selection_region_kwargs)
                 )
         else:
             found = False
@@ -780,22 +764,31 @@ def get_templates(
                         found = True
                         break
                     vetoes.append(
-                        Regions.get_selection_regions(
+                        Regions.get_sr_veto_cuts(
                             signal_iter, CHANNELS[channel_iter], **selection_region_kwargs
                         )
                     )
                 if found:
                     break
 
-    # Now a pass/fail region is defined for ggf and vbf. In each we will load all signal samples
-    # Apply vetoes from regions that were optimized earlier in the ordering
-    selection_regions = Regions.get_selection_regions(
-        signal, channel, vetoes=vetoes, **selection_region_kwargs
-    )
+    # The VR excludes every SR of this channel (ggF and VBF), each with its own category cut when
+    # there is an a priori production-mode split. FR and VR are therefore the same for every
+    # signal. Without --a-priori-channels the VR is not filled (warned once in main()).
+    vr_vetoes = [
+        Regions.get_sr_veto_cuts(signal_iter, channel, **selection_region_kwargs)
+        for signal_iter in signal_regions
+    ]
 
-    # TXbb SF: applied in every region to any jet passing the pass-region TXbb cut (the fail
-    # region is an OR of failed cuts, so it contains bb-passing jets too)
-    do_txbb_sf = apply_txbb_sf and not do_jshift and not control_region
+    # SR pass (per signal), FR (fail) and VR (vrpass). In each we will load all signal samples
+    selection_regions = Regions.get_selection_regions(
+        signal, channel, vetoes=vetoes, vr_vetoes=vr_vetoes, **selection_region_kwargs
+    )
+    if not a_priori_channels:
+        del selection_regions["vrpass"]
+
+    # TXbb SF: SR pass only (not in the FR, decided 2026-10-13, nor in the VR), so the FR is
+    # identical across signal subdirs.
+    do_txbb_sf = apply_txbb_sf and not do_jshift
     txbb_sf_keys, txbb_variations = [], []
     if do_txbb_sf:
         bb_disc_arg = (selection_region_kwargs or {}).get("bb_disc", "ak8FatJetParTXbbvsQCDTop")
@@ -811,6 +804,7 @@ def get_templates(
 
     for rname, region in selection_regions.items():
         pass_region = rname.startswith("pass")
+        region_txbb_sf_keys = txbb_sf_keys if rname == "pass" else []
 
         print(f"{rname} Region: {time.time() - start:.2f}")
 
@@ -839,11 +833,11 @@ def get_templates(
         #     print(f"Trigger SF Unc.: {total_err / total:.3f}\n")
 
         sig_events = {}
-        for skey in dict.fromkeys([*sig_keys, *txbb_sf_keys]):
+        for skey in dict.fromkeys([*sig_keys, *region_txbb_sf_keys]):
             lsample = events_dict[skey]
             sig_events[skey] = lsample.copy_from_selection(sel[skey], do_deepcopy=True)
 
-            if do_txbb_sf and skey in txbb_sf_keys:
+            if skey in region_txbb_sf_keys:
                 corrections.apply_txbb_sfs(
                     sig_events[skey], year, txbb_cut, bb_disc_col, weight_key
                 )
@@ -860,7 +854,7 @@ def get_templates(
         for sig_key in sig_keys:
             hist_samples += [f"{sig_key}__true{origin}" for origin in putils.TRUTH_ORIGINS]
 
-        for skey in txbb_sf_keys:
+        for skey in region_txbb_sf_keys:
             hist_samples += [f"{skey}_{var}" for var in txbb_variations]
 
         # if not do_jshift:
@@ -897,7 +891,7 @@ def get_templates(
             # breakpoint()
             h.fill(Sample=skey, **fill_data, weight=weight)
 
-            if skey in txbb_sf_keys:
+            if skey in region_txbb_sf_keys:
                 for var in txbb_variations:
                     h.fill(
                         Sample=f"{skey}_{var}",
@@ -1292,14 +1286,6 @@ def parse_args(parser=None):
         action="store_true",
         default=False,
         help="Run VBF optimization first (with its own model) and veto its selection (Bmin=10) when optimizing the main signal",
-    )
-    parser.add_argument(
-        "--control-region",
-        action="store_true",
-        default=False,
-        help="Build CR (orthogonal annulus) templates for QCD+DY validation instead of the "
-        "nominal SR pass/fail. Loose cuts from userConfig.CR_LOOSE_CUTS; see "
-        "notes/control_region_plan.md. Templates go to a 'control' subdir; CR is unblinded.",
     )
     parser.add_argument(
         "--vbf-modelname",

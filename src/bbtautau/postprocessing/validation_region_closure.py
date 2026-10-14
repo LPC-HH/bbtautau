@@ -1,30 +1,31 @@
 """
-Control-region (CR) closure for the data-driven QCD+DY (alphabet) background estimate.
+Validation-region (VR) closure for the data-driven QCD+DY (alphabet) background estimate.
 
-Tests whether the CR-fail mass shape, scaled by the pass/fail transfer factor, reproduces
-the CR-pass data (after adding the non-QCD/DY MC). Good closure in this high-stats,
+Tests whether the VR-fail mass shape, scaled by the pass/fail transfer factor, reproduces
+the VR-pass data (after adding the non-QCD/DY MC). Good closure in this high-stats,
 unblindable annulus supports the fail->pass extrapolation used in the signal region.
 
 ------------------------------------------------------------------------------------------
 HOW TO RUN
 ------------------------------------------------------------------------------------------
-1. Produce the CR templates with the main postprocessor (--control-region writes them under
-   <template-dir>/control/bmin_<b>/<signal>/<channel>/<year>_templates.pkl):
+1. Produce the VR templates with the main postprocessor (--validation-region writes them under
+   <template-dir>/validation/bmin_<b>/<signal>/<channel>/<year>_templates.pkl; runs made
+   before the CR -> VR rename used <template-dir>/control/, which is read as a fallback):
 
     micromamba run -n hh python -m bbtautau.postprocessing.postprocessing \
-        --control-region --templates --year 2022 --channel hh --bmin 10 \
+        --validation-region --templates --year 2022 --channel hh --bmin 10 \
         --template-dir src/bbtautau/postprocessing/templates/<tag>   [other template args]
 
 2. Run this closure on those templates:
 
-    micromamba run -n hh python -m bbtautau.postprocessing.control_region_closure \
+    micromamba run -n hh python -m bbtautau.postprocessing.validation_region_closure \
         --template-dir src/bbtautau/postprocessing/templates/<tag> \
         --year 2022 --channel hh --bmin 10 --signal ggfbbtt
 
 Args: --template-dir (parent dir passed in step 1), --year (one or more, summed),
 --channel (he/hh/hm), --bmin, --signal (default ggfbbtt), --out (optional png path;
-defaults under <template-dir>/control/). Prints a chi2/ndf and the per-bin transfer
-factor, and saves a per-sample stacked closure plot (each MC background shown separately
+defaults under <template-dir>/validation/, or control/ for legacy runs). Prints a
+chi2/ndf and the per-bin transfer factor, and saves a per-sample stacked closure plot (each MC background shown separately
 plus the data-driven QCD+DY) with a data/prediction ratio panel.
 ------------------------------------------------------------------------------------------
 
@@ -64,20 +65,40 @@ NONQCDDY_BG_KEYS = [
 ]
 
 
-def cr_template_path(template_dir: Path, year: str, channel: str, signal: str, bmin: int) -> Path:
-    """Path of the CR templates pickle (mirrors postprocessing.py's control/ layout)."""
+# Subdir postprocessing.py --validation-region writes to; "control" is the legacy name used
+# by runs made before the CR -> VR rename (kept on disk, read as a fallback).
+VR_SUBDIR = "validation"
+LEGACY_VR_SUBDIR = "control"
+
+
+def vr_subdir(template_dir: Path) -> str:
+    """``validation`` if it exists under ``template_dir``, else the legacy ``control``."""
+    if (Path(template_dir) / VR_SUBDIR).exists() or not (
+        Path(template_dir) / LEGACY_VR_SUBDIR
+    ).exists():
+        return VR_SUBDIR
+    return LEGACY_VR_SUBDIR
+
+
+def vr_template_path(template_dir: Path, year: str, channel: str, signal: str, bmin: int) -> Path:
+    """Path of the VR templates pickle (mirrors postprocessing.py's validation/ layout)."""
     return (
-        Path(template_dir) / "control" / f"bmin_{bmin}" / signal / channel / f"{year}_templates.pkl"
+        Path(template_dir)
+        / vr_subdir(template_dir)
+        / f"bmin_{bmin}"
+        / signal
+        / channel
+        / f"{year}_templates.pkl"
     )
 
 
-def load_cr_templates(
+def load_vr_templates(
     template_dir: Path, years: list[str], channel: str, signal: str, bmin: int
 ) -> dict:
-    """Load CR templates for one or more years, summing the per-region hists across years."""
+    """Load VR templates for one or more years, summing the per-region hists across years."""
     combined: dict = {}
     for year in years:
-        path = cr_template_path(template_dir, year, channel, signal, bmin)
+        path = vr_template_path(template_dir, year, channel, signal, bmin)
         with path.open("rb") as f:
             tmpl = pickle.load(f)
         for region in ("pass", "fail"):
@@ -102,7 +123,7 @@ def nonqcddy_mc(h) -> np.ndarray:
 
 
 def run_closure(templates: dict) -> dict:
-    """Compute the closure arrays from a CR templates dict (keys 'pass'/'fail')."""
+    """Compute the closure arrays from a VR templates dict (keys 'pass'/'fail')."""
     hp, hf = templates["pass"], templates["fail"]
     # axes[0] is the Sample (StrCategory) axis; the mass axis is what remains after
     # indexing a sample, so read the binning from there.
@@ -139,11 +160,11 @@ def run_closure(templates: dict) -> dict:
 
 
 def build_pred_hist(templates: dict, res: dict) -> tuple[Hist, list[str]]:
-    """Pack the CR-pass prediction into a Hist for plotting.ratioHistPlot.
+    """Pack the VR-pass prediction into a Hist for plotting.ratioHistPlot.
 
     Each non-QCD/DY MC background is kept as its own sample (so the stack shows them
     individually), the data-driven QCD+DY (TF x fail) goes into a single ``qcddy`` sample,
-    and the observed CR-pass data goes into ``data``.
+    and the observed VR-pass data goes into ``data``.
     Returns (hist, ordered background keys to stack).
     """
     return _stack_hist(templates["pass"], res["pred_qcd_dy_pass"])
@@ -175,7 +196,7 @@ def plot_closure(
     year_label: str,
     out: Path | None = None,
 ):
-    """Per-sample CR-pass closure: each MC background stacked separately, the data-driven
+    """Per-sample VR-pass closure: each MC background stacked separately, the data-driven
     QCD+DY prediction (TF x fail) on top, compared to data with a data/pred ratio panel."""
     h, bg_keys = build_pred_hist(templates, res)
 
@@ -192,7 +213,7 @@ def plot_closure(
         sig_keys=[],
         bg_keys=bg_keys,
         data_err=True,
-        region_label=f"{CHANNELS[channel].label} CR Pass",
+        region_label=f"{CHANNELS[channel].label} VR Pass",
         name=str(out) if out is not None else "",
         show=False,
         ratio_ylims=[0, 2],
@@ -205,7 +226,7 @@ def plot_closure(
 
 
 def plot_fail(templates: dict, channel: str, year_label: str, out: Path):
-    """CR-fail data vs the non-QCD/DY MC stack plus the data-driven QCD+DY (data - MC).
+    """VR-fail data vs the non-QCD/DY MC stack plus the data-driven QCD+DY (data - MC).
     Shows the stats and composition of the region the QCD+DY shape is taken from; the
     stack equals data by construction, so the ratio panel is 1 (except where QCD+DY < 0)."""
     hf = templates["fail"]
@@ -221,14 +242,14 @@ def plot_fail(templates: dict, channel: str, year_label: str, out: Path):
         sig_keys=[],
         bg_keys=bg_keys,
         data_err=True,
-        region_label=f"{CHANNELS[channel].label} CR Fail",
+        region_label=f"{CHANNELS[channel].label} VR Fail",
         name=str(out),
         show=False,
         ratio_ylims=[0, 3],
         cmslabel="Work in progress",
         leg_args={"fontsize": 16, "ncol": 2},
     )
-    print(f"Saved CR-fail plot to {out}")
+    print(f"Saved VR-fail plot to {out}")
 
 
 def _chi2(res: dict) -> tuple[float, int]:
@@ -250,11 +271,11 @@ def main():
     parser.add_argument(
         "--plot-fail",
         action="store_true",
-        help="also plot CR-fail data vs MC + data-driven QCD+DY, saved as <out stem>_fail<suffix>",
+        help="also plot VR-fail data vs MC + data-driven QCD+DY, saved as <out stem>_fail<suffix>",
     )
     args = parser.parse_args()
 
-    templates = load_cr_templates(
+    templates = load_vr_templates(
         args.template_dir, args.year, args.channel, args.signal, args.bmin
     )
     year_label = "+".join(args.year)
@@ -262,10 +283,10 @@ def main():
     res = run_closure(templates)
     chi2, ndf = _chi2(res)
 
-    print(f"\nCR closure: channel={args.channel} year={year_label} bmin={args.bmin}")
+    print(f"\nVR closure: channel={args.channel} year={year_label} bmin={args.bmin}")
     print(f"  non-QCD/DY MC subtracted: {NONQCDDY_BG_KEYS}")
     print(
-        f"  CR-pass data={res['data_pass'].sum():.0f}  pred={res['pred_pass'].sum():.0f}  "
+        f"  VR-pass data={res['data_pass'].sum():.0f}  pred={res['pred_pass'].sum():.0f}  "
         f"qcd_eff={res['qcd_eff']:.3e}"
     )
     print(f"  chi2/ndf = {chi2:.1f}/{ndf} = {chi2/max(ndf,1):.2f}")
@@ -274,12 +295,14 @@ def main():
         print(f"    m={m:6.1f}  TF={tf:.3e}")
 
     out = args.out or (
-        args.template_dir / "control" / f"closure_{args.channel}_{year_label}_bmin{args.bmin}.png"
+        args.template_dir
+        / vr_subdir(args.template_dir)
+        / f"closure_{args.channel}_{year_label}_bmin{args.bmin}.png"
     )
     plot_closure(templates, res, channel=args.channel, year_label=year_label, out=out)
 
     if args.plot_fail:
-        print(f"  CR-fail data={_vals(templates['fail'], DATA_KEY).sum():.0f}")
+        print(f"  VR-fail data={_vals(templates['fail'], DATA_KEY).sum():.0f}")
         fail_out = out.with_name(f"{out.stem}_fail{out.suffix}")
         plot_fail(templates, channel=args.channel, year_label=year_label, out=fail_out)
 
