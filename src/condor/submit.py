@@ -47,11 +47,10 @@ def main(args):
         processor_args += f" --fatjet-pt-cut {args.fatjet_pt_cut}"
     if args.prescale_factor is not None:
         processor_args += f" --prescale-factor {args.prescale_factor}"
-    processor_args += (
-        " --fatjet-bb-preselection"
-        if args.fatjet_bb_preselection
-        else " --no-fatjet-bb-preselection"
-    )
+    if args.fatjet_bb_preselection_cut is not None:
+        processor_args += f" --fatjet-bb-preselection-cut {args.fatjet_bb_preselection_cut}"
+    if args.fatjet_tt_preselection_cut is not None:
+        processor_args += f" --fatjet-tt-preselection-cut {args.fatjet_tt_preselection_cut}"
     submit_utils.submit(args, proxy, t2_prefixes, outdir, local_dir, fileset, processor_args)
 
 

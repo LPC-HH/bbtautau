@@ -66,7 +66,7 @@ _user = _username()
 _repo_name = _REPO_ROOT.name
 # Skimmer ntuple path (shared bbtautau skimmer tag on ceph)
 
-#for 2024:
+# for 2024:
 # _default_data_dir = (
 #     "/eos/user/j/jinwa/bbtautau/skimmer/25Sep24QCD_v15_signal"
 # )
@@ -75,7 +75,7 @@ _repo_name = _REPO_ROOT.name
 # )
 
 _default_data_dir = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
-data_dir_2024 = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Jun9_v15_2024_sig_Jin/"
+data_dir_2024 = "/ceph/cms/store/user/lumori/bbtautau/skimmer/25Sep24All_618_v15/"
 DATA_DIR = os.environ.get("BBTAUTAU_DATA_DIR", _default_data_dir)
 DATA_PATHS = path_dict(DATA_DIR, path_2024=data_dir_2024)
 
@@ -102,15 +102,21 @@ PT_CUTS = {
     "tt": 200,
 }
 
+# dev_channel_separation: dR cone (centered on ttFatJet) used to decide whether a tight
+# lepton counts as "in the tautau candidate" for the a priori hh/hm/he channel definition
+# (see untracked_utils/.../channel_separation_diagnostic.py). Chosen after comparing 0.8 vs
+# 1.5 on ggf SM signal; 1.5 recovers meaningfully more true hm/he signal.
+LEPTON_CONE_DR = 1.5
+
 # usually will go (hh,ggf)->(hh,vbf)->(hm,ggf), etc.
 CHANNEL_ORDERING = ["hh", "hm", "he"]  # order of applying selection and vetoes
 SIGNAL_ORDERING = ["ggfbbtt", "vbfbbtt"]  # order of applying selection and vetoes
 
 
-CR_LOOSE_CUTS: dict[str, dict[str, float]] = {
-    "hh": {"txbb": 0.5, "txtt": 0.5},  # SR: txbb=0.91, txtt_BDT=0.996
-    "hm": {"txbb": 0.5, "txtt": 0.5},  # SR: txbb=0.85, txtt_BDT=0.8
-    "he": {"txbb": 0.5, "txtt": 0.5},  # SR: txbb=0.91, txtt_BDT=0.9918
+VR_LOOSE_CUTS: dict[str, dict[str, float]] = {
+    "hh": {"txbb": 0.4, "txtt": 0.4},
+    "hm": {"txbb": 0.4, "txtt": 0.4},
+    "he": {"txbb": 0.4, "txtt": 0.4},
 }
 
 

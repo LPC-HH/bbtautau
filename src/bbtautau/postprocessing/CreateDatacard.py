@@ -32,11 +32,13 @@ from boostedhh.hh_vars import years as hh_years
 from hist import Hist
 
 from bbtautau.postprocessing.bbtautau_types import Channel
+from bbtautau.postprocessing.corrections import txbb_pt_labels
 from bbtautau.postprocessing.datacardHelpers import (
     ShapeVar,
     Syst,
     add_bool_arg,
     combine_templates,
+    get_effect_updown,
     rem_neg,
     sum_templates,
 )
@@ -133,6 +135,16 @@ parser.add_argument(
     help="regions for which to make cards",
     choices=["pass"],
 )
+parser.add_argument(
+    "--region",
+    default="sr",
+    choices=["sr", "vr"],
+    type=str,
+    help="'sr' (default): signal region cards, 'pass' + 'fail' (+ MCBlinded copies), as before. "
+    "'vr': validation region cards, 'vrpass' + 'fail', always unblinded, one model 'vr' per bmin "
+    "(channels vr<ch>pass / vr<ch>fail, own TF from --nTF / --nTF-per-channel key 'vr'), "
+    "no TXbb or tautau SF (error if given). Use a separate --model-name, e.g. <TAG>-vr-nTF0.",
+)
 parser.add_argument("--model-name", default=None, type=str, help="output model name")
 parser.add_argument(
     "--bmin",
@@ -162,7 +174,41 @@ add_bool_arg(parser, "jesr", "Do JES/JER uncertainties", default=False)
 add_bool_arg(
     parser, "thu-hh", "Add THU_HH uncertainty; remove for HH inference framework", default=True
 )
+add_bool_arg(
+    parser,
+    "txbb-sf",
+    "Add per-pT-bin TXbb SF shape nuisances (templates must be made with postprocessing.py --txbb-sf)",
+    default=False,
+)
+add_bool_arg(
+    parser,
+    "tautau-sf",
+    "Apply a rate-only tautau tagger SF to all MC in the pass regions: scale by --tautau-sf-value "
+    "and add one correlated asymmetric lnN from --tautau-sf-unc-{up,down}",
+    default=False,
+)
+parser.add_argument("--tautau-sf-value", type=float, default=1.0, help="tautau SF central value")
+parser.add_argument(
+    "--tautau-sf-unc-up", type=float, default=0.2, help="absolute up uncertainty on the tautau SF"
+)
+parser.add_argument(
+    "--tautau-sf-unc-down",
+    type=float,
+    default=0.2,
+    help="absolute down uncertainty on the tautau SF",
+)
 args = parser.parse_args()
+
+VR_MODE = args.region == "vr"
+if VR_MODE:
+    # VR fit: unblinded, no SFs (decided 2026-10-13, untracked_utils/notes/control_region_plan.md)
+    if args.txbb_sf or args.tautau_sf:
+        parser.error("--region vr: --txbb-sf / --tautau-sf are not applied in the VR; drop them")
+    if args.model_name is None:
+        parser.error("--region vr: give a separate VR card tag, e.g. --model-name <TAG>-vr-nTF0")
+    if not args.unblinded:
+        logging.info("--region vr: unblinded cards (no MCBlinded copies)")
+    args.unblinded = True
 
 # Parse --nTF-per-channel if provided
 nTF_per_channel: dict | None = None
@@ -203,6 +249,17 @@ if nTF_per_channel is not None:
     print("Per-channel TF orders (overrides --nTF):", nTF_per_channel)
 
 signal_regions = ["pass"] if args.regions == "pass" else args.regions
+if VR_MODE:
+    # template key of the VR pass region; note "pass" in "vrpass" is True, so it is treated as a
+    # pass region everywhere below (signal kept, pass_only systs - none active in the VR)
+    signal_regions = ["vrpass"]
+
+
+def card_region(region: str) -> str:
+    """Region name used in card channel / parameter names. Identity for the SR; in the VR the
+    model prefix is already 'vr', so template region 'vrpass' becomes 'pass' (vr<ch>pass)."""
+    return region.replace("vrpass", "pass") if VR_MODE else region
+
 
 channels = (
     list(CHANNELS.values()) if args.channels == "all" else [CHANNELS[ch] for ch in args.channels]
@@ -274,7 +331,7 @@ elif args.year == "2022-2023":
 else:
     years = [args.year]
 
-full_lumi = LUMI[args.year]
+full_lumi = np.sum([LUMI[y] for y in years])
 
 # jmsr_keys = sig_keys + ["vhtobb", "zz", "nozzdiboson"]
 
@@ -333,6 +390,18 @@ nuisance_params = {
 if not args.thu_hh:
     del nuisance_params["THU_HH"]
 
+# rate-only tautau tagger SF on all MC in the pass regions; the central value scales the
+# templates in fill_regions, the lnN carries the relative uncertainty
+TAUTAU_SF = args.tautau_sf_value if args.tautau_sf else 1.0
+if args.tautau_sf:
+    nuisance_params[f"{CMS_PARAMS_LABEL}_tautau_sf"] = Syst(
+        prior="lnN",
+        samples=all_mc,
+        value=1 + args.tautau_sf_unc_up / args.tautau_sf_value,
+        value_down=1 - args.tautau_sf_unc_down / args.tautau_sf_value,
+        pass_only=True,
+    )
+
 nuisance_params_dict = {
     param: rl.NuisanceParameter(param, syst.prior) for param, syst in nuisance_params.items()
 }
@@ -341,13 +410,6 @@ nuisance_params_dict = {
 corr_year_shape_systs = {
     # "JES": Syst(name="CMS_scale_j", prior="shape", samples=all_mc),
     "trigger": Syst(name=f"{CMS_PARAMS_LABEL}_trigger", prior="shape", samples=all_mc),
-    "TXbbSF_correlated": Syst(
-        name=f"{CMS_PARAMS_LABEL}_txbb_sf_correlated",
-        prior="shape",
-        samples=sig_keys,
-        pass_only=True,
-        convert_shape_to_lnN=True,
-    ),
     # "FSRPartonShower": Syst(name="ps_fsr", prior="shape", samples=sig_keys, samples_corr=True),
     # "ISRPartonShower": Syst(name="ps_isr", prior="shape", samples=sig_keys, samples_corr=True),
     "scale": Syst(
@@ -365,6 +427,18 @@ corr_year_shape_systs = {
         separate_prod_modes=True,
     ),
 }
+
+if args.txbb_sf:
+    # one shape nuisance per calibration pT bin, correlated across years/channels
+    # (template variations named "<sample>_txbb_<ptlabel>_{up,down}", see corrections.py).
+    # SR pass only: the templates have no TXbb SF (and no variations) in the fail region.
+    for pt_label in txbb_pt_labels(years[0]):
+        corr_year_shape_systs[f"txbb_{pt_label}"] = Syst(
+            name=f"{CMS_PARAMS_LABEL}_txbb_sf_{pt_label}",
+            prior="shape",
+            samples=sig_keys + single_h_keys,
+            pass_only=True,
+        )
 
 uncorr_year_shape_systs = {
     # "pileup": Syst(name="CMS_pileup", prior="shape", samples=all_mc),
@@ -524,9 +598,9 @@ def fill_regions(
     mc_samples: dict[str, str],
     nuisance_params: dict[str, Syst],
     nuisance_params_dict: dict[str, rl.NuisanceParameter],
-    corr_year_shape_systs: dict[str, Syst],  # noqa: ARG001
+    corr_year_shape_systs: dict[str, Syst],
     uncorr_year_shape_systs: dict[str, Syst],  # noqa: ARG001
-    shape_systs_dict: dict[str, rl.NuisanceParameter],  # noqa: ARG001
+    shape_systs_dict: dict[str, rl.NuisanceParameter],
     bblite: bool = True,
 ):
     """Fill samples per region including given rate, shape and mcstats systematics.
@@ -559,10 +633,11 @@ def fill_regions(
 
         pass_region = "pass" in region
         region_noblinded = region.split(MCB_LABEL)[0]
-        blind_str = MCB_LABEL if region.endswith(MCB_LABEL) else ""  # noqa: F841
+        blind_str = MCB_LABEL if region.endswith(MCB_LABEL) else ""
 
         logging.info(f"\tStarting region: {region}")
-        ch = rl.Channel(sr_key + channel.key + region.replace("_", ""))  # can't have '_'s in name
+        # can't have '_'s in name
+        ch = rl.Channel(sr_key + channel.key + card_region(region).replace("_", ""))
         model.addChannel(ch)
 
         for sample_name, card_name in mc_samples.items():
@@ -578,6 +653,9 @@ def fill_regions(
             logging.info(f"\t\tTemplates for: {sample_name}")
 
             sample_template = region_templates[sample_name, :]
+            # tautau SF only in the pass regions (fail regions are not tt-tagged)
+            rate_sf = TAUTAU_SF if pass_region else 1.0
+            sample_template = sample_template * rate_sf
 
             stype = rl.Sample.SIGNAL if sample_name in sig_keys else rl.Sample.BACKGROUND
             sample = rl.TemplateSample(ch.name + "_" + card_name, stype, sample_template)
@@ -644,59 +722,63 @@ def fill_regions(
                 sample.setParamEffect(param, val, effect_down=val_down)
 
             # correlated shape systematics
-            # for skey, syst in corr_year_shape_systs.items():
-            #     if sample_name not in syst.samples or (not pass_region and syst.pass_only):
-            #         continue
+            for skey, syst in corr_year_shape_systs.items():
+                if not skey.startswith("txbb_"):
+                    continue
+                if sample_name not in syst.samples or (not pass_region and syst.pass_only):
+                    continue
 
-            #     logging.info(f"Getting {skey} shapes")
+                logging.info(f"Getting {skey} shapes")
 
-            #     if skey in jecs or skey in jmsr:
-            #         # JEC/JMCs saved as different "region" in dict
-            #         up_hist = templates_summed[f"{region_noblinded}_{skey}_up{blind_str}"][
-            #             sample_name, :
-            #         ]
-            #         down_hist = templates_summed[f"{region_noblinded}_{skey}_down{blind_str}"][
-            #             sample_name, :
-            #         ]
+                if skey in jecs or skey in jmsr:
+                    # JEC/JMCs saved as different "region" in dict
+                    up_hist = templates_summed[f"{region_noblinded}_{skey}_up{blind_str}"][
+                        sample_name, :
+                    ]
+                    down_hist = templates_summed[f"{region_noblinded}_{skey}_down{blind_str}"][
+                        sample_name, :
+                    ]
 
-            #         values_up = up_hist.values()
-            #         values_down = down_hist.values()
-            #     else:
-            #         # weight uncertainties saved as different "sample" in dict
-            #         values_up = region_templates[f"{sample_name}_{skey}_up", :].values()
-            #         values_down = region_templates[f"{sample_name}_{skey}_down", :].values()
+                    values_up = up_hist.values() * rate_sf
+                    values_down = down_hist.values() * rate_sf
+                else:
+                    # weight uncertainties saved as different "sample" in dict
+                    values_up = region_templates[f"{sample_name}_{skey}_up", :].values() * rate_sf
+                    values_down = (
+                        region_templates[f"{sample_name}_{skey}_down", :].values() * rate_sf
+                    )
 
-            #     logger = logging.getLogger(f"validate_shapes_{region}_{sample_name}_{skey}")
+                logger = logging.getLogger(f"validate_shapes_{region}_{sample_name}_{skey}")
 
-            #     effect_up, effect_down = get_effect_updown(
-            #         values_nominal,
-            #         values_up,
-            #         values_down,
-            #         mask,
-            #         logger,
-            #         args.epsilon,
-            #         syst.convert_shape_to_lnN,
-            #     )
-            #     if not syst.samples_corr:
-            #         # separate syst if not correlated across samples
-            #         sdkey = f"{skey}_{sample_name}"
-            #     elif syst.decorrelate_regions:
-            #         # separate syst if not correlated across regions
-            #         sdkey = f"{skey}_{region_noblinded}"
-            #     elif syst.separate_prod_modes:
-            #         # separate syst if not correlated across production modes
-            #         if sample_name in sig_keys_ggf:
-            #             prod_mode = "ggHH"
-            #         elif sample_name in sig_keys_vbf:
-            #             prod_mode = "qqHH"
-            #         else:
-            #             raise NotImplementedError(
-            #                 f"Splitting Syst by production mode for Sample {sample_name} not yet implemented"
-            #             )
-            #         sdkey = f"{skey}_{prod_mode}"
-            #     else:
-            #         sdkey = skey
-            #     sample.setParamEffect(shape_systs_dict[sdkey], effect_up, effect_down)
+                effect_up, effect_down = get_effect_updown(
+                    values_nominal,
+                    values_up,
+                    values_down,
+                    mask,
+                    logger,
+                    args.epsilon,
+                    syst.convert_shape_to_lnN,
+                )
+                if not syst.samples_corr:
+                    # separate syst if not correlated across samples
+                    sdkey = f"{skey}_{sample_name}"
+                elif syst.decorrelate_regions:
+                    # separate syst if not correlated across regions
+                    sdkey = f"{skey}_{region_noblinded}"
+                elif syst.separate_prod_modes:
+                    # separate syst if not correlated across production modes
+                    if sample_name in sig_keys_ggf:
+                        prod_mode = "ggHH"
+                    elif sample_name in sig_keys_vbf:
+                        prod_mode = "qqHH"
+                    else:
+                        raise NotImplementedError(
+                            f"Splitting Syst by production mode for Sample {sample_name} not yet implemented"
+                        )
+                    sdkey = f"{skey}_{prod_mode}"
+                else:
+                    sdkey = skey
+                sample.setParamEffect(shape_systs_dict[sdkey], effect_up, effect_down)
 
             # # uncorrelated shape systematics
             # for skey, syst in uncorr_year_shape_systs.items():
@@ -735,7 +817,7 @@ def fill_regions(
 
         if bblite and args.mcstats:
             # tie MC stats parameters together in blinded and "unblinded" region
-            channel_name = region_noblinded
+            channel_name = card_region(region_noblinded)
             ch.autoMCStats(
                 channel_name=f"{CMS_PARAMS_LABEL}_{sr_key}{channel.key}{channel_name}",
                 threshold=args.mcstats_threshold,
@@ -834,7 +916,7 @@ def alphabet_fit(
     for sr in signal_regions:
         # QCD overall pass / fail efficiency
 
-        data_qcd_pass = templates_summed[sr][data_key, :].sum().value - np.sum(
+        data_qcd_pass = templates_summed[sr][data_key, :].sum().value - TAUTAU_SF * np.sum(
             [templates_summed[sr][bg_key, :].sum().value for bg_key in bg_keys]
         )
 
@@ -848,7 +930,7 @@ def alphabet_fit(
 
         # transfer factor
         tf_dataResidual = rl.BasisPoly(
-            f"{CMS_PARAMS_LABEL}_tf_dataResidual_{sr_key}{channel.key}{sr}",
+            f"{CMS_PARAMS_LABEL}_tf_dataResidual_{sr_key}{channel.key}{card_region(sr)}",
             (shape_var.orders[sr],),
             [shape_var.name],
             basis="Bernstein",
@@ -859,7 +941,7 @@ def alphabet_fit(
         tf_params_pass = qcd_eff * tf_dataResidual_params  # scale params initially by qcd eff
 
         for blind_str in blind_strs:
-            passChName = f"{sr_key}{channel.key}{sr}{blind_str}".replace("_", "")
+            passChName = f"{sr_key}{channel.key}{card_region(sr)}{blind_str}".replace("_", "")
             passCh = model[passChName]
 
             pass_qcd = rl.TransferFactorSample(
@@ -953,7 +1035,12 @@ def main(args):
         if len(sr_subdirs) == 0:
             logging.warning(f"No signal region subfolders found in {analysis_name}, skipping")
             continue
-        if len(sr_subdirs) == 1:
+        if VR_MODE:
+            # one VR model per bmin; vrpass/fail are identical in every signal subdir, the
+            # templates are read from the first subdir (sorted) that has the channel
+            sr_keys = sorted(sr_subdirs)
+            logging.info(f"VR: reading vrpass/fail templates from (first of) {sr_keys}")
+        elif len(sr_subdirs) == 1:
             sr_keys = sr_subdirs
             logging.info(f"Found single signal region: {sr_keys[0]}")
         else:
@@ -971,8 +1058,8 @@ def main(args):
                     logging.info("User chose not to process multiple signal regions. Exiting.")
                     break
 
-        # Loop over signal region subfolders
-        for sr_key in sr_keys:
+        # Loop over signal region subfolders (VR: a single model "vr")
+        for sr_key in ["vr"] if VR_MODE else sr_keys:
             logging.info(f"Processing signal region: {sr_key}")
 
             # Create a separate model for each analysis/signal region combination
@@ -980,7 +1067,15 @@ def main(args):
 
             for channel in channels:
                 # Check if channel directory exists in this analysis
-                channel_path = analysis_dir / sr_key / channel.key
+                if VR_MODE:
+                    vr_srcs = [
+                        analysis_dir / s / channel.key
+                        for s in sr_keys
+                        if (analysis_dir / s / channel.key).exists()
+                    ]
+                    channel_path = vr_srcs[0] if vr_srcs else analysis_dir / "vr" / channel.key
+                else:
+                    channel_path = analysis_dir / sr_key / channel.key
                 if not channel_path.exists():
                     logging.warning(
                         f"Channel {channel.key} not found in {analysis_name}/{sr_key}, skipping"
@@ -1023,6 +1118,15 @@ def main(args):
             logging.info(f"rendering combine model for {analysis_name}")
             base_cards_dir = Path(args.cards_dir)
             out_dir = base_cards_dir / args.model_name / analysis_name
+            if VR_MODE and out_dir.exists():
+                sr_cards = [
+                    p.name for p in out_dir.glob("*pass.txt") if not p.name.startswith("vr")
+                ]
+                if sr_cards:
+                    raise FileExistsError(
+                        f"{out_dir} already has SR cards ({sr_cards[:3]}...); VR cards need their "
+                        "own --model-name, e.g. <TAG>-vr-nTF0"
+                    )
             out_dir.mkdir(parents=True, exist_ok=True)
 
             model.renderCombine(out_dir)

@@ -27,7 +27,7 @@ from bbtautau.postprocessing.bbtautau_types import Channel, LoadedSample
 from bbtautau.postprocessing.bdt_config import BDT_CONFIG
 from bbtautau.postprocessing.bdt_utils import compute_or_load_bdt_preds
 from bbtautau.postprocessing.Samples import CHANNELS
-from bbtautau.userConfig import BDT_EVAL_DIR, DATA_PATHS, MODEL_DIR
+from bbtautau.userConfig import BDT_EVAL_DIR, DATA_PATHS, LEPTON_CONE_DR, MODEL_DIR
 
 base_filters_default = [
     [
@@ -169,7 +169,7 @@ def tt_filters(
     channel: Channel = None,
     in_filters: dict[str, list[tuple]] = None,
     num_fatjets: int = 3,
-    tt_cut: float = 0.1,
+    tt_cut: float = 0.3,
     qcd_only: bool = True,
     agnostic: bool = True,
 ):
@@ -284,27 +284,24 @@ def get_columns(
             ("ak8FatJetCAglobalParT_massVisApplied", 3),
         ]
 
-    if year == "2024":
-        if ParT_taggers:
-            for branch in (
-                [f"ak8FatJetParT{key}" for key in Samples.qcdouts_v15 + Samples.topouts_v15 + Samples.sigouts]
-                + [
-                    f"ak8FatJetParT{key}vsQCD" for key in Samples.sigouts
-                ]  # remove exception in muon channel, was only necessary in old ntuples
-                + [f"ak8FatJetParT{key}vsQCDTop" for key in Samples.sigouts]
-            ):
-                columns_data.append((branch, 3))
-    # 2022+2023, v12, more QCD/Top/ParTs var
-    else:
-        if ParT_taggers:
-            for branch in (
-                [f"ak8FatJetParT{key}" for key in Samples.qcdouts + Samples.topouts + Samples.sigouts]
-                + [
-                    f"ak8FatJetParT{key}vsQCD" for key in Samples.sigouts
-                ]  # remove exception in muon channel, was only necessary in old ntuples
-                + [f"ak8FatJetParT{key}vsQCDTop" for key in Samples.sigouts]
-            ):
-                columns_data.append((branch, 3))
+    if ParT_taggers:
+        # 2024 skim doesn't have these fine-grained raw sub-branches (verified 2026-08-18);
+        # everything else raw (Xbb, QCD, Top, Xtauhtau*) is present.
+        missing_2024_raw = (
+            {"QCD0HF", "QCD1HF", "QCD2HF", "TopW", "TopbW"} if year == "2024" else set()
+        )
+        for branch in (
+            [
+                f"ak8FatJetParT{key}"
+                for key in Samples.qcdouts + Samples.topouts + Samples.sigouts
+                if key not in missing_2024_raw
+            ]
+            + [
+                f"ak8FatJetParT{key}vsQCD" for key in Samples.sigouts
+            ]  # remove exception in muon channel, was only necessary in old ntuples
+            + [f"ak8FatJetParT{key}vsQCDTop" for key in Samples.sigouts]
+        ):
+            columns_data.append((branch, 3))
 
     if leptons:
         columns_data += [
@@ -793,8 +790,6 @@ def bbtautau_assignment(
     channel: Channel = None,
     ttvsbb: bool = True,  # This is now by default
     agnostic: bool = False,
-    # 2024, v15, the ParT score is different from v12
-    is_2024: bool = False,
 ):
     """Assign bb and tautau jets per each event."""
 
@@ -827,7 +822,6 @@ def bbtautau_assignment(
             tautau_pick = np.argmax(combined_score, axis=1)
 
         ### Legacy, not used anymore, keep for record
-
         # assign tautau jet as the one with the highest ParTtautauvsQCD score
         elif agnostic:
             sig_labels = [ch.tagger_label for ch in CHANNELS.values()]
@@ -1035,6 +1029,110 @@ def leptons_assignment(
         sample.m_mask = _get_lepton_mask(sample, "Muon", dR_cut)
 
 
+def assign_lepton_channel(events_dict: dict[str, LoadedSample]) -> None:
+    """A priori hh/hm/he channel classification from lepton content (dev_channel_separation).
+
+    hm: a tight muon was found within the tautau cone (``sample.m_mask``, set by
+    ``leptons_assignment`` with ``dR_cut=LEPTON_CONE_DR``). he: no such muon, but a tight
+    electron was found (``sample.e_mask``) -- muon takes precedence. hh: neither -- exhaustive
+    by construction (every event gets exactly one label), unlike a whole-event lepton veto
+    (see channel_separation_diagnostic.py for why that variant was not chosen: hh purity was
+    nearly identical but ~14.6% of true-hh signal became unclassifiable "orphans").
+
+    Requires ``leptons_assignment`` to have already been called (e.g. via ``load_data_channel``,
+    which does this unconditionally). Sets a new ``"lepton_channel"`` column (values in
+    ``{"hh","hm","he"}``) on each sample's ``events``, retrievable via ``get_var``.
+    """
+    for sample in events_dict.values():
+        if sample.m_mask is None or sample.e_mask is None:
+            raise ValueError(
+                f"e_mask/m_mask not set for {sample.sample} -- call leptons_assignment first"
+            )
+        has_muon = sample.m_mask.any(axis=1)
+        has_electron = sample.e_mask.any(axis=1)
+
+        lepton_channel = np.full(len(sample.events), "hh", dtype=object)
+        lepton_channel[has_muon] = "hm"
+        lepton_channel[(~has_muon) & has_electron] = "he"
+        sample.events["lepton_channel"] = lepton_channel
+
+
+PRODUCTION_CATEGORY_COL = "isVBFCategory"
+
+
+def assign_production_mode(
+    events_dict: dict[str, LoadedSample],
+    channel: Channel,
+    method: str,
+    mjj_cut: float = 500.0,
+    deta_cut: float = 3.5,
+) -> None:
+    """A priori ggf/vbf production-mode classification, replacing the SIGNAL_ORDERING veto
+    chain the same way ``assign_lepton_channel`` replaces the CHANNEL_ORDERING one.
+
+    method="bdt": event assigned to whichever of {ggf, vbf} has the higher raw BDT class score
+        for this channel -- ``BDTggfbb<channel.tagger_label>`` / ``BDTvbfbb<channel.tagger_label>``,
+        the raw (pre-vsAll) per-class columns added by ``bdt_utils._add_bdt_scores``. Requires a
+        *unified* ggf+vbf model's predictions already loaded on ``events_dict`` (e.g. by passing
+        the same modelname to both ``--ggf-modelname``/``--vbf-modelname``, which
+        ``load_data_channel`` dedupes into a single ``compute_or_load_bdt_preds`` call).
+    method="kinematic": event assigned "vbf" if ``VBFMassjj > mjj_cut`` and
+        ``|VBFJetDeltaEta| > deta_cut`` (from ``derive_vbf_variables``, always available), else
+        "ggf". Simple, interpretable, no BDT dependency.
+
+    Sets a new "production_mode" column (values in ``{"ggf","vbf"}``) on each sample's events,
+    and its numeric twin ``PRODUCTION_CATEGORY_COL`` (1.0 = vbf, 0.0 = ggf).
+    """
+    if method not in ("bdt", "kinematic"):
+        raise ValueError(f"Unknown production-mode assignment method: {method!r}")
+
+    ggf_col = f"BDTggfbb{channel.tagger_label}"
+    vbf_col = f"BDTvbfbb{channel.tagger_label}"
+
+    for sample in events_dict.values():
+        if method == "bdt":
+            if ggf_col not in sample.events or vbf_col not in sample.events:
+                raise ValueError(
+                    f"{ggf_col}/{vbf_col} not found on {sample.sample} -- run a *unified* "
+                    "ggf+vbf BDT model's predictions first (pass the same modelname to both "
+                    "--ggf-modelname and --vbf-modelname)."
+                )
+            is_vbf = sample.get_var(vbf_col) > sample.get_var(ggf_col)
+        else:
+            mjj = sample.get_var("VBFMassjj")
+            deta = sample.get_var("VBFJetDeltaEta")
+            is_vbf = (mjj > mjj_cut) & (np.abs(deta) > deta_cut)
+
+        production_mode = np.full(len(sample.events), "ggf", dtype=object)
+        production_mode[is_vbf] = "vbf"
+        # events_dict here is often already an a-priori-channel slice (copy_from_selection's
+        # boolean-mask indexing always returns an independent copy, but pandas' internal
+        # bookkeeping still flags plain assignment on it as a possible chained-indexing bug) --
+        # known false positive, safe to silence rather than churn memory with an explicit
+        # .copy() just to clear pandas' flag.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", pd.errors.SettingWithCopyWarning)
+            sample.events["production_mode"] = production_mode
+            # numeric copy, cuttable by make_selection (Regions adds it to the SR pass/veto cuts)
+            sample.events[PRODUCTION_CATEGORY_COL] = is_vbf.astype(float)
+
+
+def filter_samples_by_column(
+    events_dict: dict[str, LoadedSample], column: str, value
+) -> dict[str, LoadedSample]:
+    """Return a new events_dict with each sample restricted to rows where ``get_var(column) ==
+    value``.
+
+    Non-mutating (``copy_from_selection`` makes a fresh copy per sample), so multiple disjoint
+    subsets sharing the same source (e.g. ``production_mode`` "ggf" vs "vbf") can be derived
+    from one loaded ``events_dict`` without stepping on each other.
+    """
+    return {
+        key: sample.copy_from_selection(sample.get_var(column) == value)
+        for key, sample in events_dict.items()
+    }
+
+
 def derive_variables(
     events_dict: dict[str, LoadedSample], channel: Channel = None, num_fatjets: int = 3
 ):
@@ -1047,8 +1145,12 @@ def derive_variables(
 
     for sample in events_dict.values():
         if "ak8FatJetPNetXbbvsQCDLegacy" not in sample.events:
-            Xbb = sample.get_var("ak8FatJetPNetXbbLegacy")
-            QCD = sample.get_var("ak8FatJetPNetQCDLegacy")
+            # get_var()'s .squeeze() collapses a genuine (1 event, num_fatjets) array down to
+            # 1-D when the sample has exactly one row (can happen with small test-mode
+            # samples); atleast_2d restores it. Safe here specifically because num_fatjets is
+            # always 3 (never 1) throughout this codebase, so there's no axis ambiguity.
+            Xbb = np.atleast_2d(sample.get_var("ak8FatJetPNetXbbLegacy"))
+            QCD = np.atleast_2d(sample.get_var("ak8FatJetPNetQCDLegacy"))
             Xbb_vs_QCD = np.divide(Xbb, Xbb + QCD, out=np.zeros_like(Xbb), where=(Xbb + QCD) != 0)
 
             for n in range(num_fatjets):
@@ -1142,15 +1244,23 @@ def derive_lepton_variables(events_dict: dict[str, LoadedSample]):
 
 def derive_vbf_variables(events_dict: dict[str, LoadedSample]):
     for sample in events_dict.values():
-        sample.events[("VBFJetDeltaEta", 0)] = delta_eta(
-            sample.get_var("VBFJetEta")[:, 0], sample.get_var("VBFJetEta")[:, 1]
-        )
+        vbf_eta0 = sample.get_var("VBFJetEta")[:, 0]
+        vbf_eta1 = sample.get_var("VBFJetEta")[:, 1]
+        # Events with <2 VBF jets have PAD_VAL in one or both slots. Un-guarded, delta_eta on
+        # two PAD_VAL entries (0 valid jets) evaluates to exactly 0 -- silently indistinguishable
+        # from a genuine small-deta dijet, rather than landing safely out of range like the
+        # 1-valid-jet case does. Explicitly mask both variables to PAD_VAL when <2 jets are valid.
+        valid_vbf = (vbf_eta0 != PAD_VAL) & (vbf_eta1 != PAD_VAL)
+
+        deta = delta_eta(vbf_eta0, vbf_eta1)
+        sample.events[("VBFJetDeltaEta", 0)] = PAD_VAL * np.ones_like(vbf_eta0)
+        sample.events.loc[valid_vbf, ("VBFJetDeltaEta", 0)] = deta[valid_vbf]
 
         # Compute invariant mass of the two VBF jets (mjj)
         vbf_jet0 = vector.array(
             {
                 "pt": sample.get_var("VBFJetPt")[:, 0],
-                "eta": sample.get_var("VBFJetEta")[:, 0],
+                "eta": vbf_eta0,
                 "phi": sample.get_var("VBFJetPhi")[:, 0],
                 "mass": sample.get_var("VBFJetMass")[:, 0],
             }
@@ -1158,7 +1268,7 @@ def derive_vbf_variables(events_dict: dict[str, LoadedSample]):
         vbf_jet1 = vector.array(
             {
                 "pt": sample.get_var("VBFJetPt")[:, 1],
-                "eta": sample.get_var("VBFJetEta")[:, 1],
+                "eta": vbf_eta1,
                 "phi": sample.get_var("VBFJetPhi")[:, 1],
                 "mass": sample.get_var("VBFJetMass")[:, 1],
             }
@@ -1166,7 +1276,8 @@ def derive_vbf_variables(events_dict: dict[str, LoadedSample]):
 
         # Add 4-vectors and compute invariant mass
         vbf_dijet = vbf_jet0 + vbf_jet1
-        sample.events[("VBFMassjj", 0)] = vbf_dijet.mass
+        sample.events[("VBFMassjj", 0)] = PAD_VAL * np.ones_like(vbf_eta0)
+        sample.events.loc[valid_vbf, ("VBFMassjj", 0)] = vbf_dijet.mass[valid_vbf]
 
 
 def load_data_channel(
@@ -1228,7 +1339,7 @@ def load_data_channel(
 
         derive_variables(events_dict[year])
         bbtautau_assignment(events_dict[year], ttvsbb=ttvsbb)
-        leptons_assignment(events_dict[year], dR_cut=1.5)
+        leptons_assignment(events_dict[year], dR_cut=LEPTON_CONE_DR)
         derive_lepton_variables(events_dict[year])
         derive_vbf_variables(events_dict[year])
 

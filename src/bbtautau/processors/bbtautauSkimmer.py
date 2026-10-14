@@ -2,7 +2,7 @@
 Skimmer for bbtautau analysis.
 Based on https://github.com/LPC-HH/HH4b/blob/main/src/HH4b/processors/bbbbSkimmer.py.
 
-Author(s): Raghav Kansal
+Author(s): Raghav Kansal, Ludovico Mori
 """
 
 from __future__ import annotations
@@ -20,22 +20,23 @@ from boostedhh.processors.corrections import (
     JECs,
     add_pileup_weight_update,
     add_ps_weight,
+    get_electron_id_sfs,
+    get_electron_reco_sfs,
+    get_electron_scale_smearing,
+    get_electron_trigger_sfs,
     get_jetveto_event,
+    get_muon_id_sfs,
+    get_muon_scale_smearing,
+    get_muon_trigger_sfs,
     get_pdf_weights,
     get_scale_weights,
     # SF, Up/down
     get_tau_tes,
-    get_tau_vsjet_sf,
     get_tau_trigger_sf,
-    get_muon_scale_smearing,
-    get_muon_id_sfs,
-    get_muon_trigger_sfs,
-    get_electron_scale_smearing,
-    get_electron_reco_sfs,
-    get_electron_id_sfs,
-    get_electron_trigger_sfs,
-    # get_btag_sfs,
+    get_tau_vsjet_sf,
 )
+
+# get_btag_sfs,
 from boostedhh.processors.utils import (
     P4,
     PAD_VAL,
@@ -53,12 +54,50 @@ from . import GenSelection, objects
 gen_selection_dict = {
     "HHto4B": GenSelection.gen_selection_HH4b,
     "HHto2B2Tau": GenSelection.gen_selection_HHbbtautau,
+    # specific to the nano v15 samples (not "Wto2Q"/"Zto2Q")
+    "Wto2Q-2Jets": GenSelection.gen_selection_V,
+    "Zto2Q-2Jets": GenSelection.gen_selection_V,
 }
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 package_path = str(pathlib.Path(__file__).parent.parent.resolve())
+
+# Ported from HH4b's bbbbSkimmer.py (commit 7332ed8).
+LHEVPT_EDGES = np.arange(0.0, 2001.0, 10.0)
+
+
+def lhevpt_bin_index(lhe_v_pt: np.ndarray, gen_selected: np.ndarray) -> np.ndarray:
+    """Index of each gen-selected event in the ``lhevpt_totals`` arrays (0 = underflow)."""
+    return np.searchsorted(LHEVPT_EDGES, lhe_v_pt[gen_selected], side="right")
+
+
+def lhevpt_sum(idx: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """Weighted sum per LHE V pT bin; float64 even for an empty chunk (bincount would give int64,
+    which coffea's in-place accumulate cannot add float sums to)."""
+    return np.bincount(idx, weights=w, minlength=len(LHEVPT_EDGES) + 1).astype(np.float64)
+
+
+def lhevpt_totals(
+    lhe_v_pt: np.ndarray, weight_np: np.ndarray, gen_weights: np.ndarray, gen_selected: np.ndarray
+) -> dict[str, np.ndarray]:
+    """Totals per LHE V pT bin over the gen-selected events, before any analysis selection.
+
+    Binned versions of ``np_nominal`` (sum of the norm-preserving weights) and ``nevents`` (sum of
+    genWeight), plus the sum of squared norm-preserving weights and the raw event count, in the
+    bins of ``LHEVPT_EDGES``. They let the open-ended PTQQ V+jets samples be stitched per LHE V pT
+    bin in postprocessing, without relying on the samples' nominal cross-section ratios. Numpy
+    arrays, so coffea's ``accumulate`` sums them element-wise across chunks and jobs.
+    """
+    idx = lhevpt_bin_index(lhe_v_pt, gen_selected)
+    w = weight_np[gen_selected]
+    return {
+        "np_nominal_lhevpt": lhevpt_sum(idx, w),
+        "np_nominal_lhevpt_sumw2": lhevpt_sum(idx, w**2),
+        "genweight_lhevpt": lhevpt_sum(idx, gen_weights[gen_selected]),
+        "nevents_lhevpt": np.bincount(idx, minlength=len(LHEVPT_EDGES) + 1),
+    }
 
 
 class bbtautauSkimmer(SkimmerABC):
@@ -123,7 +162,8 @@ class bbtautauSkimmer(SkimmerABC):
         },
     }
 
-    # only applied if fatjet_bb_preselection is True
+    # reference/default values only; the actual bb-preselection cut applied (if any) comes
+    # from the --fatjet-bb-preselection-cut CLI arg (self._fatjet_bb_preselection_cut)
     preselection = {  # noqa: RUF012
         # roughly, 85% signal efficiency, 2% QCD efficiency (pT: 250-400, mSD:0-250, mRegLegacy:40-250)
         "pnet-legacy": 0.8,
@@ -172,21 +212,26 @@ class bbtautauSkimmer(SkimmerABC):
         region: str = "signal",
         nano_version: str = "v12_private",
         fatjet_pt_cut: float = None,
-        fatjet_bb_preselection: bool = False,
+        fatjet_bb_preselection_cut: float = None,
+        fatjet_tt_preselection_cut: float = None,
         prescale_factor: int = None,
     ):
         super().__init__()
 
         self.XSECS = xsecs if xsecs is not None else {}  # in pb
 
-        # HLT selection
-        self.HLTs = {"signal": HLTs.hlt_list(hlt_prefix=False)}
-        self.HLTs = self.HLTs[region]
+        # HLT selection: only the physical paths resolved from the analysis trigger
+        # menu (HLTs.MENU), not the full HLTs.HLTs catalog.
+        self.HLTs = {
+            year: HLTs.resolve_menu(year, list(HLTs.MENU.keys()), hlt_prefix=False)
+            for year in HLTs.years_all
+        }
         self._systematics = save_systematics
         self._nano_version = nano_version
         self._region = region
         self._accumulator = processor.dict_accumulator({})
-        self._fatjet_bb_preselection = fatjet_bb_preselection
+        self._fatjet_bb_preselection_cut = fatjet_bb_preselection_cut
+        self._fatjet_tt_preselection_cut = fatjet_tt_preselection_cut
         self._prescale_factor = prescale_factor
 
         # JMSR
@@ -414,7 +459,7 @@ class bbtautauSkimmer(SkimmerABC):
             self.fatjet_selection["pt"] = fatjet_pt_cut
 
         logger.info(
-            f"Running skimmer with:\nsystematics {self._systematics}\nregion {self._region}\nfatjet pt cut {self.fatjet_selection['pt']}"
+            f"Running skimmer with:\nsystematics {self._systematics}\nregion {self._region}\nfatjet pt cut {self.fatjet_selection['pt']}\nfatjet bb preselection cut {self._fatjet_bb_preselection_cut}\nfatjet tt preselection cut {self._fatjet_tt_preselection_cut}"
         )
 
     @property
@@ -465,11 +510,15 @@ class bbtautauSkimmer(SkimmerABC):
         # Leptons
         num_leptons = 2
         # electrons, etrigvars = objects.good_electrons(events, events.Electron, year)
-        electrons_corr, electron_shifted_vars = get_electron_scale_smearing(events, events.Electron, year, isData)
+        electrons_corr, electron_shifted_vars = get_electron_scale_smearing(
+            events, events.Electron, year, isData
+        )
         # Keep the original NanoAOD Electron index before good_electrons().
         # Selection and saved kinematics use corrected electrons, while EGM SFs are evaluated on the matched raw electrons.
         # rawIdx is only a temporary in-memory bridge and is not written to the skim.
-        electrons_corr = ak.with_field(electrons_corr, ak.local_index(events.Electron.pt, axis=1), "rawIdx")
+        electrons_corr = ak.with_field(
+            electrons_corr, ak.local_index(events.Electron.pt, axis=1), "rawIdx"
+        )
         electrons, etrigvars = objects.good_electrons(events, electrons_corr, year)
         electrons_raw_for_sf = events.Electron[electrons.rawIdx]
 
@@ -492,10 +541,18 @@ class bbtautauSkimmer(SkimmerABC):
             if self._systematics:
                 electron_reco_vars.update(
                     {
-                        "ElectronRecoSFUp": pad_val(electron_reco_sfs["up"], num_leptons, 1.0, axis=1),
-                        "ElectronRecoSFDown": pad_val(electron_reco_sfs["down"], num_leptons, 1.0, axis=1),
-                        "ElectronRecoEventSFUp": ak.to_numpy(ak.prod(electron_reco_sfs["up"], axis=1)),
-                        "ElectronRecoEventSFDown": ak.to_numpy(ak.prod(electron_reco_sfs["down"], axis=1)),
+                        "ElectronRecoSFUp": pad_val(
+                            electron_reco_sfs["up"], num_leptons, 1.0, axis=1
+                        ),
+                        "ElectronRecoSFDown": pad_val(
+                            electron_reco_sfs["down"], num_leptons, 1.0, axis=1
+                        ),
+                        "ElectronRecoEventSFUp": ak.to_numpy(
+                            ak.prod(electron_reco_sfs["up"], axis=1)
+                        ),
+                        "ElectronRecoEventSFDown": ak.to_numpy(
+                            ak.prod(electron_reco_sfs["down"], axis=1)
+                        ),
                     }
                 )
 
@@ -506,21 +563,35 @@ class bbtautauSkimmer(SkimmerABC):
             if self._systematics:
                 electron_id_vars.update(
                     {
-                        "ElectronWP90NoIsoSFUp": pad_val(electron_id_sfs["up"], num_leptons, 1.0, axis=1),
-                        "ElectronWP90NoIsoSFDown": pad_val(electron_id_sfs["down"], num_leptons, 1.0, axis=1),
-                        "ElectronWP90NoIsoEventSFUp": ak.to_numpy(ak.prod(electron_id_sfs["up"], axis=1)),
-                        "ElectronWP90NoIsoEventSFDown": ak.to_numpy(ak.prod(electron_id_sfs["down"], axis=1)),
+                        "ElectronWP90NoIsoSFUp": pad_val(
+                            electron_id_sfs["up"], num_leptons, 1.0, axis=1
+                        ),
+                        "ElectronWP90NoIsoSFDown": pad_val(
+                            electron_id_sfs["down"], num_leptons, 1.0, axis=1
+                        ),
+                        "ElectronWP90NoIsoEventSFUp": ak.to_numpy(
+                            ak.prod(electron_id_sfs["up"], axis=1)
+                        ),
+                        "ElectronWP90NoIsoEventSFDown": ak.to_numpy(
+                            ak.prod(electron_id_sfs["down"], axis=1)
+                        ),
                     }
                 )
 
             electron_trigger_vars = {
-                "ElectronTrigEle30SF": pad_val(electron_trigger_sfs["nom"], num_leptons, 1.0, axis=1),
+                "ElectronTrigEle30SF": pad_val(
+                    electron_trigger_sfs["nom"], num_leptons, 1.0, axis=1
+                ),
             }
             if self._systematics:
                 electron_trigger_vars.update(
                     {
-                        "ElectronTrigEle30SFUp": pad_val(electron_trigger_sfs["up"], num_leptons, 1.0, axis=1),
-                        "ElectronTrigEle30SFDown": pad_val(electron_trigger_sfs["down"], num_leptons, 1.0, axis=1),
+                        "ElectronTrigEle30SFUp": pad_val(
+                            electron_trigger_sfs["up"], num_leptons, 1.0, axis=1
+                        ),
+                        "ElectronTrigEle30SFDown": pad_val(
+                            electron_trigger_sfs["down"], num_leptons, 1.0, axis=1
+                        ),
                     }
                 )
 
@@ -541,22 +612,65 @@ class bbtautauSkimmer(SkimmerABC):
             print("\n--- Scale / smearing inputs ---")
             print("raw pt:", ak.to_list(raw_pt_flat[electron_check_mask][:10]))
             print("eta:", ak.to_list(ak.flatten(events.Electron.eta)[electron_check_mask][:10]))
-            print("ScEta:", ak.to_list(ak.flatten(events.Electron.eta + events.Electron.deltaEtaSC)[electron_check_mask][:10]))
+            print(
+                "ScEta:",
+                ak.to_list(
+                    ak.flatten(events.Electron.eta + events.Electron.deltaEtaSC)[
+                        electron_check_mask
+                    ][:10]
+                ),
+            )
             print("r9:", ak.to_list(ak.flatten(events.Electron.r9)[electron_check_mask][:10]))
-            print("seedGain:", ak.to_list(ak.flatten(events.Electron.seedGain)[electron_check_mask][:10]))
+            print(
+                "seedGain:",
+                ak.to_list(ak.flatten(events.Electron.seedGain)[electron_check_mask][:10]),
+            )
 
             if isData:
                 print("event run:", ak.to_list(events.run[:10]))
 
             print("\n--- Scale / smearing outputs ---")
             print("corrected pt:", ak.to_list(corrected_pt_flat[electron_check_mask][:10]))
-            print("corrected/raw:", ak.to_list((corrected_pt_flat[electron_check_mask] / raw_pt_flat[electron_check_mask])[:10]))
+            print(
+                "corrected/raw:",
+                ak.to_list(
+                    (corrected_pt_flat[electron_check_mask] / raw_pt_flat[electron_check_mask])[:10]
+                ),
+            )
 
             if not isData and electron_shifted_vars is not None:
-                print("scale up pt:", ak.to_list(ak.flatten(electron_shifted_vars["pt"]["ElectronScale_up"])[electron_check_mask][:10]))
-                print("scale down pt:", ak.to_list(ak.flatten(electron_shifted_vars["pt"]["ElectronScale_down"])[electron_check_mask][:10]))
-                print("smear up pt:", ak.to_list(ak.flatten(electron_shifted_vars["pt"]["ElectronSmear_up"])[electron_check_mask][:10]))
-                print("smear down pt:", ak.to_list(ak.flatten(electron_shifted_vars["pt"]["ElectronSmear_down"])[electron_check_mask][:10]))
+                print(
+                    "scale up pt:",
+                    ak.to_list(
+                        ak.flatten(electron_shifted_vars["pt"]["ElectronScale_up"])[
+                            electron_check_mask
+                        ][:10]
+                    ),
+                )
+                print(
+                    "scale down pt:",
+                    ak.to_list(
+                        ak.flatten(electron_shifted_vars["pt"]["ElectronScale_down"])[
+                            electron_check_mask
+                        ][:10]
+                    ),
+                )
+                print(
+                    "smear up pt:",
+                    ak.to_list(
+                        ak.flatten(electron_shifted_vars["pt"]["ElectronSmear_up"])[
+                            electron_check_mask
+                        ][:10]
+                    ),
+                )
+                print(
+                    "smear down pt:",
+                    ak.to_list(
+                        ak.flatten(electron_shifted_vars["pt"]["ElectronSmear_down"])[
+                            electron_check_mask
+                        ][:10]
+                    ),
+                )
 
             # SF arrays correspond to electrons after good_electrons()
             print("\n--- Selected electrons ---")
@@ -586,14 +700,16 @@ class bbtautauSkimmer(SkimmerABC):
                 print("nominal:", ak.to_list(ak.flatten(electron_trigger_sfs["nom"])[:10]))
                 print("up:", ak.to_list(ak.flatten(electron_trigger_sfs["up"])[:10]))
                 print("down:", ak.to_list(ak.flatten(electron_trigger_sfs["down"])[:10]))
-                print("event nominal:", ak.to_list(ak.prod(electron_trigger_sfs["nom"], axis=1)[:10]))
+                print(
+                    "event nominal:", ak.to_list(ak.prod(electron_trigger_sfs["nom"], axis=1)[:10])
+                )
                 print("event up:", ak.to_list(ak.prod(electron_trigger_sfs["up"], axis=1)[:10]))
                 print("event down:", ak.to_list(ak.prod(electron_trigger_sfs["down"], axis=1)[:10]))
 
-            print("============================================\n") 
+            print("============================================\n")
         # ============================================================
         # Electron correction checks ending
-        # ============================================================ 
+        # ============================================================
 
         # muons, mtrigvars = objects.good_muons(events, events.Muon, year)
         muons_corr, muon_shifted_vars = get_muon_scale_smearing(events, events.Muon, year, isData)
@@ -629,11 +745,17 @@ class bbtautauSkimmer(SkimmerABC):
                 )
 
             for trigger, sf in muon_trigger_sfs.items():
-                muon_trigger_vars[f"MuonTrig_{trigger}"] = pad_val(sf["nom"], num_leptons, 1.0, axis=1)
+                muon_trigger_vars[f"MuonTrig_{trigger}"] = pad_val(
+                    sf["nom"], num_leptons, 1.0, axis=1
+                )
                 if self._systematics:
-                    muon_trigger_vars[f"MuonTrig_{trigger}Up"] = pad_val(sf["up"], num_leptons, 1.0, axis=1)
-                    muon_trigger_vars[f"MuonTrig_{trigger}Down"] = pad_val(sf["down"], num_leptons, 1.0, axis=1)
-        
+                    muon_trigger_vars[f"MuonTrig_{trigger}Up"] = pad_val(
+                        sf["up"], num_leptons, 1.0, axis=1
+                    )
+                    muon_trigger_vars[f"MuonTrig_{trigger}Down"] = pad_val(
+                        sf["down"], num_leptons, 1.0, axis=1
+                    )
+
         # ============================================================
         # Muon correction checks
         # ============================================================
@@ -667,7 +789,12 @@ class bbtautauSkimmer(SkimmerABC):
 
             print("\n--- Scale / smearing outputs ---")
             print("nominal corrected pt:", ak.to_list(corrected_pt_flat[muon_check_mask][:10]))
-            print("corrected/raw:", ak.to_list((corrected_pt_flat[muon_check_mask] / raw_pt_flat[muon_check_mask])[:10]))
+            print(
+                "corrected/raw:",
+                ak.to_list(
+                    (corrected_pt_flat[muon_check_mask] / raw_pt_flat[muon_check_mask])[:10]
+                ),
+            )
 
             if not isData and muon_shifted_vars is not None:
                 muon_scale_up_flat = ak.flatten(muon_shifted_vars["pt"]["MuonScale_up"], axis=1)
@@ -679,10 +806,39 @@ class bbtautauSkimmer(SkimmerABC):
                 print("scale down pt:", ak.to_list(muon_scale_down_flat[muon_check_mask][:10]))
                 print("resolution up pt:", ak.to_list(muon_reso_up_flat[muon_check_mask][:10]))
                 print("resolution down pt:", ak.to_list(muon_reso_down_flat[muon_check_mask][:10]))
-                print("scale up/nominal:", ak.to_list((muon_scale_up_flat[muon_check_mask] / corrected_pt_flat[muon_check_mask])[:10]))
-                print("scale down/nominal:", ak.to_list((muon_scale_down_flat[muon_check_mask] / corrected_pt_flat[muon_check_mask])[:10]))
-                print("resolution up/nominal:", ak.to_list((muon_reso_up_flat[muon_check_mask] / corrected_pt_flat[muon_check_mask])[:10]))
-                print("resolution down/nominal:", ak.to_list((muon_reso_down_flat[muon_check_mask] / corrected_pt_flat[muon_check_mask])[:10]))
+                print(
+                    "scale up/nominal:",
+                    ak.to_list(
+                        (muon_scale_up_flat[muon_check_mask] / corrected_pt_flat[muon_check_mask])[
+                            :10
+                        ]
+                    ),
+                )
+                print(
+                    "scale down/nominal:",
+                    ak.to_list(
+                        (
+                            muon_scale_down_flat[muon_check_mask]
+                            / corrected_pt_flat[muon_check_mask]
+                        )[:10]
+                    ),
+                )
+                print(
+                    "resolution up/nominal:",
+                    ak.to_list(
+                        (muon_reso_up_flat[muon_check_mask] / corrected_pt_flat[muon_check_mask])[
+                            :10
+                        ]
+                    ),
+                )
+                print(
+                    "resolution down/nominal:",
+                    ak.to_list(
+                        (muon_reso_down_flat[muon_check_mask] / corrected_pt_flat[muon_check_mask])[
+                            :10
+                        ]
+                    ),
+                )
 
             # SF arrays correspond to muons after good_muons()
             selected_pt_flat = ak.flatten(muons.pt, axis=1)
@@ -718,10 +874,20 @@ class bbtautauSkimmer(SkimmerABC):
                     print("nominal:", ak.to_list(ak.flatten(trigger_sf["nom"], axis=1)[:10]))
                     print("up:", ak.to_list(ak.flatten(trigger_sf["up"], axis=1)[:10]))
                     print("down:", ak.to_list(ak.flatten(trigger_sf["down"], axis=1)[:10]))
-                    print("SF number per event:", ak.to_list(ak.num(trigger_sf["nom"], axis=1)[:10]))
-                    print("diagnostic event nominal:", ak.to_list(ak.prod(trigger_sf["nom"], axis=1)[:10]))
-                    print("diagnostic event up:", ak.to_list(ak.prod(trigger_sf["up"], axis=1)[:10]))
-                    print("diagnostic event down:", ak.to_list(ak.prod(trigger_sf["down"], axis=1)[:10]))
+                    print(
+                        "SF number per event:", ak.to_list(ak.num(trigger_sf["nom"], axis=1)[:10])
+                    )
+                    print(
+                        "diagnostic event nominal:",
+                        ak.to_list(ak.prod(trigger_sf["nom"], axis=1)[:10]),
+                    )
+                    print(
+                        "diagnostic event up:", ak.to_list(ak.prod(trigger_sf["up"], axis=1)[:10])
+                    )
+                    print(
+                        "diagnostic event down:",
+                        ak.to_list(ak.prod(trigger_sf["down"], axis=1)[:10]),
+                    )
 
             print("========================================\n")
 
@@ -733,7 +899,9 @@ class bbtautauSkimmer(SkimmerABC):
         # Keep the original NanoAOD Tau index before good_taus().
         # Selection and CA kinematics use TES-corrected taus, while Tau ID/trigger SFs are evaluated on the matched raw taus.
         # rawIdx is only a temporary in-memory bridge and is not written to the skim.
-        taus_corrected = ak.with_field(taus_corrected, ak.local_index(events.Tau.pt, axis=1), "rawIdx")
+        taus_corrected = ak.with_field(
+            taus_corrected, ak.local_index(events.Tau.pt, axis=1), "rawIdx"
+        )
         taus, ttrigvars = objects.good_taus(events, taus_corrected, year)
         taus_raw_for_sf = events.Tau[taus.rawIdx]
 
@@ -768,7 +936,7 @@ class bbtautauSkimmer(SkimmerABC):
         # print("Selected Tau DM  :", ak.to_list(ak.flatten(taus.decayMode)[:10]))
         # if not isData:
         #     print("Selected Tau gen :", ak.to_list(ak.flatten(taus.genPartFlav)[:10]))
-        
+
         # Tau ID/Trigger SF
         tau_vsjet_sf = None
         tauSFVars = {}
@@ -799,7 +967,6 @@ class bbtautauSkimmer(SkimmerABC):
             # print("VSjet Event up   :", tauSFVars["TauVSjetSFEventUp"][:10])
             # print("VSjet Event down :", tauSFVars["TauVSjetSFEventDown"][:10])
 
-
             if year == "2024":
                 tau_trig_types = ["ditau", "etau", "mutau", "ditaujet", "vbfditau", "vbfsingletau"]
             else:
@@ -823,10 +990,16 @@ class bbtautauSkimmer(SkimmerABC):
                 # print(f"{name} down    :", ak.to_list(ak.flatten(trig_sf["down"])[:10]))
                 # print("========================================\n")
 
-                tauTriggerVars[f"TauTrig{name}SF"] = pad_val(trig_sf["nom"], num_leptons, 1.0, axis=1)
+                tauTriggerVars[f"TauTrig{name}SF"] = pad_val(
+                    trig_sf["nom"], num_leptons, 1.0, axis=1
+                )
                 if self._systematics:
-                    tauTriggerVars[f"TauTrig{name}SFUp"] = pad_val(trig_sf["up"], num_leptons, 1.0, axis=1)
-                    tauTriggerVars[f"TauTrig{name}SFDown"] = pad_val(trig_sf["down"], num_leptons, 1.0, axis=1)
+                    tauTriggerVars[f"TauTrig{name}SFUp"] = pad_val(
+                        trig_sf["up"], num_leptons, 1.0, axis=1
+                    )
+                    tauTriggerVars[f"TauTrig{name}SFDown"] = pad_val(
+                        trig_sf["down"], num_leptons, 1.0, axis=1
+                    )
 
         # taus, ttrigvars = objects.good_taus(events, events.Tau, year)
 
@@ -878,7 +1051,6 @@ class bbtautauSkimmer(SkimmerABC):
         # print("AK4 JES up pt:", ak.to_list(jec_shifted_jetvars["pt"]["JES_up"][:2, :4]))
         # print("AK4 JER up pt:", ak.to_list(jec_shifted_jetvars["pt"]["JER_up"][:2, :4]))
 
-
         # For NanoAOD v15, use PFMET directly.
         # The current CorrectedMETFactory expects MetUnclustEnUpDeltaX/Y branches, which are not available in PFMET.
         # MET/JEC systematic propagation to CA mass is left as a future TODO.
@@ -889,10 +1061,7 @@ class bbtautauSkimmer(SkimmerABC):
             else:
                 met = JEC_loader.met_factory.build(events.MET, jets, {}) if isData else events.MET
         else:
-            if self._nano_version == "v15":
-                met = events.PFMET
-            else:
-                met = events.MET
+            met = events.PFMET if self._nano_version == "v15" else events.MET
 
         print("ak4 JECs", f"{time.time() - start:.2f}")
 
@@ -922,8 +1091,10 @@ class bbtautauSkimmer(SkimmerABC):
         # AK8 Jets
         num_ak8_jets = 3
         # Added nano_version=self._nano_version for v12/v15
-        fatjets = objects.get_ak8jets(events.FatJet, nano_version=self._nano_version)  # this adds all our extra variables e.g. TXbb
-        fatjets_before_jec = fatjets
+        fatjets = objects.get_ak8jets(
+            events.FatJet, nano_version=self._nano_version
+        )  # this adds all our extra variables e.g. TXbb
+        # fatjets_before_jec = fatjets
         fatjets, jec_shifted_fatjetvars = JEC_loader.get_jec_jets(
             events,
             fatjets,
@@ -1091,6 +1262,27 @@ class bbtautauSkimmer(SkimmerABC):
         }
         print("Jet vars", f"{time.time() - start:.2f}")
 
+        # Trigger objects matched to the (pt-ordered) AK8 fat jets, for future boosted-bb-jet
+        # trigger SF studies. Ported from HH4b's bbbbSkimmer.py (dR-matching only, no HLT-fired
+        # gate, no filterBits cut -- SF/ID methodology deferred to postprocessing, same as HH4b).
+        num_trigobjs = 4
+        fatjet_objs = events.TrigObj[(events.TrigObj.id == 6) & (events.TrigObj.pt >= 100)]
+        dr_fj0 = ak.flatten(fatjet_objs.metric_table(fatjets[:, 0:1]), axis=-1)
+        fatjet_objs = fatjet_objs[ak.argsort(dr_fj0)]
+        fatjet_objs["matched_ak8FatJet0"] = fatjet_objs.metric_table(fatjets[:, 0:1]) < 1.0
+        fatjet_objs["matched_ak8FatJet1"] = fatjet_objs.metric_table(fatjets[:, 1:2]) < 1.0
+
+        trigObjFatJetVars = {
+            f"TriggerObject{key}": pad_val(fatjet_objs[var], num_trigobjs, axis=1)
+            for (var, key) in self.skim_vars["TriggerObject"].items()
+        }
+        trigObjFatJetVars["TriggerObjectMatched_ak8FatJet0"] = pad_val(
+            ak.flatten(fatjet_objs["matched_ak8FatJet0"], axis=-1), num_trigobjs, axis=1
+        ).astype(int)
+        trigObjFatJetVars["TriggerObjectMatched_ak8FatJet1"] = pad_val(
+            ak.flatten(fatjet_objs["matched_ak8FatJet1"], axis=-1), num_trigobjs, axis=1
+        ).astype(int)
+
         # # JEC and JMSR
         # if self._region == "signal" and isJECs:
         #     # Jet JEC variables
@@ -1188,7 +1380,7 @@ class bbtautauSkimmer(SkimmerABC):
             **metVars,
             **subjetVars,
             # **bbFatJetVars,
-            # **trigObjFatJetVars,
+            **trigObjFatJetVars,
             **vbfJetVars,
             # **btagSFVars,
         }
@@ -1230,8 +1422,8 @@ class bbtautauSkimmer(SkimmerABC):
         cut_jetveto = get_jetveto_event(jets, year)
         add_selection("ak4_jetveto", cut_jetveto, *selection_args)
 
-        # # >=2 AK8 jets passing selections
-        # add_selection("ak8_numjets", (ak.num(fatjets) >= 2), *selection_args)
+        # >=2 AK8 jets passing selections
+        add_selection("ak8_numjets", (ak.num(fatjets) >= 2), *selection_args)
 
         # >=1 AK8 jets with pT cut (230 GeV by default)
         if self.fatjet_selection["pt"] >= 0:  # if < 0, don't apply any fatjet selection
@@ -1265,17 +1457,28 @@ class bbtautauSkimmer(SkimmerABC):
         # VBF veto cut (not now)
         # add_selection("vbf_veto", ~(cut_vbf), *selection_args)
 
-        if self._fatjet_bb_preselection:
-            # at least 1 jet with ParTXbbvsQCDTop > 0.3
+        if self._fatjet_bb_preselection_cut is not None:
+            # at least 1 jet with ParTXbbvsQCDTop >= cut
             cut_bb = (
                 np.sum(
-                    ak8FatJetVars["ak8FatJetParTXbbvsQCDTop"] >= self.preselection["glopart-v2"],
-                    # ak8FatJetVars["ak8FatJetPNetXbbVsQCD"] >= self.preselection["pnet-v12"],
+                    ak8FatJetVars["ak8FatJetParTXbbvsQCDTop"] >= self._fatjet_bb_preselection_cut,
                     axis=1,
                 )
                 >= 1
             )
             add_selection("ak8_bb_preselection", cut_bb, *selection_args)
+
+        if self._fatjet_tt_preselection_cut is not None:
+            # at least 1 jet with max(Xtauhtaue, Xtauhtaum, Xtauhtauh)vsQCDTop >= cut
+            cut_tt_disc = np.maximum(
+                np.maximum(
+                    ak8FatJetVars["ak8FatJetParTXtauhtauevsQCDTop"],
+                    ak8FatJetVars["ak8FatJetParTXtauhtaumvsQCDTop"],
+                ),
+                ak8FatJetVars["ak8FatJetParTXtauhtauhvsQCDTop"],
+            )
+            cut_tt = np.sum(cut_tt_disc >= self._fatjet_tt_preselection_cut, axis=1) >= 1
+            add_selection("ak8_tt_preselection", cut_tt, *selection_args)
 
         if self._prescale_factor:
             cut_prescale = events.event % self._prescale_factor == 0
@@ -1292,12 +1495,15 @@ class bbtautauSkimmer(SkimmerABC):
         if isData:
             skimmed_events["weight"] = np.ones(n_events)
         else:
+            # LHE V pT of every event, set by gen_selection_V only (Wto2Q-2Jets/Zto2Q-2Jets with LHEPart)
+            lhe_v_pt = genVars.get("GenVLHEPt")
             weights_dict, totals_temp = self.add_weights(
                 events,
                 year,
                 dataset,
                 gen_weights,
                 gen_selected,
+                lhe_v_pt=None if lhe_v_pt is None else lhe_v_pt[:, 0],
             )
             skimmed_events = {**skimmed_events, **weights_dict}
             totals_dict = {**totals_dict, **totals_temp}
@@ -1332,8 +1538,14 @@ class bbtautauSkimmer(SkimmerABC):
         dataset,
         gen_weights,
         gen_selected,
+        lhe_v_pt: np.ndarray | None = None,
     ) -> tuple[dict, dict]:
-        """Adds weights and variations, saves totals for all norm preserving weights and variations"""
+        """Adds weights and variations, saves totals for all norm preserving weights and variations.
+
+        If ``lhe_v_pt`` (per-event LHE V pT, from ``GenSelection.gen_selection_V``) is given, also
+        saves the per-LHE-V-pT-bin totals of ``lhevpt_totals`` and, for every norm-preserving
+        variation, ``np_<syst>_lhevpt``.
+        """
         weights = Weights(len(events), storeIndividual=True)
         weights.add("genweight", gen_weights)
 
@@ -1369,6 +1581,8 @@ class bbtautauSkimmer(SkimmerABC):
         # norm preserving weights, used to do normalization in post-processing
         weight_np = weights.partial_weight(include=norm_preserving_weights)
         totals_dict["np_nominal"] = np.sum(weight_np[gen_selected])
+        if lhe_v_pt is not None:
+            totals_dict.update(lhevpt_totals(lhe_v_pt, weight_np, gen_weights, gen_selected))
 
         if self._systematics:
             for systematic in list(weights.variations):
@@ -1386,6 +1600,11 @@ class bbtautauSkimmer(SkimmerABC):
 
                     # need to save total # events for each variation for normalization in post-processing
                     totals_dict[f"np_{systematic}"] = np.sum(var_weight[gen_selected])
+                    if lhe_v_pt is not None:
+                        # per LHE V pT bin, to normalise this variation per bin in a stitch
+                        totals_dict[f"np_{systematic}_lhevpt"] = lhevpt_sum(
+                            lhevpt_bin_index(lhe_v_pt, gen_selected), var_weight[gen_selected]
+                        )
 
         # TEMP: save each individual weight TODO: remove
         for key in weights._weights:

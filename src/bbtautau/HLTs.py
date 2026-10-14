@@ -93,11 +93,6 @@ class HLTs:
             ),
             HLT(
                 name="HLT_AK8PFJet425_SoftDropMass30",
-                years=["2024"],
-                dataset="JetMET",
-            ),
-            HLT(
-                name="HLT_AK8PFJet425_SoftDropMass30",
                 years=years_2024,
                 dataset="JetMET",
             ),
@@ -120,18 +115,6 @@ class HLTs:
             HLT(
                 name="HLT_QuadPFJet103_88_75_15_DoublePFBTagDeepJet_1p3_7p7_VBF1",
                 years=years_2022 + years_2023,
-                dataset="JetMET",
-                channel=["hh"],
-            ),
-            HLT(
-                name="HLT_QuadPFJet103_88_75_15_PNet2BTag_0p4_0p12_VBF1",
-                years=["2024"],
-                dataset="JetMET",
-                channel=["hh"],
-            ),
-            HLT(
-                name="HLT_QuadPFJet103_88_75_15_PNetBTag_0p4_VBF2",
-                years=["2024"],
                 dataset="JetMET",
                 channel=["hh"],
             ),
@@ -282,21 +265,21 @@ class HLTs:
         "ditau": [
             HLT(
                 name="HLT_DoubleMediumDeepTauPFTauHPS35_L2NN_eta2p1",
-                years=years,
+                years=years_all,
                 dataset="Tau",
             ),
         ],
         "muiso24": [
             HLT(
                 name="HLT_IsoMu24",
-                years=years,
+                years=years_all,
                 dataset="Muon",
             ),
         ],
         "ele30": [
             HLT(
                 name="HLT_Ele30_WPTight_Gsf",
-                years=years,
+                years=years_all,
                 dataset="EGamma",
             ),
         ],

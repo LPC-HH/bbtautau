@@ -23,7 +23,8 @@ def get_processor(
     region: str | None = None,
     nano_version: str | None = None,
     fatjet_pt_cut: float | None = None,
-    fatjet_bb_preselection: bool | None = None,
+    fatjet_bb_preselection_cut: float | None = None,
+    fatjet_tt_preselection_cut: float | None = None,
     prescale_factor: int | None = None,
 ):
     # define processor
@@ -36,7 +37,8 @@ def get_processor(
             region=region,
             nano_version=nano_version,
             fatjet_pt_cut=fatjet_pt_cut,
-            fatjet_bb_preselection=fatjet_bb_preselection,
+            fatjet_bb_preselection_cut=fatjet_bb_preselection_cut,
+            fatjet_tt_preselection_cut=fatjet_tt_preselection_cut,
             prescale_factor=prescale_factor,
         )
 
@@ -48,7 +50,8 @@ def main(args):
         args.region,
         args.nano_version,
         args.fatjet_pt_cut,
-        args.fatjet_bb_preselection,
+        args.fatjet_bb_preselection_cut,
+        args.fatjet_tt_preselection_cut,
         args.prescale_factor,
     )
 
