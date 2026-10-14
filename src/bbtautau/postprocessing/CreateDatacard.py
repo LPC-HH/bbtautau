@@ -135,6 +135,16 @@ parser.add_argument(
     help="regions for which to make cards",
     choices=["pass"],
 )
+parser.add_argument(
+    "--region",
+    default="sr",
+    choices=["sr", "vr"],
+    type=str,
+    help="'sr' (default): signal region cards, 'pass' + 'fail' (+ MCBlinded copies), as before. "
+    "'vr': validation region cards, 'vrpass' + 'fail', always unblinded, one model 'vr' per bmin "
+    "(channels vr<ch>pass / vr<ch>fail, own TF from --nTF / --nTF-per-channel key 'vr'), "
+    "no TXbb or tautau SF (error if given). Use a separate --model-name, e.g. <TAG>-vr-nTF0.",
+)
 parser.add_argument("--model-name", default=None, type=str, help="output model name")
 parser.add_argument(
     "--bmin",
@@ -189,6 +199,17 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
+VR_MODE = args.region == "vr"
+if VR_MODE:
+    # VR fit: unblinded, no SFs (decided 2026-10-13, untracked_utils/notes/control_region_plan.md)
+    if args.txbb_sf or args.tautau_sf:
+        parser.error("--region vr: --txbb-sf / --tautau-sf are not applied in the VR; drop them")
+    if args.model_name is None:
+        parser.error("--region vr: give a separate VR card tag, e.g. --model-name <TAG>-vr-nTF0")
+    if not args.unblinded:
+        logging.info("--region vr: unblinded cards (no MCBlinded copies)")
+    args.unblinded = True
+
 # Parse --nTF-per-channel if provided
 nTF_per_channel: dict | None = None
 if args.nTF_per_channel is not None:
@@ -228,6 +249,17 @@ if nTF_per_channel is not None:
     print("Per-channel TF orders (overrides --nTF):", nTF_per_channel)
 
 signal_regions = ["pass"] if args.regions == "pass" else args.regions
+if VR_MODE:
+    # template key of the VR pass region; note "pass" in "vrpass" is True, so it is treated as a
+    # pass region everywhere below (signal kept, pass_only systs - none active in the VR)
+    signal_regions = ["vrpass"]
+
+
+def card_region(region: str) -> str:
+    """Region name used in card channel / parameter names. Identity for the SR; in the VR the
+    model prefix is already 'vr', so template region 'vrpass' becomes 'pass' (vr<ch>pass)."""
+    return region.replace("vrpass", "pass") if VR_MODE else region
+
 
 channels = (
     list(CHANNELS.values()) if args.channels == "all" else [CHANNELS[ch] for ch in args.channels]
@@ -397,13 +429,15 @@ corr_year_shape_systs = {
 }
 
 if args.txbb_sf:
-    # one shape nuisance per calibration pT bin, correlated across years/channels/regions
-    # (template variations named "<sample>_txbb_<ptlabel>_{up,down}", see corrections.py)
+    # one shape nuisance per calibration pT bin, correlated across years/channels
+    # (template variations named "<sample>_txbb_<ptlabel>_{up,down}", see corrections.py).
+    # SR pass only: the templates have no TXbb SF (and no variations) in the fail region.
     for pt_label in txbb_pt_labels(years[0]):
         corr_year_shape_systs[f"txbb_{pt_label}"] = Syst(
             name=f"{CMS_PARAMS_LABEL}_txbb_sf_{pt_label}",
             prior="shape",
             samples=sig_keys + single_h_keys,
+            pass_only=True,
         )
 
 uncorr_year_shape_systs = {
@@ -602,7 +636,8 @@ def fill_regions(
         blind_str = MCB_LABEL if region.endswith(MCB_LABEL) else ""
 
         logging.info(f"\tStarting region: {region}")
-        ch = rl.Channel(sr_key + channel.key + region.replace("_", ""))  # can't have '_'s in name
+        # can't have '_'s in name
+        ch = rl.Channel(sr_key + channel.key + card_region(region).replace("_", ""))
         model.addChannel(ch)
 
         for sample_name, card_name in mc_samples.items():
@@ -782,7 +817,7 @@ def fill_regions(
 
         if bblite and args.mcstats:
             # tie MC stats parameters together in blinded and "unblinded" region
-            channel_name = region_noblinded
+            channel_name = card_region(region_noblinded)
             ch.autoMCStats(
                 channel_name=f"{CMS_PARAMS_LABEL}_{sr_key}{channel.key}{channel_name}",
                 threshold=args.mcstats_threshold,
@@ -895,7 +930,7 @@ def alphabet_fit(
 
         # transfer factor
         tf_dataResidual = rl.BasisPoly(
-            f"{CMS_PARAMS_LABEL}_tf_dataResidual_{sr_key}{channel.key}{sr}",
+            f"{CMS_PARAMS_LABEL}_tf_dataResidual_{sr_key}{channel.key}{card_region(sr)}",
             (shape_var.orders[sr],),
             [shape_var.name],
             basis="Bernstein",
@@ -906,7 +941,7 @@ def alphabet_fit(
         tf_params_pass = qcd_eff * tf_dataResidual_params  # scale params initially by qcd eff
 
         for blind_str in blind_strs:
-            passChName = f"{sr_key}{channel.key}{sr}{blind_str}".replace("_", "")
+            passChName = f"{sr_key}{channel.key}{card_region(sr)}{blind_str}".replace("_", "")
             passCh = model[passChName]
 
             pass_qcd = rl.TransferFactorSample(
@@ -1000,7 +1035,12 @@ def main(args):
         if len(sr_subdirs) == 0:
             logging.warning(f"No signal region subfolders found in {analysis_name}, skipping")
             continue
-        if len(sr_subdirs) == 1:
+        if VR_MODE:
+            # one VR model per bmin; vrpass/fail are identical in every signal subdir, the
+            # templates are read from the first subdir (sorted) that has the channel
+            sr_keys = sorted(sr_subdirs)
+            logging.info(f"VR: reading vrpass/fail templates from (first of) {sr_keys}")
+        elif len(sr_subdirs) == 1:
             sr_keys = sr_subdirs
             logging.info(f"Found single signal region: {sr_keys[0]}")
         else:
@@ -1018,8 +1058,8 @@ def main(args):
                     logging.info("User chose not to process multiple signal regions. Exiting.")
                     break
 
-        # Loop over signal region subfolders
-        for sr_key in sr_keys:
+        # Loop over signal region subfolders (VR: a single model "vr")
+        for sr_key in ["vr"] if VR_MODE else sr_keys:
             logging.info(f"Processing signal region: {sr_key}")
 
             # Create a separate model for each analysis/signal region combination
@@ -1027,7 +1067,15 @@ def main(args):
 
             for channel in channels:
                 # Check if channel directory exists in this analysis
-                channel_path = analysis_dir / sr_key / channel.key
+                if VR_MODE:
+                    vr_srcs = [
+                        analysis_dir / s / channel.key
+                        for s in sr_keys
+                        if (analysis_dir / s / channel.key).exists()
+                    ]
+                    channel_path = vr_srcs[0] if vr_srcs else analysis_dir / "vr" / channel.key
+                else:
+                    channel_path = analysis_dir / sr_key / channel.key
                 if not channel_path.exists():
                     logging.warning(
                         f"Channel {channel.key} not found in {analysis_name}/{sr_key}, skipping"
@@ -1070,6 +1118,15 @@ def main(args):
             logging.info(f"rendering combine model for {analysis_name}")
             base_cards_dir = Path(args.cards_dir)
             out_dir = base_cards_dir / args.model_name / analysis_name
+            if VR_MODE and out_dir.exists():
+                sr_cards = [
+                    p.name for p in out_dir.glob("*pass.txt") if not p.name.startswith("vr")
+                ]
+                if sr_cards:
+                    raise FileExistsError(
+                        f"{out_dir} already has SR cards ({sr_cards[:3]}...); VR cards need their "
+                        "own --model-name, e.g. <TAG>-vr-nTF0"
+                    )
             out_dir.mkdir(parents=True, exist_ok=True)
 
             model.renderCombine(out_dir)

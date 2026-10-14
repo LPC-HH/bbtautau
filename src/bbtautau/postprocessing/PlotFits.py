@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Plot post-fit shapes from FitShapes.root.
 
@@ -41,6 +40,14 @@ Usage:
         --plot-dir plots/PostFit \\
         --sig-region all
 
+    # Validation-region (VR) fit (combine/run_unblinded_bbtt.sh): channels vr<ch>pass/vr<ch>fail,
+    # unblinded (no blind window), ggF and VBF signal both overlaid (b-only fit; the signal
+    # shown is the r = 1 expectation, as in the SR plots)
+    python -m bbtautau.postprocessing.PlotFits \\
+        --region vr \\
+        --fit-shapes cards/<TAG>-vr-nTF0/bmin_10/vrallFitShapes.root \\
+        --plot-dir plots/PostFit/<TAG>-vr-nTF0/bmin_10
+
 Note: If the FitShapes file was not properly closed (e.g. combine job interrupted),
 the subdirectory contents may be missing. Re-run PostFitShapesFromWorkspace to
 produce a valid file.
@@ -58,13 +65,12 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import mplhep as hep
 import numpy as np
-
 from boostedhh.hh_vars import data_key, years
 from hist import Hist
 
+from bbtautau.postprocessing import plotting
 from bbtautau.postprocessing.datacardHelpers import sum_templates
 from bbtautau.postprocessing.postprocessing import shape_vars
-from bbtautau.postprocessing import plotting
 from bbtautau.postprocessing.Samples import CHANNELS
 from bbtautau.userConfig import SHAPE_VAR
 
@@ -94,11 +100,41 @@ HIST_LABEL_MAP = {val: key for key, val in HIST_LABEL_MAP_INVERSE.items()}
 
 PBG_KEYS = ["qcddy", "ttbarhad", "ttbarsl", "ttbarll", "wjets", "zjets", "hbb"]
 
+# Fit regions: "sr" = signal region cards (<sig><ch>pass/fail, blind window in pass),
+# "vr" = validation region cards (CreateDatacard --region vr: vr<ch>pass/fail, unblinded).
+REGION_MODES = ["sr", "vr"]
+VR_PREFIX = "vr"
+# VR signal: both signals are read from their own process histograms (names as in
+# CreateDatacard.mc_samples_sig), since TotalSig sums ggF and VBF.
+VR_SIG_PROCS = OrderedDict(
+    [
+        ("ggfbbtt", "ggHH_kl_1_kt_1_13p6TeV_hbbhtt"),
+        ("vbfbbtt", "qqHH_CV_1_C2V_1_kl_1_13p6TeV_hbbhtt"),
+    ]
+)
 
-def _samples_for_sig_region(sig_region: str | None) -> list[str]:
-    """Build samples list including the appropriate signal key."""
-    sig_keys = [sig_region] if sig_region else ["ggfbbtt"]
-    return PBG_KEYS + sig_keys + [data_key]
+
+def _check_region_mode(region_mode: str, sig_region: str | None):
+    if region_mode not in REGION_MODES:
+        raise ValueError(f"region_mode must be one of {REGION_MODES}, got {region_mode!r}")
+    if region_mode == "vr" and sig_region is not None:
+        raise ValueError("sig_region is not used with region_mode='vr' (VR is signal-agnostic)")
+
+
+def _region_prefix(sig_region: str | None, region_mode: str = "sr") -> str | None:
+    """Prefix of the FitShapes channel names (None = legacy hepass naming)."""
+    return VR_PREFIX if region_mode == "vr" else sig_region
+
+
+def _sig_keys(sig_region: str | None, region_mode: str = "sr") -> list[str]:
+    if region_mode == "vr":
+        return list(VR_SIG_PROCS)
+    return [sig_region] if sig_region else ["ggfbbtt"]
+
+
+def _samples_for_sig_region(sig_region: str | None, region_mode: str = "sr") -> list[str]:
+    """Build samples list including the appropriate signal key(s)."""
+    return PBG_KEYS + _sig_keys(sig_region, region_mode) + [data_key]
 
 
 SHAPES = {
@@ -121,16 +157,19 @@ def get_pre_templates(templates_dir: Path):
     return sum_templates(templates_dict, years)
 
 
-def build_selection_regions(sig_region: str | None = None):
+def build_selection_regions(sig_region: str | None = None, region_mode: str = "sr"):
     """Build region key -> label mapping.
 
     If sig_region is set (e.g. ggfbbtt, vbfbbtt), regions are {sig_region}hepass, etc.
     Otherwise legacy format: hepass, hefail, etc.
+    With region_mode="vr": vrhepass ("... VR Pass"), vrhefail ("... VR Fail").
     """
+    _check_region_mode(region_mode, sig_region)
     selection_regions = {}
-    prefix = f"{sig_region}" if sig_region else ""
+    prefix = _region_prefix(sig_region, region_mode) or ""
+    rlabel = " VR" if region_mode == "vr" else ""
     for channel in CHANNELS.values():
-        for passfail, plabel in [("pass", " Pass"), ("fail", " Fail")]:
+        for passfail, plabel in [("pass", f"{rlabel} Pass"), ("fail", f"{rlabel} Fail")]:
             region = f"{prefix}{channel.key}{passfail}"
             selection_regions[region] = f"{channel.label}{plabel}"
     return selection_regions
@@ -160,7 +199,9 @@ def _channel_key_from_region(region: str, sig_region: str | None) -> str:
     return region[:2]  # legacy: hepass -> he
 
 
-def _load_region_from_root(root_file, region: str, shape: str) -> tuple[dict, np.ndarray | None]:
+def _load_region_from_root(
+    root_file, region: str, shape: str, region_mode: str = "sr"
+) -> tuple[dict, np.ndarray | None]:
     """Load one region's histograms from ROOT TFile. Returns (sample_arrays, bgerr)."""
     dir_path = f"{region}_{shape}"
     sample_arrays = {}
@@ -173,19 +214,21 @@ def _load_region_from_root(root_file, region: str, shape: str) -> tuple[dict, np
     obj = root_file.Get(f"{dir_path}/data_obs")
     if obj and obj.InheritsFrom("TH1"):
         n = obj.GetNbinsX()
-        sample_arrays[data_key] = np.nan_to_num(
-            [obj.GetBinContent(i) for i in range(1, n + 1)]
-        )
+        sample_arrays[data_key] = np.nan_to_num([obj.GetBinContent(i) for i in range(1, n + 1)])
     # TotalSig -> use region prefix (ggfbbtt or vbfbbtt) as key
     for sig in ["ggfbbtt", "vbfbbtt"]:
         if region.startswith(sig):
             obj = root_file.Get(f"{dir_path}/TotalSig")
             if obj and obj.InheritsFrom("TH1"):
                 n = obj.GetNbinsX()
-                sample_arrays[sig] = np.array(
-                    [obj.GetBinContent(i) for i in range(1, n + 1)]
-                )
+                sample_arrays[sig] = np.array([obj.GetBinContent(i) for i in range(1, n + 1)])
             break
+    if region_mode == "vr":
+        for sig, proc in VR_SIG_PROCS.items():
+            obj = root_file.Get(f"{dir_path}/{proc}")
+            if obj and obj.InheritsFrom("TH1"):
+                n = obj.GetNbinsX()
+                sample_arrays[sig] = np.array([obj.GetBinContent(i) for i in range(1, n + 1)])
     bgerr = None
     obj = root_file.Get(f"{dir_path}/TotalBkg")
     if obj and obj.InheritsFrom("TH1"):
@@ -202,14 +245,17 @@ def load_hists_from_fit(
     signal: str,
     sig_region: str | None = None,
     available_shapes: list[str] | None = None,
+    region_mode: str = "sr",
 ):
     """Load prefit/postfit histograms from FitShapes.root.
 
     file_or_path: uproot file handle or path (uses ROOT fallback if uproot fails).
     sig_region: e.g. ggfbbtt or vbfbbtt for files with {sig_region}hepass naming.
     available_shapes: list of shapes present in file (prefit, postfit). Auto-detected if None.
+    region_mode: "sr" (default) or "vr" (vr<ch>pass/fail channels; sig_region must be None,
+        templates_dir/signal unused; ggfbbtt and vbfbbtt read from their process histograms).
     """
-    selection_regions = build_selection_regions(sig_region)
+    selection_regions = build_selection_regions(sig_region, region_mode)
     shapes_to_use = available_shapes or list(SHAPES.keys())
 
     # Try uproot first, fall back to ROOT
@@ -254,7 +300,7 @@ def load_hists_from_fit(
         hists[shape] = {}
         bgerrs[shape] = {}
 
-        samples_list = _samples_for_sig_region(sig_region)
+        samples_list = _samples_for_sig_region(sig_region, region_mode)
         for region in selection_regions:
             h = Hist(
                 hist.axis.StrCategory(samples_list, name="Sample"),
@@ -263,9 +309,7 @@ def load_hists_from_fit(
             )
 
             if use_root and root_file:
-                sample_arrays, bgerr = _load_region_from_root(
-                    root_file, region, shape
-                )
+                sample_arrays, bgerr = _load_region_from_root(root_file, region, shape, region_mode)
                 if not sample_arrays:
                     continue
                 for key in samples_list:
@@ -284,9 +328,21 @@ def load_hists_from_fit(
                     if key != data_key and file_key in templates:
                         idx = np.where(np.array(list(h.axes[0])) == key)[0][0]
                         h.view(flow=False)[idx, :] = templates[file_key].values()
+                if region_mode == "vr":
+                    # VR: each signal from its own process histogram (no template fallback)
+                    for key, proc in VR_SIG_PROCS.items():
+                        if proc in templates:
+                            idx = np.where(np.array(list(h.axes[0])) == key)[0][0]
+                            h.view(flow=False)[idx, :] = templates[proc].values()
+                        elif "pass" in region:  # VR fail cards have no signal process
+                            print(f"Warning: no {proc} in {region}_{shape}; {key} left empty")
                 # Signal from TotalSig in fit output, or pre-fit templates fallback
                 for key in samples_list:
-                    if key not in HIST_LABEL_MAP_INVERSE and key != data_key:
+                    if (
+                        region_mode != "vr"
+                        and key not in HIST_LABEL_MAP_INVERSE
+                        and key != data_key
+                    ):
                         filled = False
                         if region.startswith(key):
                             try:
@@ -300,17 +356,11 @@ def load_hists_from_fit(
                         if not filled:
                             ch = _channel_key_from_region(region, sig_region)
                             try:
-                                sig_pre = get_pre_templates(
-                                    Path(templates_dir) / ch / signal
-                                )
+                                sig_pre = get_pre_templates(Path(templates_dir) / ch / signal)
                                 if sig_pre:
                                     pf = "pass" if "pass" in region else "fail"
-                                    idx = np.where(
-                                        np.array(list(h.axes[0])) == key
-                                    )[0][0]
-                                    h.view(flow=False)[idx, :] = sig_pre[pf][
-                                        key + ch, ...
-                                    ].values()
+                                    idx = np.where(np.array(list(h.axes[0])) == key)[0][0]
+                                    h.view(flow=False)[idx, :] = sig_pre[pf][key + ch, ...].values()
                             except (FileNotFoundError, KeyError):
                                 pass
                 data_key_index = np.where(np.array(list(h.axes[0])) == data_key)[0][0]
@@ -337,15 +387,24 @@ def plot_fits(
     plot_dir: Path,
     prelim: bool = True,
     sig_region: str | None = None,
+    region_mode: str = "sr",
+    show: bool = False,
 ):
-    """Generate ratio plots for each shape, region, and variable."""
+    """Generate ratio plots for each shape, region, and variable.
+
+    region_mode="vr": no blind window (the VR fit is unblinded), ggF and VBF signals overlaid.
+    show=True also displays each plot (e.g. inline in a notebook); it is still saved as pdf.
+    """
+    _check_region_mode(region_mode, sig_region)
     plabel = "Preliminary" if prelim else ""
     pplotdir = "preliminary" if prelim else "final"
     out_dir = plot_dir / pplotdir
     out_dir.mkdir(exist_ok=True, parents=True)
 
-    sig_keys = [sig_region] if sig_region else ["ggfbbtt"]
+    sig_keys = _sig_keys(sig_region, region_mode)
     sig_scale_dict = {k: 100 for k in sig_keys}
+    prefix = _region_prefix(sig_region, region_mode)
+    blind = region_mode != "vr"
 
     for shape in SHAPES:
         if shape not in hists:
@@ -354,7 +413,7 @@ def plot_fits(
             if region not in hists[shape]:
                 continue
             pass_region = "pass" in region
-            ch_key = _channel_key_from_region(region, sig_region)
+            ch_key = _channel_key_from_region(region, prefix)
             for shape_var in shape_vars:
                 plot_params = {
                     "hists": hists[shape][region],
@@ -363,27 +422,33 @@ def plot_fits(
                     "bg_err": bgerrs[shape].get(region),
                     "data_err": True,
                     "sig_scale_dict": sig_scale_dict if pass_region else None,
-                    "show": False,
-                    "year": "2022-2023",
+                    "show": show,
+                    "year": "all",  # cards are made with --year all: lumi of all hh_vars.years
                     "region_label": region_label,
-                    "name": str(
-                        out_dir / f"{pplotdir}_{shape}_{region}_{shape_var.var}.pdf"
-                    ),
+                    "name": str(out_dir / f"{pplotdir}_{shape}_{region}_{shape_var.var}.pdf"),
                     "ratio_ylims": [0, 2],
                     "cmslabel": plabel,
                     "leg_args": {"fontsize": 22, "ncol": 2},
                     "channel": CHANNELS[ch_key],
-                    "blind_region": SHAPE_VAR["blind_window"] if pass_region else None,
+                    "blind_region": (
+                        SHAPE_VAR["blind_window"] if (pass_region and blind) else None
+                    ),
                 }
                 plotting.ratioHistPlot(**plot_params)
 
 
 def plot_qcd_transfer_factors(
-    hists, selection_regions, plot_dir: Path, sig_region: str | None = None
+    hists,
+    selection_regions,
+    plot_dir: Path,
+    sig_region: str | None = None,
+    region_mode: str = "sr",
 ):
     """Plot QCD transfer factors (pass/fail) for each pass region."""
     if "postfit" not in hists:
         return {}
+    _check_region_mode(region_mode, sig_region)
+    sig_region = _region_prefix(sig_region, region_mode)  # VR: vrhhpass -> vrhhfail
     plt.style.use(hep.style.CMS)
     hep.style.use("CMS")
     formatter = mticker.ScalarFormatter(useMathText=True)
@@ -402,10 +467,7 @@ def plot_qcd_transfer_factors(
         if fail_region not in hists["postfit"]:
             continue
 
-        tf = (
-            hists["postfit"][region]["qcddy", ...]
-            / hists["postfit"][fail_region]["qcddy", ...]
-        )
+        tf = hists["postfit"][region]["qcddy", ...] / hists["postfit"][fail_region]["qcddy", ...]
         tfs[region] = tf
 
         tf_vals = tf.values()
@@ -477,6 +539,15 @@ def parse_args():
         "Use 'all' to plot both ggf and vbf. Required for allsigsFitShapes.root.",
     )
     parser.add_argument(
+        "--region",
+        type=str,
+        choices=REGION_MODES,
+        default="sr",
+        help="sr (default): signal-region fit, blind window in pass. vr: validation-region fit "
+        "(vr<ch>pass/vr<ch>fail, e.g. vrallFitShapes.root), unblinded, ggF+VBF signal overlaid; "
+        "--sig-region, --signal and --templates-dir are not used.",
+    )
+    parser.add_argument(
         "--preliminary",
         action="store_true",
         default=True,
@@ -497,6 +568,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.region == "vr" and args.sig_region is not None:
+        raise ValueError("--sig-region is not used with --region vr")
 
     folder = args.folder
     fit_shapes_path = args.fit_shapes
@@ -523,6 +596,7 @@ def main():
             templates_dir,
             args.signal,
             sig_region=sig_region,
+            region_mode=args.region,
         )
 
         if not hists or all(not v for v in hists.values()):
@@ -540,6 +614,7 @@ def main():
                 sub_plot_dir,
                 prelim=args.preliminary,
                 sig_region=sig_region,
+                region_mode=args.region,
             )
             if args.final:
                 plot_fits(
@@ -549,10 +624,15 @@ def main():
                     sub_plot_dir,
                     prelim=False,
                     sig_region=sig_region,
+                    region_mode=args.region,
                 )
 
         plot_qcd_transfer_factors(
-            hists, selection_regions, sub_plot_dir, sig_region=sig_region
+            hists,
+            selection_regions,
+            sub_plot_dir,
+            sig_region=sig_region,
+            region_mode=args.region,
         )
 
     print(f"Plots saved to {plot_dir}")
