@@ -31,8 +31,8 @@ from pathlib import Path
 P_VALUE_THRESHOLD = 0.05
 MAX_ORDER = 3
 
-# Map sig_label to CreateDatacard sr key
-SR_KEY_MAP = {"ggf": "ggfbbtt", "vbf": "vbfbbtt"}
+# Map sig_label to CreateDatacard sr key ("vr": the --region vr model)
+SR_KEY_MAP = {"ggf": "ggfbbtt", "vbf": "vbfbbtt", "vr": "vr"}
 
 
 def select_order(gof_pvalues: dict[int, float], f_pvalues: dict[tuple[int, int], float]) -> int:
@@ -104,6 +104,12 @@ def main() -> None:
         help="Path to ftest_results.json. Default: plots/FTests/{cards_tag}_all_sr_ch/ftest_results.json",
     )
     parser.add_argument(
+        "--vr",
+        action="store_true",
+        help="Validation-region F-test (plot_ftest.py --vr): default JSON is "
+        "plots/FTests/{cards_tag}_bmin{bmin}_vr/ftest_results.json",
+    )
+    parser.add_argument(
         "--repo-root",
         type=Path,
         default=None,
@@ -131,6 +137,8 @@ def main() -> None:
 
     if args.json is not None:
         json_path = Path(args.json)
+    elif args.vr:
+        json_path = repo_root / f"plots/FTests/{args.cards_tag}_bmin{args.bmin}_vr/ftest_results.json"
     else:
         json_path = repo_root / f"plots/FTests/{args.cards_tag}_all_sr_ch/ftest_results.json"
 
@@ -179,11 +187,11 @@ def main() -> None:
     print("=" * 80)
 
     # Build CreateDatacard --nTF-per-channel format
-    ntf_config: dict[str, dict[str, int]] = {"ggfbbtt": {}, "vbfbbtt": {}}
+    ntf_config: dict[str, dict[str, int]] = {}
     for combo_str, order in selections.items():
         sig_label, channel = combo_str.split("_")
         sr_key = SR_KEY_MAP.get(sig_label, sig_label + "bbtt")
-        ntf_config[sr_key][channel] = order
+        ntf_config.setdefault(sr_key, {})[channel] = order
 
     print("\nCreateDatacard --nTF-per-channel config:")
     print(json.dumps(ntf_config, indent=2))

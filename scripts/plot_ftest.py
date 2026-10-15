@@ -16,6 +16,9 @@ Usage:
 
   # Single channel only
   python scripts/plot_ftest.py --cards-tag 0215_sm+bsm_ggf+vbf --sig-label ggf --channel hh --bmin 10
+
+  # Validation region (run_ftest_vr_bbtt.sh): one F-test per channel
+  python scripts/plot_ftest.py --cards-tag <TAG>-vr --vr --bmin 10 --test-orders 0 1 2
 """
 
 import argparse
@@ -31,6 +34,14 @@ import uproot
 from scipy import stats
 
 CHANNEL_LABELS = {"hh": r"$\tau_h\tau_h$", "he": r"$\tau_h e$", "hm": r"$\tau_h \mu$"}
+
+# The fit is 1D in the bb-jet mass: 16 bins in [60, 220] GeV minus the 4 blinded bins in
+# [110, 150] GeV (SHAPE_VAR in userConfig.py), so 12 pass-region bins constrain the transfer factor.
+NUM_BINS = 12
+DIM = 1
+# The VR fit is unblinded: all 16 bins.
+NUM_BINS_VR = 16
+VR_CHANNELS = ["hh", "he", "hm"]
 
 
 def _valid_toy_files(bindir: Path, pattern: str) -> list[str]:
@@ -58,8 +69,8 @@ def F_statistic(
     ts_high: np.ndarray,
     ord_low: int,
     ord_high: int,
-    num_bins: int = 10 * 14,
-    dim: int = 2,
+    num_bins: int = NUM_BINS,
+    dim: int = DIM,
 ) -> np.ndarray:
     numerator = (np.array(ts_low) - np.array(ts_high)) / (ord_high - ord_low)
     denominator = np.array(ts_high) / (num_bins - (ord_high + dim))
@@ -83,6 +94,7 @@ def plot_tests(
         "ggf": "ggF",
         "vbf": "VBF",
         "allsigs": "ggF+VBF Combined",
+        "vr": "VR",
     }
     legend_title = category_label.get(sig_label, sig_label)
     if channel is not None:
@@ -90,6 +102,9 @@ def plot_tests(
     plot_max = max(np.max(toy_ts), data_ts)
     plot_min = 0
     pval = p_value(data_ts, toy_ts)
+    if xlim is not None:
+        # keep the data line in range when it lies beyond the toys' bulk
+        xlim = max(xlim, 1.1 * data_ts)
 
     plt.figure(figsize=(12, 8))
     h = plt.hist(
@@ -128,7 +143,7 @@ def plot_tests(
             label=label,
         )
 
-    hep.cms.label("Work in Progress", data=True, lumi=61, year=None)
+    hep.cms.label("Work in Progress", data=True, lumi=171, com=13.6, year=None)
     plt.legend(title=legend_title)
     plt.title(title)
     plt.ylabel("Number of Toys")
@@ -192,6 +207,13 @@ def main() -> None:
         help="Plot GoF + F-test for each (sig-region x channel): ggf_hh, ggf_he, ggf_hm, vbf_hh, vbf_he, vbf_hm. Requires per-channel f-test output from run_ftest_bbtt.sh --all-sr-ch.",
     )
     parser.add_argument(
+        "--vr",
+        action="store_true",
+        help="Validation-region F-test from run_ftest_vr_bbtt.sh: one test per channel (vr_hh, vr_he, "
+        "vr_hm, or only --channel), unblinded (16 bins). Plots and JSON go to "
+        "plots/FTests/{cards_tag}_bmin{bmin}_*.",
+    )
+    parser.add_argument(
         "--save-json",
         action="store_true",
         help="Save p-values and test statistics to JSON file",
@@ -211,7 +233,10 @@ def main() -> None:
     analysis_name = f"bmin_{args.bmin}"
 
     # Build list of (sig_label, channel) to process. channel=None means combined.
-    if args.all_sr_ch:
+    if args.vr:
+        combos = [("vr", ch) for ch in ([args.channel] if args.channel else VR_CHANNELS)]
+        save_json = True
+    elif args.all_sr_ch:
         combos = [
             ("ggf", "hh"), ("ggf", "he"), ("ggf", "hm"),
             ("vbf", "hh"), ("vbf", "he"), ("vbf", "hm"),
@@ -235,18 +260,24 @@ def main() -> None:
 
     def bin_dir(nTF: int, sig_label: str, channel: str | None) -> Path:
         base = local_cards_dir / f"nTF_{nTF}"
-        if channel is not None:
+        if channel is not None and not args.vr:
             return base / f"{analysis_name}_{sig_label}_{channel}"
         return base / analysis_name
+
+    # VR outputs of all channels share one card dir and are labelled vr<ch>; the VR plot dirs
+    # carry the bmin since one cards tag holds every bmin
+    num_bins = NUM_BINS_VR if args.vr else NUM_BINS
+    plot_tag = f"{args.cards_tag}_bmin{args.bmin}" if args.vr else args.cards_tag
 
     results_summary: dict = {}
 
     for sig_label, channel in combos:
         combo_str = f"{sig_label}_{channel}" if channel else sig_label
+        file_label = f"vr{channel}" if args.vr else ""
         if args.plot_dir is not None:
             plot_dir = Path(args.plot_dir) / combo_str
         else:
-            plot_dir = repo_root / f"plots/FTests/{args.cards_tag}_{combo_str}"
+            plot_dir = repo_root / f"plots/FTests/{plot_tag}_{combo_str}"
         plot_dir.mkdir(parents=True, exist_ok=True)
         print(f"Processing {combo_str} -> {plot_dir}")
 
@@ -259,8 +290,8 @@ def main() -> None:
                 tflabel = f"{nTF}"
                 bindir = bin_dir(nTF, sig_label, channel)
 
-                toys_pattern = f"higgsCombineToys{tlabel}.GoodnessOfFit.mH125.*.root"
-                data_file = bindir / "higgsCombineData.GoodnessOfFit.mH125.root"
+                toys_pattern = f"higgsCombineToys{file_label}{tlabel}.GoodnessOfFit.mH125.*.root"
+                data_file = bindir / f"higgsCombine{file_label}Data.GoodnessOfFit.mH125.root"
 
                 if not bindir.exists():
                     raise FileNotFoundError(f"Bin dir not found: {bindir}")
@@ -279,7 +310,7 @@ def main() -> None:
 
                 if nTF != o1:
                     tdict["ftoys"][tflabel] = F_statistic(
-                        tdict["toys"][tlabel], tdict["toys"][tflabel], o1, nTF
+                        tdict["toys"][tlabel], tdict["toys"][tflabel], o1, nTF, num_bins=num_bins
                     )
                     tdict["fdata"][tflabel] = float(
                         F_statistic(
@@ -287,6 +318,7 @@ def main() -> None:
                             np.array([tdict["data"][tflabel]]),
                             o1,
                             nTF,
+                            num_bins=num_bins,
                         )[0]
                     )
 
@@ -322,7 +354,7 @@ def main() -> None:
                 plot_dir,
                 sig_label,
                 title=f"F-test, order {o1} vs. {ord1}",
-                xlim=100,
+                xlim=10,
                 channel=channel,
             )
 
@@ -343,7 +375,7 @@ def main() -> None:
 
     if save_json and results_summary:
         if len(combos) > 1:
-            json_dir = repo_root / f"plots/FTests/{args.cards_tag}_all_sr_ch"
+            json_dir = repo_root / f"plots/FTests/{plot_tag}_{'vr' if args.vr else 'all_sr_ch'}"
         else:
             json_dir = plot_dir  # same dir as plots for single combo
         json_path = json_dir / "ftest_results.json"
