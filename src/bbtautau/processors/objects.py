@@ -6,6 +6,8 @@ Author(s): Cristina Suarez, Raghav Kansal
 
 from __future__ import annotations
 
+from functools import wraps
+
 import awkward as ak
 import numpy as np
 # added v15
@@ -21,6 +23,59 @@ from coffea.nanoevents.methods.nanoaod import (
 )
 
 from bbtautau.HLTs import HLTs
+
+
+def _is_systematic_collection(obj):
+    """Return True for a {"": nominal, "Shift_up/down": varied} collection."""
+    return isinstance(obj, dict) and "" in obj
+
+
+def propagate_systematics(func):
+    """
+    Propagate object-level kinematic variations through a derived-variable function.
+
+    Systematic-aware inputs use the form
+        {"": nominal, "SomeShift_up": varied_up, "SomeShift_down": varied_down}.
+
+    Each nuisance is evaluated independently: inputs carrying the same shift move
+    together, while all other inputs fall back to nominal. No Cartesian products
+    of independent nuisances are produced.
+    """
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        syst_inputs = [
+            obj
+            for obj in (*args, *kwargs.values())
+            if _is_systematic_collection(obj)
+        ]
+
+        # Preserve the old call/return behaviour when ordinary collections are used.
+        if not syst_inputs:
+            return func(*args, **kwargs)
+
+        shifts = {
+            shift
+            for obj in syst_inputs
+            for shift in obj
+            if shift != ""
+        }
+
+        outputs = {}
+        for shift in [""] + sorted(shifts):
+            shifted_args = [
+                obj.get(shift, obj[""]) if _is_systematic_collection(obj) else obj
+                for obj in args
+            ]
+            shifted_kwargs = {
+                key: (obj.get(shift, obj[""]) if _is_systematic_collection(obj) else obj)
+                for key, obj in kwargs.items()
+            }
+            outputs[shift] = func(*shifted_args, **shifted_kwargs)
+
+        return outputs
+
+    return wrapper
 
 
 def trig_match_sel(events, leptons, trig_leptons, year, trigger, filterbit, ptcut, trig_dR=0.2):
@@ -708,6 +763,7 @@ def vector_subtraction(a_pt, a_eta, a_phi, a_mass, b_pt, b_eta, b_phi, b_mass):
     return result_pt, result_eta, result_phi, result_mass
 
 
+@propagate_systematics
 def get_CA_MASS(
     fatjets: FatJetArray,
     taus: TauArray,
@@ -716,6 +772,11 @@ def get_CA_MASS(
     muons: MuonArray,
     electrons: ElectronArray,
 ):
+
+    # Create a new Awkward Array wrapper without changing any values.
+    # get_CA_MASS adds CA_* fields below, so each systematic evaluation
+    # needs its own FatJet object to avoid sharing/overwriting CA fields.
+    fatjets = ak.with_field(fatjets, fatjets.pt, "pt")
 
     init_fields = {
         "CA_tau_number": (0, int),

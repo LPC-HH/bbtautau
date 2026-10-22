@@ -20,6 +20,7 @@ from bbtautau import bbtautau_utils
 def get_processor(
     processor: str,
     save_systematics: bool | None = None,
+    save_kinematic_systematics: bool | None = None,
     region: str | None = None,
     nano_version: str | None = None,
     fatjet_pt_cut: float | None = None,
@@ -33,6 +34,7 @@ def get_processor(
         return bbtautauSkimmer(
             xsecs=xsecs,
             save_systematics=save_systematics,
+            save_kinematic_systematics=save_kinematic_systematics,
             region=region,
             nano_version=nano_version,
             fatjet_pt_cut=fatjet_pt_cut,
@@ -45,6 +47,7 @@ def main(args):
     p = get_processor(
         args.processor,
         args.save_systematics,
+        args.save_kinematic_systematics,
         args.region,
         args.nano_version,
         args.fatjet_pt_cut,
@@ -113,6 +116,11 @@ if __name__ == "__main__":
     run_utils.parse_common_run_args(parser)
     run_utils.parse_common_hh_args(parser)
     bbtautau_utils.parse_common_run_args(parser)
+    parser.add_argument(
+        "--save-kinematic-systematics",
+        action="store_true",
+        help="Save and propagate kinematic systematic variations (lepton/tau scale and resolution, JES/JER) through object selection, derived variables, and shifted SF matching.",
+    )
     args = parser.parse_args()
 
     if isinstance(args.year, list):

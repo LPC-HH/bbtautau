@@ -61,6 +61,96 @@ logger.setLevel(logging.INFO)
 package_path = str(pathlib.Path(__file__).parent.parent.resolve())
 
 
+def build_object_variations(corrected_objects, shifted_vars, selection_func, nominal_selected):
+    """
+    Build selected object collections for all kinematic variations.
+
+    The correction helpers already return
+        {field: {"": nominal, "Shift_up/down": varied}}.
+    This function converts that into
+        {"": nominal_selected, "Shift_up/down": shifted_selected},
+    re-running the normal good-object selection for every variation.
+
+    Any temporary fields already attached to corrected_objects (notably rawIdx) are
+    preserved when pt/mass are replaced, so shifted selected objects still map back
+    to the correct raw NanoAOD objects for SF evaluation.
+    """
+    variations = {"": nominal_selected}
+
+    if not shifted_vars:
+        return variations
+
+    shifts = {
+        shift
+        for field_variations in shifted_vars.values()
+        for shift in field_variations
+        if shift != ""
+    }
+
+    for shift in sorted(shifts):
+        shifted_objects = corrected_objects
+
+        # A single nuisance may shift several fields together (e.g. Tau pt and mass).
+        for field, field_variations in shifted_vars.items():
+            if shift in field_variations:
+                shifted_objects = ak.with_field(
+                    shifted_objects, field_variations[shift], field
+                )
+
+        variations[shift] = selection_func(shifted_objects)
+
+    return variations
+
+
+def _met_from_pt_phi(met, pt, phi):
+    """Return a MET record with only pt/phi replaced."""
+    shifted_met = ak.with_field(met, pt, "pt")
+    shifted_met = ak.with_field(shifted_met, phi, "phi")
+    return shifted_met
+
+
+def build_met_recoil_variations(met, nominal_objects, shifted_vars):
+    """
+    Propagate object-level pT variations to MET through transverse recoil.
+
+    MET_shift = MET_nominal - (pT_shifted - pT_nominal), evaluated in x/y.
+    The object collection is the full corrected collection before analysis selection,
+    so migration across good-object cuts does not create/discard recoil by construction.
+    """
+    variations = {}
+
+    if not shifted_vars or "pt" not in shifted_vars:
+        return variations
+
+    nominal_pt = nominal_objects.pt
+    nominal_phi = nominal_objects.phi
+    nominal_px = nominal_pt * np.cos(nominal_phi)
+    nominal_py = nominal_pt * np.sin(nominal_phi)
+
+    met_px = met.pt * np.cos(met.phi)
+    met_py = met.pt * np.sin(met.phi)
+
+    for shift, shifted_pt in shifted_vars["pt"].items():
+        if shift == "":
+            continue
+
+        shifted_phi = shifted_vars.get("phi", {}).get(shift, nominal_phi)
+        shifted_px = shifted_pt * np.cos(shifted_phi)
+        shifted_py = shifted_pt * np.sin(shifted_phi)
+
+        delta_px = ak.sum(shifted_px - nominal_px, axis=1)
+        delta_py = ak.sum(shifted_py - nominal_py, axis=1)
+
+        shifted_met_px = met_px - delta_px
+        shifted_met_py = met_py - delta_py
+        shifted_met_pt = np.sqrt(shifted_met_px**2 + shifted_met_py**2)
+        shifted_met_phi = np.arctan2(shifted_met_py, shifted_met_px)
+
+        variations[shift] = _met_from_pt_phi(met, shifted_met_pt, shifted_met_phi)
+
+    return variations
+
+
 class bbtautauSkimmer(SkimmerABC):
     """
     Skims nanoaod files, saving selected branches and events passing preselection cuts
@@ -169,6 +259,7 @@ class bbtautauSkimmer(SkimmerABC):
         self,
         xsecs: dict = None,
         save_systematics: bool = False,
+        save_kinematic_systematics: bool = False,
         region: str = "signal",
         nano_version: str = "v12_private",
         fatjet_pt_cut: float = None,
@@ -182,7 +273,11 @@ class bbtautauSkimmer(SkimmerABC):
         # HLT selection
         self.HLTs = {"signal": HLTs.hlt_list(hlt_prefix=False)}
         self.HLTs = self.HLTs[region]
+        # Weight/SF nuisance variations (e.g. SF up/down, weight modifiers).
         self._systematics = save_systematics
+        # Kinematic shape propagation (Electron/Muon/Tau/JES/JER shifts).
+        # Kept independent from self._systematics on purpose.
+        self._kinematic_systematics = save_kinematic_systematics
         self._nano_version = nano_version
         self._region = region
         self._accumulator = processor.dict_accumulator({})
@@ -316,92 +411,106 @@ class bbtautauSkimmer(SkimmerABC):
 
         # CA variables
         ca_vars = [
-            "tau_number",
+
+            # last version
+
             "tau_number_in_fatjet",
-            "globalParT_massVisApplied_oneHPSTau",
-            "globalParT_massVisApplied_oneHPSTau_thth",
-            "globalParT_massVisApplied_oneHPSTauorMuon_thtm",
-            "globalParT_massVisApplied_oneHPSTauorElectron_thte",
-            "globalParT_massVisApplied_with_delta_axis_merged",
-            "globalParT_massVisApplied_oneHPSTauorLepton_flag",
-            "globalParT_massVisApplied_000_fatjetwithMET",
-            "globalParT_massVisApplied_000_fatjet",
-            "globalParT_massVisApplied_000_fatjet_MET_with_same_dirc",
-            "mass_merged",
-            "msoftdrop_merged",
-            "globalParT_massVisApplied_merged",
-            "globalParT_massResApplied_merged",
-            "particleNet_mass_legacy_merged",
-            "Tauflag",
             "one_elec_in_fatjet",
             "one_muon_in_fatjet",
-            "one_elec",
-            "one_muon",
-            "mass_fatjet_et",
-            "mass_fatjet_mt",
-            "isDauTau",
-            "mass",
-            "msoftdrop",
-            "globalParT_massVisApplied",
-            "globalParT_massResApplied",
-            "particleNet_mass_legacy",
-            "dau0_pt",
-            "dau1_pt",
-            "dau0_eta",
-            "dau1_eta",
-            "dau0_phi",
-            "dau1_phi",
-            "dau0_mass",
-            "dau1_mass",
-            "ntaus_perfatjets",
-            "mass_subjets",
-            "mass_boostedtaus",
-            "nsubjets_perfatjets",
-            "mass_fatjets",
-            "mass_mt",
-            "msoftdrop_mt",
-            "globalParT_massVisApplied_mt",
-            "globalParT_massResApplied_mt",
-            "particleNet_mass_legacy_mt",
-            "isDauTau_mt",
-            "dau0_pt_mt",
-            "dau1_pt_mt",
-            "dau0_eta_mt",
-            "dau1_eta_mt",
-            "dau0_phi_mt",
-            "dau1_phi_mt",
-            "dau0_mass_mt",
-            "dau1_mass_mt",
-            "ntaus_perfatjets_mt",
-            "mass_subjets_mt",
-            "mass_boostedtaus_mt",
-            "nsubjets_perfatjets_mt",
-            "mass_subjets_mt_01",
-            "muon_subjet_dr02",
-            "mass_subjets_mt_1",
-            "mass_subjets_mt_0",
-            "mass_et",
-            "msoftdrop_et",
-            "globalParT_massVisApplied_et",
-            "globalParT_massResApplied_et",
-            "particleNet_mass_legacy_et",
-            "isDauTau_et",
-            "dau0_pt_et",
-            "dau1_pt_et",
-            "dau0_eta_et",
-            "dau1_eta_et",
-            "dau0_phi_et",
-            "dau1_phi_et",
-            "dau0_mass_et",
-            "dau1_mass_et",
-            "ntaus_perfatjets_et",
-            "mass_subjets_et",
-            "mass_boostedtaus_et",
-            "nsubjets_perfatjets_et",
-            "mass_subjets_et_01",
-            "elec_subjet_dr02",
-            "mass_subjets_et_1",
-            "mass_subjets_et_0",
+            "globalParT_massVisApplied_with_delta_axis_merged", # latest type of CA mass
+            "globalParT_massVisApplied_oneHPSTauorLepton_flag",
+
+            # "tau_number",
+            
+            # "globalParT_massVisApplied_oneHPSTau",
+            # "globalParT_massVisApplied_oneHPSTau_thth",
+            # "globalParT_massVisApplied_oneHPSTauorMuon_thtm",
+            # "globalParT_massVisApplied_oneHPSTauorElectron_thte",
+
+            # "globalParT_massVisApplied_000_fatjetwithMET",
+            # "globalParT_massVisApplied_000_fatjet",
+            # "globalParT_massVisApplied_000_fatjet_MET_with_same_dirc",
+
+            # old version
+
+            # "mass_merged",
+            # "msoftdrop_merged",
+            # "globalParT_massVisApplied_merged",
+            # "globalParT_massResApplied_merged",
+            # "particleNet_mass_legacy_merged",
+            # "Tauflag",
+
+            # "one_elec",
+            # "one_muon",
+
+            # "mass_fatjet_et",
+            # "mass_fatjet_mt",
+
+            # "isDauTau",
+            # "mass",
+            # "msoftdrop",
+            # "globalParT_massVisApplied",
+            # "globalParT_massResApplied",
+            # "particleNet_mass_legacy",
+            # "dau0_pt",
+            # "dau1_pt",
+            # "dau0_eta",
+            # "dau1_eta",
+            # "dau0_phi",
+            # "dau1_phi",
+            # "dau0_mass",
+            # "dau1_mass",
+            # "ntaus_perfatjets",
+            # "mass_subjets",
+            # "mass_boostedtaus",
+            # "nsubjets_perfatjets",
+            # "mass_fatjets",
+
+            # "mass_mt",
+            # "msoftdrop_mt",
+            # "globalParT_massVisApplied_mt",
+            # "globalParT_massResApplied_mt",
+            # "particleNet_mass_legacy_mt",
+            # "isDauTau_mt",
+            # "dau0_pt_mt",
+            # "dau1_pt_mt",
+            # "dau0_eta_mt",
+            # "dau1_eta_mt",
+            # "dau0_phi_mt",
+            # "dau1_phi_mt",
+            # "dau0_mass_mt",
+            # "dau1_mass_mt",
+            # "ntaus_perfatjets_mt",
+            # "mass_subjets_mt",
+            # "mass_boostedtaus_mt",
+            # "nsubjets_perfatjets_mt",
+            # "mass_subjets_mt_01",
+            # "muon_subjet_dr02",
+            # "mass_subjets_mt_1",
+            # "mass_subjets_mt_0",
+
+            # "mass_et",
+            # "msoftdrop_et",
+            # "globalParT_massVisApplied_et",
+            # "globalParT_massResApplied_et",
+            # "particleNet_mass_legacy_et",
+            # "isDauTau_et",
+            # "dau0_pt_et",
+            # "dau1_pt_et",
+            # "dau0_eta_et",
+            # "dau1_eta_et",
+            # "dau0_phi_et",
+            # "dau1_phi_et",
+            # "dau0_mass_et",
+            # "dau1_mass_et",
+            # "ntaus_perfatjets_et",
+            # "mass_subjets_et",
+            # "mass_boostedtaus_et",
+            # "nsubjets_perfatjets_et",
+            # "mass_subjets_et_01",
+            # "elec_subjet_dr02",
+            # "mass_subjets_et_1",
+            # "mass_subjets_et_0",
         ]
 
         self.skim_vars["FatJet"] = {
@@ -414,7 +523,7 @@ class bbtautauSkimmer(SkimmerABC):
             self.fatjet_selection["pt"] = fatjet_pt_cut
 
         logger.info(
-            f"Running skimmer with:\nsystematics {self._systematics}\nregion {self._region}\nfatjet pt cut {self.fatjet_selection['pt']}"
+            f"Running skimmer with:\nsystematics {self._systematics}\nkinematic systematics {self._kinematic_systematics}\nregion {self._region}\nfatjet pt cut {self.fatjet_selection['pt']}"
         )
 
     @property
@@ -473,8 +582,24 @@ class bbtautauSkimmer(SkimmerABC):
         electrons, etrigvars = objects.good_electrons(events, electrons_corr, year)
         electrons_raw_for_sf = events.Electron[electrons.rawIdx]
 
-        # TODO: electron_shifted_vars contains ElectronScale/Smear up/down variations.
-        # They are computed here but not propagated to the selected electrons, CA mass, MET, or skim output yet.
+        # Build shifted selected electrons once; rawIdx is preserved in every branch.
+        electrons_syst = {"": electrons}
+        # Also keep the full corrected collection for downstream overlap cleaning
+        # (VBF / AK4-away use much lower lepton-pT thresholds than good_electrons).
+        electrons_corr_syst = {"": electrons_corr}
+        if self._kinematic_systematics and not isData:
+            electrons_syst = build_object_variations(
+                electrons_corr,
+                electron_shifted_vars,
+                lambda shifted: objects.good_electrons(events, shifted, year)[0],
+                electrons,
+            )
+            electrons_corr_syst = build_object_variations(
+                electrons_corr,
+                electron_shifted_vars,
+                lambda shifted: shifted,
+                electrons_corr,
+            )
 
         electron_reco_vars = {}
         electron_id_vars = {}
@@ -523,6 +648,35 @@ class bbtautauSkimmer(SkimmerABC):
                         "ElectronTrigEle30SFDown": pad_val(electron_trigger_sfs["down"], num_leptons, 1.0, axis=1),
                     }
                 )
+
+            # Kinematic shifts can change which corrected electrons pass good_electrons().
+            # Re-evaluate the nominal SFs on the raw NanoAOD objects selected by each
+            # shifted collection. rawIdx guarantees object identity even when multiplicity changes.
+            if self._kinematic_systematics:
+                for shift, shifted_electrons in electrons_syst.items():
+                    if shift == "":
+                        continue
+
+                    shifted_raw = events.Electron[shifted_electrons.rawIdx]
+                    shifted_reco_sfs = get_electron_reco_sfs(shifted_raw, year)
+                    shifted_id_sfs = get_electron_id_sfs(shifted_raw, year)
+                    shifted_trigger_sfs = get_electron_trigger_sfs(shifted_raw, year)
+
+                    electron_reco_vars[f"ElectronRecoSF_{shift}"] = pad_val(
+                        shifted_reco_sfs["nom"], num_leptons, 1.0, axis=1
+                    )
+                    electron_reco_vars[f"ElectronRecoEventSF_{shift}"] = ak.to_numpy(
+                        ak.prod(shifted_reco_sfs["nom"], axis=1)
+                    )
+                    electron_id_vars[f"ElectronWP90NoIsoSF_{shift}"] = pad_val(
+                        shifted_id_sfs["nom"], num_leptons, 1.0, axis=1
+                    )
+                    electron_id_vars[f"ElectronWP90NoIsoEventSF_{shift}"] = ak.to_numpy(
+                        ak.prod(shifted_id_sfs["nom"], axis=1)
+                    )
+                    electron_trigger_vars[f"ElectronTrigEle30SF_{shift}"] = pad_val(
+                        shifted_trigger_sfs["nom"], num_leptons, 1.0, axis=1
+                    )
 
         # ============================================================
         # Electron correction checks
@@ -604,8 +758,23 @@ class bbtautauSkimmer(SkimmerABC):
         muons, mtrigvars = objects.good_muons(events, muons_corr, year)
         muons_raw_for_sf = events.Muon[muons.rawIdx]
 
-        # TODO: muon_shifted_vars contains MuonScale/Reso up/down variations.
-        # They are computed here but not propagated to the selected muons, CA mass, MET, or skim output yet.
+        # Build shifted selected muons once; rawIdx is preserved in every branch.
+        muons_syst = {"": muons}
+        # Full corrected collection for downstream overlap cleaning.
+        muons_corr_syst = {"": muons_corr}
+        if self._kinematic_systematics and not isData:
+            muons_syst = build_object_variations(
+                muons_corr,
+                muon_shifted_vars,
+                lambda shifted: objects.good_muons(events, shifted, year)[0],
+                muons,
+            )
+            muons_corr_syst = build_object_variations(
+                muons_corr,
+                muon_shifted_vars,
+                lambda shifted: shifted,
+                muons_corr,
+            )
 
         muon_id_vars = {}
         muon_trigger_vars = {}
@@ -633,6 +802,28 @@ class bbtautauSkimmer(SkimmerABC):
                 if self._systematics:
                     muon_trigger_vars[f"MuonTrig_{trigger}Up"] = pad_val(sf["up"], num_leptons, 1.0, axis=1)
                     muon_trigger_vars[f"MuonTrig_{trigger}Down"] = pad_val(sf["down"], num_leptons, 1.0, axis=1)
+
+            # Re-evaluate nominal muon SFs for each kinematic selection migration.
+            if self._kinematic_systematics:
+                for shift, shifted_muons in muons_syst.items():
+                    if shift == "":
+                        continue
+
+                    shifted_raw = events.Muon[shifted_muons.rawIdx]
+                    shifted_id_sfs = get_muon_id_sfs(shifted_raw, year)
+                    shifted_trigger_sfs = get_muon_trigger_sfs(shifted_raw, year)
+
+                    muon_id_vars[f"MuonTightIDSF_{shift}"] = pad_val(
+                        shifted_id_sfs["nom"], num_leptons, 1.0, axis=1
+                    )
+                    muon_id_vars[f"MuonTightIDEventSF_{shift}"] = ak.to_numpy(
+                        ak.prod(shifted_id_sfs["nom"], axis=1)
+                    )
+
+                    for trigger, sf in shifted_trigger_sfs.items():
+                        muon_trigger_vars[f"MuonTrig_{trigger}_{shift}"] = pad_val(
+                            sf["nom"], num_leptons, 1.0, axis=1
+                        )
         
         # ============================================================
         # Muon correction checks
@@ -737,8 +928,15 @@ class bbtautauSkimmer(SkimmerABC):
         taus, ttrigvars = objects.good_taus(events, taus_corrected, year)
         taus_raw_for_sf = events.Tau[taus.rawIdx]
 
-        # TODO: tes_shifted_vars contains Tau TES up/down variations.
-        # They are computed here but not propagated to the selected taus, CA mass, MET, or skim output yet.
+        # Build shifted selected taus once; TES pt/mass move together and rawIdx is preserved.
+        taus_syst = {"": taus}
+        if self._kinematic_systematics and not isData:
+            taus_syst = build_object_variations(
+                taus_corrected,
+                tes_shifted_vars,
+                lambda shifted: objects.good_taus(events, shifted, year)[0],
+                taus,
+            )
 
         # print(f"\n========== Tau check: {year} ==========")
 
@@ -828,6 +1026,37 @@ class bbtautauSkimmer(SkimmerABC):
                     tauTriggerVars[f"TauTrig{name}SFUp"] = pad_val(trig_sf["up"], num_leptons, 1.0, axis=1)
                     tauTriggerVars[f"TauTrig{name}SFDown"] = pad_val(trig_sf["down"], num_leptons, 1.0, axis=1)
 
+            # Re-evaluate nominal Tau ID/trigger SFs for TES-driven selection migration.
+            if self._kinematic_systematics:
+                for shift, shifted_taus in taus_syst.items():
+                    if shift == "":
+                        continue
+
+                    shifted_raw = events.Tau[shifted_taus.rawIdx]
+                    shifted_vsjet_sf = get_tau_vsjet_sf(shifted_raw, year)
+
+                    tauSFVars[f"TauVSjetSF_{shift}"] = pad_val(
+                        shifted_vsjet_sf["nom"], num_leptons, 1.0, axis=1
+                    )
+                    tauSFVars[f"TauVSjetSFEvent_{shift}"] = ak.to_numpy(
+                        ak.prod(shifted_vsjet_sf["nom"], axis=1)
+                    )
+
+                    for trigtype in tau_trig_types:
+                        shifted_trig_sf = get_tau_trigger_sf(shifted_raw, year, trigtype)
+                        name = {
+                            "ditau": "DiTau",
+                            "etau": "ETau",
+                            "mutau": "MuTau",
+                            "ditaujet": "DiTauJet",
+                            "vbftau": "VBFTau",
+                            "vbfditau": "VBFDiTau",
+                            "vbfsingletau": "VBFSingleTau",
+                        }[trigtype]
+                        tauTriggerVars[f"TauTrig{name}SF_{shift}"] = pad_val(
+                            shifted_trig_sf["nom"], num_leptons, 1.0, axis=1
+                        )
+
         # taus, ttrigvars = objects.good_taus(events, events.Tau, year)
 
         boostedtaus = objects.good_boostedtaus(events, events.boostedTau)
@@ -843,14 +1072,6 @@ class bbtautauSkimmer(SkimmerABC):
 
         print("Leptons", f"{time.time() - start:.2f}")
 
-        if self._systematics and not isData:
-            # TODO: lepton/TES kinematic variations tes_shifted_vars are intentionally not written here yet.
-            # The nominal-corrected collections above are already used by object selection,
-            # CA mass, and saved nominal kinematics. The corresponding up/down branches
-            # should be added only after a consistent policy for shifted selection, MET,
-            # and CA-mass propagation is fixed.
-            pass
-
         # AK4 Jets
         num_ak4_jets = 4
         jets, jec_shifted_jetvars = JEC_loader.get_jec_jets(
@@ -858,15 +1079,16 @@ class bbtautauSkimmer(SkimmerABC):
             events.Jet,
             year,
             isData,
-            jecs=utils.jecs if self._systematics and not isData else None,
+            jecs=utils.jecs if self._kinematic_systematics and not isData else None,
             fatjets=False,
             applyData=True,
             dataset=dataset,
             nano_version=self._nano_version,
         )
 
-        # TODO: jec_shifted_jetvars contains AK4 JES/JER up/down variations when save_systematics=True.
-        # They are computed by the JEC/JER helper but not propagated to selections, derived variables, or skim output yet.
+        # jec_shifted_jetvars contains AK4 JES/JER up/down variations when
+        # save_kinematic_systematics=True. They are propagated below through
+        # good_ak4jets and then into AK4/VBF/AK4-away kinematics.
 
         # # ============================================================
         # # AK4 correction checks
@@ -879,24 +1101,73 @@ class bbtautauSkimmer(SkimmerABC):
         # print("AK4 JER up pt:", ak.to_list(jec_shifted_jetvars["pt"]["JER_up"][:2, :4]))
 
 
-        # For NanoAOD v15, use PFMET directly.
-        # The current CorrectedMETFactory expects MetUnclustEnUpDeltaX/Y branches, which are not available in PFMET.
-        # MET/JEC systematic propagation to CA mass is left as a future TODO.
-        if JEC_loader.met_factory is not None:
-            if self._nano_version == "v15":
-                # met = JEC_loader.met_factory.build(events.PFMET, jets, {}) if isData else events.PFMET
-                met = events.PFMET
-            else:
-                met = JEC_loader.met_factory.build(events.MET, jets, {}) if isData else events.MET
+        jets_corr = jets
+
+        # MET
+        # NanoAOD v15: use PUPPI MET as the nominal MET definition.
+        # For kinematic nuisances, propagate the object pT changes through the
+        # transverse recoil and add the native PUPPI unclustered-energy variation.
+        if self._nano_version == "v15":
+            met = events.PuppiMET
+        elif JEC_loader.met_factory is not None:
+            met = JEC_loader.met_factory.build(events.MET, jets_corr, {}) if isData else events.MET
         else:
+            met = events.MET
+
+        met_syst = {"": met}
+        if self._kinematic_systematics and not isData:
+            # Lepton/tau energy-scale and resolution variations.
+            # Each helper returns only its own shift names, so update() keeps
+            # the one-nuisance-at-a-time convention used everywhere else.
+            met_syst.update(
+                build_met_recoil_variations(met, electrons_corr, electron_shifted_vars)
+            )
+            met_syst.update(
+                build_met_recoil_variations(met, muons_corr, muon_shifted_vars)
+            )
+            met_syst.update(
+                build_met_recoil_variations(met, taus_corrected, tes_shifted_vars)
+            )
+            met_syst.update(
+                build_met_recoil_variations(met, jets_corr, jec_shifted_jetvars)
+            )
+
+            # NanoAOD PUPPI MET stores the unclustered-energy Up/Down directly.
             if self._nano_version == "v15":
-                met = events.PFMET
-            else:
-                met = events.MET
+                met_fields = set(ak.fields(met))
+                required_uncl = {
+                    "ptUnclusteredUp",
+                    "phiUnclusteredUp",
+                    "ptUnclusteredDown",
+                    "phiUnclusteredDown",
+                }
+                if required_uncl.issubset(met_fields):
+                    met_syst["UnclusteredEnergy_up"] = _met_from_pt_phi(
+                        met, met.ptUnclusteredUp, met.phiUnclusteredUp
+                    )
+                    met_syst["UnclusteredEnergy_down"] = _met_from_pt_phi(
+                        met, met.ptUnclusteredDown, met.phiUnclusteredDown
+                    )
+                else:
+                    logger.warning(
+                        "PuppiMET unclustered-energy branches are missing; "
+                        "UnclusteredEnergy_up/down will not be saved."
+                    )
 
         print("ak4 JECs", f"{time.time() - start:.2f}")
+        jets = objects.good_ak4jets(jets_corr, nano_version=self._nano_version)
 
-        jets = objects.good_ak4jets(jets, nano_version=self._nano_version)
+        jets_syst = {"": jets}
+        if self._kinematic_systematics and not isData:
+            jets_syst = build_object_variations(
+                jets_corr,
+                jec_shifted_jetvars,
+                lambda shifted: objects.good_ak4jets(
+                    shifted, nano_version=self._nano_version
+                ),
+                jets,
+            )
+
         ht = ak.sum(jets.pt, axis=1)
         print("ak4", f"{time.time() - start:.2f}")
 
@@ -929,15 +1200,16 @@ class bbtautauSkimmer(SkimmerABC):
             fatjets,
             year,
             isData,
-            jecs=utils.jecs if self._systematics and not isData else None,
+            jecs=utils.jecs if self._kinematic_systematics and not isData else None,
             fatjets=True,
             applyData=True,
             dataset=dataset,
             nano_version=self._nano_version,
         )
+        fatjets_corr = fatjets
 
-        # TODO: jec_shifted_fatjetvars contains AK8 JES/JER up/down variations when save_systematics=True.
-        # They are computed by the JEC/JER helper but not propagated to selections, CA mass, or skim output yet.
+        # AK8 JES/JER variations are propagated below through the same good_ak8jets
+        # selection and then automatically through get_CA_MASS.
 
         # # ============================================================
         # # AK8 correction checks
@@ -949,8 +1221,19 @@ class bbtautauSkimmer(SkimmerABC):
         print("ak8 JECs", f"{time.time() - start:.2f}")
 
         fatjets = objects.good_ak8jets(
-            fatjets, **self.fatjet_selection, nano_version=self._nano_version
+            fatjets_corr, **self.fatjet_selection, nano_version=self._nano_version
         )
+
+        fatjets_syst = {"": fatjets}
+        if self._kinematic_systematics and not isData:
+            fatjets_syst = build_object_variations(
+                fatjets_corr,
+                jec_shifted_fatjetvars,
+                lambda shifted: objects.good_ak8jets(
+                    shifted, **self.fatjet_selection, nano_version=self._nano_version
+                ),
+                fatjets,
+            )
 
         # VBF objects
         vbf_jets = objects.vbf_jets(
@@ -975,6 +1258,47 @@ class bbtautauSkimmer(SkimmerABC):
             sort_by="nearest",
         )
 
+        # Propagate every relevant kinematic shift through VBF and AK4-away
+        # selections. For a nuisance that does not affect one input collection,
+        # that input falls back to nominal (same one-nuisance-at-a-time rule as CA).
+        vbf_jets_syst = {"": vbf_jets}
+        ak4_jets_awayfromak8_syst = {"": ak4_jets_awayfromak8}
+        if self._kinematic_systematics and not isData:
+            downstream_shifts = (
+                set(jets_syst)
+                | set(fatjets_syst)
+                | set(electrons_corr_syst)
+                | set(muons_corr_syst)
+            )
+            downstream_shifts.discard("")
+
+            for shift in sorted(downstream_shifts):
+                shifted_jets = jets_syst.get(shift, jets_syst[""])
+                shifted_fatjets = fatjets_syst.get(shift, fatjets_syst[""])
+                shifted_electrons = electrons_corr_syst.get(shift, electrons_corr_syst[""])
+                shifted_muons = muons_corr_syst.get(shift, muons_corr_syst[""])
+
+                vbf_jets_syst[shift] = objects.vbf_jets(
+                    shifted_jets,
+                    shifted_fatjets[:, :2],
+                    events,
+                    **self.vbf_jet_selection,
+                    **self.vbf_veto_lepton_selection,
+                    electrons=shifted_electrons,
+                    muons=shifted_muons,
+                )
+
+                ak4_jets_awayfromak8_syst[shift] = objects.ak4_jets_awayfromak8(
+                    shifted_jets,
+                    shifted_fatjets[:, :2],
+                    events,
+                    **self.ak4_bjet_selection,
+                    **self.ak4_bjet_lepton_selection,
+                    electrons=shifted_electrons,
+                    muons=shifted_muons,
+                    sort_by="nearest",
+                )
+
         # # JMSR
         # # TODO: add variations per variable
         # bb_jmsr_shifted_vars = get_jmsr(
@@ -987,7 +1311,14 @@ class bbtautauSkimmer(SkimmerABC):
         # )
 
         # fatjets = objects.get_CA_MASS(fatjets, boostedtaus, met, subjets, muons, electrons)
-        fatjets = objects.get_CA_MASS(fatjets, taus, met, subjets, muons, electrons)
+        if self._kinematic_systematics and not isData:
+            fatjets_all = objects.get_CA_MASS(
+                fatjets_syst, taus_syst, met_syst, subjets, muons_syst, electrons_syst
+            )
+            fatjets = fatjets_all[""]
+        else:
+            fatjets = objects.get_CA_MASS(fatjets, taus, met, subjets, muons, electrons)
+            fatjets_all = {"": fatjets}
         print("CA mass", f"{time.time() - start:.2f}")
 
         #########################
@@ -1026,6 +1357,34 @@ class bbtautauSkimmer(SkimmerABC):
             f"BoostedTau{key}": pad_val(boostedtaus[var], num_leptons, axis=1)
             for (var, key) in self.skim_vars["BoostedTau"].items()
         }
+
+        # Save shifted lepton/tau four-vectors after re-running the normal object
+        # selection for each kinematic nuisance.
+        if self._kinematic_systematics and not isData:
+            for shift, shifted_electrons in electrons_syst.items():
+                if shift == "":
+                    continue
+                for var, key in P4.items():
+                    electronVars[f"Electron{key}_{shift}"] = pad_val(
+                        shifted_electrons[var], num_leptons, axis=1
+                    )
+
+            for shift, shifted_muons in muons_syst.items():
+                if shift == "":
+                    continue
+                for var, key in P4.items():
+                    muonVars[f"Muon{key}_{shift}"] = pad_val(
+                        shifted_muons[var], num_leptons, axis=1
+                    )
+
+            for shift, shifted_taus in taus_syst.items():
+                if shift == "":
+                    continue
+                for var, key in P4.items():
+                    tauVars[f"Tau{key}_{shift}"] = pad_val(
+                        shifted_taus[var], num_leptons, axis=1
+                    )
+
         # leptonVars = {**electronVars, **electron_reco_vars, **electron_id_vars, **muonVars, **muon_trigger_vars, **muon_id_vars, **tauVars, **boostedtauVars}
         leptonVars = {
             **electronVars,
@@ -1060,6 +1419,16 @@ class bbtautauSkimmer(SkimmerABC):
             for (var, key) in jet_skimvars.items()
         }
 
+        # Save AK4 JES/JER shifted four-vectors after good_ak4jets selection.
+        if self._kinematic_systematics and not isData:
+            for shift, shifted_jets in jets_syst.items():
+                if shift == "":
+                    continue
+                for var, key in P4.items():
+                    ak4JetVars[f"ak4Jet{key}_{shift}"] = pad_val(
+                        shifted_jets[var], num_ak4_jets, axis=1
+                    )
+
         if len(ak4_jets_awayfromak8) == 2:
             ak4JetAwayVars = {
                 f"AK4JetAway{key}": pad_val(
@@ -1077,6 +1446,23 @@ class bbtautauSkimmer(SkimmerABC):
                 for (var, key) in jet_skimvars.items()
             }
 
+        # Save shifted AK4-away four-vectors after re-running overlap cleaning /
+        # nearest-jet assignment for each relevant nuisance.
+        if self._kinematic_systematics and not isData:
+            for shift, shifted_away in ak4_jets_awayfromak8_syst.items():
+                if shift == "":
+                    continue
+                for var, key in P4.items():
+                    if len(shifted_away) == 2:
+                        vals = ak.concatenate(
+                            [shifted_away[0][var], shifted_away[1][var]], axis=1
+                        )
+                    else:
+                        vals = shifted_away[var]
+                    ak4JetAwayVars[f"AK4JetAway{key}_{shift}"] = pad_val(
+                        vals, 2, axis=1
+                    )
+
         # AK8 Jet variables
         fatjet_skimvars = self.skim_vars["FatJet"]
         if not isData:
@@ -1089,6 +1475,33 @@ class bbtautauSkimmer(SkimmerABC):
             f"ak8FatJet{key}": pad_val(fatjets[var], num_ak8_jets, axis=1)
             for (var, key) in fatjet_skimvars.items()
         }
+
+        # Save AK8 JES/JER shifted four-vectors after good_ak8jets selection.
+        if self._kinematic_systematics and not isData:
+            for shift, shifted_fatjets in fatjets_syst.items():
+                if shift == "":
+                    continue
+                for var, key in P4.items():
+                    ak8FatJetVars[f"ak8FatJet{key}_{shift}"] = pad_val(
+                        shifted_fatjets[var], num_ak8_jets, axis=1
+                    )
+
+        # Keep all nominal branch names unchanged. When kinematic systematics are enabled,
+        # append the derived CA_* variations produced by get_CA_MASS.
+        if self._kinematic_systematics and not isData:
+            ca_skimvars = {
+                var: key
+                for var, key in fatjet_skimvars.items()
+                if var.startswith("CA_")
+            }
+            for shift, shifted_fatjets in fatjets_all.items():
+                if shift == "":
+                    continue
+                for var, key in ca_skimvars.items():
+                    ak8FatJetVars[f"ak8FatJet{key}_{shift}"] = pad_val(
+                        shifted_fatjets[var], num_ak8_jets, axis=1
+                    )
+
         print("Jet vars", f"{time.time() - start:.2f}")
 
         # # JEC and JMSR
@@ -1118,6 +1531,12 @@ class bbtautauSkimmer(SkimmerABC):
 
         # MET
         metVars = {f"MET{key}": met[var].to_numpy() for (var, key) in self.skim_vars["MET"].items()}
+        if self._kinematic_systematics and not isData:
+            for shift, shifted_met in met_syst.items():
+                if shift == "":
+                    continue
+                metVars[f"METPt_{shift}"] = shifted_met.pt.to_numpy()
+                metVars[f"METPhi_{shift}"] = shifted_met.phi.to_numpy()
 
         # Event variables
         eventVars = {
@@ -1133,6 +1552,26 @@ class bbtautauSkimmer(SkimmerABC):
         eventVars["nJets"] = ak.num(jets).to_numpy()
         eventVars["nFatJets"] = ak.num(fatjets).to_numpy()
         eventVars["nSubJets"] = ak.num(subjets).to_numpy()
+
+        # Selection migration can change object multiplicities. Save the shifted
+        # counts (and AK4 HT) together with the shifted four-vectors.
+        if self._kinematic_systematics and not isData:
+            for shift, shifted_electrons in electrons_syst.items():
+                if shift != "":
+                    eventVars[f"nElectrons_{shift}"] = ak.num(shifted_electrons).to_numpy()
+            for shift, shifted_muons in muons_syst.items():
+                if shift != "":
+                    eventVars[f"nMuons_{shift}"] = ak.num(shifted_muons).to_numpy()
+            for shift, shifted_taus in taus_syst.items():
+                if shift != "":
+                    eventVars[f"nTaus_{shift}"] = ak.num(shifted_taus).to_numpy()
+            for shift, shifted_jets in jets_syst.items():
+                if shift != "":
+                    eventVars[f"nJets_{shift}"] = ak.num(shifted_jets).to_numpy()
+                    eventVars[f"ht_{shift}"] = ak.sum(shifted_jets.pt, axis=1).to_numpy()
+            for shift, shifted_fatjets in fatjets_syst.items():
+                if shift != "":
+                    eventVars[f"nFatJets_{shift}"] = ak.num(shifted_fatjets).to_numpy()
 
         # jin for CA
         # eventVars["CA_matched_tau_pt_sum"] = ca_tau_pt_sum.to_numpy()
@@ -1163,6 +1602,17 @@ class bbtautauSkimmer(SkimmerABC):
             f"VBFJet{key}": pad_val(vbf_jets[var], 2, axis=1)
             for (var, key) in self.skim_vars["Jet"].items()
         }
+
+        # Save shifted VBF four-vectors after re-running VBF jet selection for
+        # JES/JER and electron/muon scale-resolution shifts.
+        if self._kinematic_systematics and not isData:
+            for shift, shifted_vbf_jets in vbf_jets_syst.items():
+                if shift == "":
+                    continue
+                for var, key in P4.items():
+                    vbfJetVars[f"VBFJet{key}_{shift}"] = pad_val(
+                        shifted_vbf_jets[var], 2, axis=1
+                    )
 
         # # JEC variations for VBF Jets
         # if self._region == "signal" and isJECs:
