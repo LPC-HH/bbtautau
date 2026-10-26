@@ -307,16 +307,17 @@ def get_selection_regions(
 ):
     """
     Get the selection regions for a given signal and channel:
-    ``{"pass": SR pass, "fail": FR, "vrpass": VR pass}``
+    ``{"sr": SR pass, "cr": CR, "vr": VR}`` (keys name the physical regions; they are also the
+    template pkl keys)
     (definitions in untracked_utils/notes/control_region_plan.md, "Region definitions").
 
-    - ``pass``: bb > SR cut AND tt > SR cut [AND glopart tt > ``tt_glopart_cut``], AND NOT any
+    - ``sr``: bb > SR cut AND tt > SR cut [AND glopart tt > ``tt_glopart_cut``], AND NOT any
       region in ``vetoes`` (list of ``get_sr_veto_cuts`` dicts of SRs earlier in the ordering).
-    - ``fail`` (FR): bb < L OR glopart tt < L, L = ``userConfig.VR_LOOSE_CUTS``.
-    - ``vrpass`` (VR): bb >= L AND glopart tt >= L AND NOT any SR in ``vr_vetoes`` (the
+    - ``cr`` (CR, formerly FR): bb < L OR glopart tt < L, L = ``userConfig.VR_LOOSE_CUTS``.
+    - ``vr`` (VR): bb >= L AND glopart tt >= L AND NOT any SR in ``vr_vetoes`` (the
       ``get_sr_veto_cuts`` dicts of the SRs of this channel to exclude; default: this SR only).
 
-    "glopart tt" = ``ttFatJetParTX<channel>vsQCDTop``. FR and VR carry ``signal=False``.
+    "glopart tt" = ``ttFatJetParTX<channel>vsQCDTop``. CR and VR carry ``signal=False``.
 
     ``tt_glopart_cut``: extra fixed cut on ``ttFatJetParTX<channel>vsQCDTop``, matching
     ``SensitivityStudy.py --tt-glopart-cut``. No-op when ``use_ParT`` (the discriminant being
@@ -360,7 +361,7 @@ def get_selection_regions(
         print(
             f"WARNING: {signal} {channel.key} SR is not inside {{bb >= {loose['txbb']}, "
             f"glopart tt >= {loose['txtt']}}} (txbb cut {txbb_cut}, glopart cut "
-            f"{sr_glopart_cut}): SR pass and FR overlap."
+            f"{sr_glopart_cut}): SR and CR overlap."
         )
 
     vr_regions = build_validation_regions(
@@ -374,10 +375,10 @@ def get_selection_regions(
 
     regions = {
         # {label: {cutvar: [min, max], ...}, ...}
-        "pass": Region(
+        "sr": Region(
             cuts=pass_cuts,
             signal=True,
-            label="Pass",
+            label="SR",
         ),
         **vr_regions,
     }
@@ -417,11 +418,11 @@ def build_validation_regions(
     txtt_loose: float,
     sr_vetoes: list[dict],
 ) -> dict[str, Region]:
-    """Build the FR and VR from explicit cut values.
+    """Build the CR and VR from explicit cut values.
 
     Geometry (see notes/control_region_plan.md, "Region definitions"):
-      FR (``fail``)   = bb < txbb_loose OR glopart < txtt_loose
-      VR (``vrpass``) = bb >= txbb_loose AND glopart >= txtt_loose AND NOT any SR in
+      CR (``cr``) = bb < txbb_loose OR glopart < txtt_loose
+      VR (``vr``) = bb >= txbb_loose AND glopart >= txtt_loose AND NOT any SR in
                         ``sr_vetoes`` (each a ``get_sr_veto_cuts`` dict)
 
     ``bb_disc`` must already be the event-branch name (``bbFatJet...``, not ``ak8...``).
@@ -441,6 +442,6 @@ def build_validation_regions(
         _and_cuts(vr_cuts, veto)
 
     return {
-        "fail": Region(cuts=fail_cuts, signal=False, label="Fail"),
-        "vrpass": Region(cuts=vr_cuts, signal=False, label="Pass VR"),
+        "cr": Region(cuts=fail_cuts, signal=False, label="CR"),
+        "vr": Region(cuts=vr_cuts, signal=False, label="VR"),
     }

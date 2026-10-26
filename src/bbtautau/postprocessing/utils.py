@@ -169,7 +169,7 @@ def tt_filters(
     channel: Channel = None,
     in_filters: dict[str, list[tuple]] = None,
     num_fatjets: int = 3,
-    tt_cut: float = 0.3,
+    tt_cut: float = 0.1,
     qcd_only: bool = True,
     agnostic: bool = True,
 ):
@@ -279,9 +279,8 @@ def get_columns(
             ("ak8FatJetParTmassResApplied", 3),
             ("ak8FatJetParTmassVisApplied", 3),
             ("ak8FatJetCAglobalParT_massVisApplied_with_delta_axis_merged", 3),
-            ("ak8FatJetCAglobalParT_massVisApplied_merged", 3),
             ("ak8FatJetMsd", 3),
-            ("ak8FatJetCAglobalParT_massVisApplied", 3),
+            ("ak8FatJetCAglobalParT_massVisApplied", 3),  # old CA mass, BDT input until retraining
         ]
 
     if ParT_taggers:

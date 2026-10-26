@@ -55,7 +55,7 @@ control_plot_vars = (
     ]
     + [
         ShapeVar(
-            var=f"{jet}FatJetCAglobalParT_massVisApplied",
+            var=f"{jet}FatJetCAglobalParT_massVisApplied_with_delta_axis_merged",
             label=rf"$m^{{{jlabel}}}$ [GeV]",
             bins=[20, 50, 300],
         )
@@ -292,7 +292,7 @@ def main(args: argparse.Namespace):
             events_dict[key] = sample.copy_from_selection(keep)
 
     # A priori ggf/vbf category per event. Applied as a cut on each SR pass (Regions._get_sr_cuts),
-    # not by splitting events_dict: FR and VR are filled from all events of the channel.
+    # not by splitting events_dict: CR and VR are filled from all events of the channel.
     if args.a_priori_production_mode is not None:
         putils.assign_production_mode(
             events_dict,
@@ -304,7 +304,7 @@ def main(args: argparse.Namespace):
 
     if not args.a_priori_channels:
         print(
-            "WARNING: the validation region (vrpass) is only supported with --a-priori-channels; "
+            "WARNING: the validation region (vr) is only supported with --a-priori-channels; "
             "not filling it in this run."
         )
 
@@ -653,7 +653,7 @@ def run_control_plots(args: argparse.Namespace) -> None:
             ggf_modelname=args.ggf_modelname,
             tt_glopart_cut=args.tt_glopart_cut,
         )
-        pass_region = selection_regions["pass"]
+        pass_region = selection_regions["sr"]
         selection, _ = utils.make_selection(pass_region.cuts, events_dict)
 
         cutstr = f"sr_bmin{bmin}_"
@@ -772,28 +772,29 @@ def get_templates(
                     break
 
     # The VR excludes every SR of this channel (ggF and VBF), each with its own category cut when
-    # there is an a priori production-mode split. FR and VR are therefore the same for every
+    # there is an a priori production-mode split. CR and VR are therefore the same for every
     # signal. Without --a-priori-channels the VR is not filled (warned once in main()).
     vr_vetoes = [
         Regions.get_sr_veto_cuts(signal_iter, channel, **selection_region_kwargs)
         for signal_iter in signal_regions
     ]
 
-    # SR pass (per signal), FR (fail) and VR (vrpass). In each we will load all signal samples
+    # Template keys name the physical regions: SR pass (per signal) "sr", CR "cr" and VR "vr"
+    # (+ "<key>MCBlinded" copies). In each we will load all signal samples
     selection_regions = Regions.get_selection_regions(
         signal, channel, vetoes=vetoes, vr_vetoes=vr_vetoes, **selection_region_kwargs
     )
     if not a_priori_channels:
-        del selection_regions["vrpass"]
+        del selection_regions["vr"]
 
-    # TXbb SF: SR pass only (not in the FR, decided 2026-10-13, nor in the VR), so the FR is
+    # TXbb SF: SR pass only (not in the CR, decided 2026-10-13, nor in the VR), so the CR is
     # identical across signal subdirs.
     do_txbb_sf = apply_txbb_sf and not do_jshift
     txbb_sf_keys, txbb_variations = [], []
     if do_txbb_sf:
         bb_disc_arg = (selection_region_kwargs or {}).get("bb_disc", "ak8FatJetParTXbbvsQCDTop")
         bb_disc_col = "bb" + bb_disc_arg[len("ak8") :]
-        txbb_cut = selection_regions["pass"].cuts[bb_disc_col][0]
+        txbb_cut = selection_regions["sr"].cuts[bb_disc_col][0]
         txbb_sf_keys = [key for key in [*sig_keys, *TXBB_SF_BG_KEYS] if key in events_dict]
         txbb_variations = [
             f"txbb_{label}_{shift}"
@@ -803,8 +804,8 @@ def get_templates(
         print(f"TXbb SF at cut {txbb_cut:.4f} for {txbb_sf_keys}")
 
     for rname, region in selection_regions.items():
-        pass_region = rname.startswith("pass")
-        region_txbb_sf_keys = txbb_sf_keys if rname == "pass" else []
+        pass_region = rname == "sr"
+        region_txbb_sf_keys = txbb_sf_keys if rname == "sr" else []
 
         print(f"{rname} Region: {time.time() - start:.2f}")
 
@@ -1007,7 +1008,7 @@ def get_templates(
                     "show": show,
                     "year": year,
                     "ylim": pass_ylim if pass_region else fail_ylim,
-                    "plot_data": (not (rname == "pass" and blind_pass)) and plot_data,
+                    "plot_data": (not (rname == "sr" and blind_pass)) and plot_data,
                     "leg_args": {"fontsize": 22, "ncol": 2},
                 }
 

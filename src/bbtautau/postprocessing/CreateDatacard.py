@@ -140,8 +140,9 @@ parser.add_argument(
     default="sr",
     choices=["sr", "vr"],
     type=str,
-    help="'sr' (default): signal region cards, 'pass' + 'fail' (+ MCBlinded copies), as before. "
-    "'vr': validation region cards, 'vrpass' + 'fail', always unblinded, one model 'vr' per bmin "
+    help="'sr' (default): SR fit cards, <sig><ch>pass from template 'sr', <sig><ch>fail from "
+    "'cr' + 'vr' summed (+ MCBlinded copies). "
+    "'vr': VR fit cards, vr<ch>pass from 'vr', vr<ch>fail from 'cr', always unblinded, one model 'vr' per bmin "
     "(channels vr<ch>pass / vr<ch>fail, own TF from --nTF / --nTF-per-channel key 'vr'), "
     "no TXbb or tautau SF (error if given). Use a separate --model-name, e.g. <TAG>-vr-nTF0.",
 )
@@ -250,8 +251,9 @@ if nTF_per_channel is not None:
 
 signal_regions = ["pass"] if args.regions == "pass" else args.regions
 if VR_MODE:
-    # template key of the VR pass region; note "pass" in "vrpass" is True, so it is treated as a
-    # pass region everywhere below (signal kept, pass_only systs - none active in the VR)
+    # fit-role key of the VR pass region (from template "vr", see fit_role_templates); note
+    # "pass" in "vrpass" is True, so it is treated as a pass region everywhere below (signal
+    # kept, pass_only systs - none active in the VR)
     signal_regions = ["vrpass"]
 
 
@@ -519,6 +521,56 @@ for skey, syst in uncorr_year_shape_systs.items():
         )
 
 
+# Template pkl keys name the PHYSICAL regions ("sr", "cr", "vr", + "<key>MCBlinded"); card
+# channels name the FIT ROLES ("pass", "fail"; "vrpass" internally in the VR fit). Legacy keys
+# (templates made before 2026-10-21) are aliased to the physical ones right after loading.
+LEGACY_REGION_ALIASES = {"vrpass": "vr", "pass": "sr", "fail": "cr"}  # "vrpass" checked first
+
+
+def normalize_region_keys(templates: dict[str, Hist], templates_path: str) -> dict[str, Hist]:
+    """Rename legacy template keys (pass/fail/vrpass[...]) to physical ones (sr/cr/vr[...])."""
+    out = {}
+    for key, h in templates.items():
+        new_key = key
+        for old, new in LEGACY_REGION_ALIASES.items():
+            if key.startswith(old):
+                new_key = new + key[len(old) :]
+                break
+        if new_key in out or (new_key != key and new_key in templates):
+            raise ValueError(f"{templates_path}: both legacy and new key for region '{new_key}'")
+        out[new_key] = h
+    return out
+
+
+def fit_role_templates(templates: dict[str, Hist], templates_path: str) -> dict[str, Hist]:
+    """Map physical regions to the fit roles used below (same suffixes, e.g. MCBlinded):
+    --region sr: pass = sr, fail = cr + vr;  --region vr: vrpass = vr, fail = cr.
+    Pre-2026-10-13 templates have no VR (their 'fail' is the old SR complement): error."""
+    raw_keys = sorted(templates)
+    templates = normalize_region_keys(templates, templates_path)
+    if not any(k.startswith("vr") for k in templates):
+        raise ValueError(
+            f"{templates_path} has no VR templates ('vr'/'vrpass'; keys: {raw_keys}). "
+            "Templates made before 2026-10-13 have a 'fail' = SR complement and no VR; the "
+            f"--region {args.region} setup (SR fit: CR + VR denominator; VR fit: VR pass) needs "
+            "templates with CR and VR. Remake the templates."
+        )
+    roles = {}
+    for key, h in templates.items():
+        if key.startswith("cr"):
+            suffix = key[2:]
+            if VR_MODE:
+                roles["fail" + suffix] = h
+            else:
+                # Hist sum with weight storage: values and variances (MC stat) add
+                roles["fail" + suffix] = h + templates["vr" + suffix]
+        elif key.startswith("sr") and not VR_MODE:
+            roles["pass" + key[2:]] = h
+        elif key.startswith("vr") and VR_MODE:
+            roles["vrpass" + key[2:]] = h
+    return roles
+
+
 def get_templates(
     templates_dir: str,
     years: list[str],
@@ -532,12 +584,12 @@ def get_templates(
         # signal and background templates in same hist, just need to load and sum across years
         for year in years:
             with Path(f"{templates_dir}/{year}_templates.pkl").open("rb") as f:
-                templates_dict[year] = rem_neg(pickle.load(f))
+                templates_dict[year] = rem_neg(fit_role_templates(pickle.load(f), f.name))
     else:
         # signal and background in different hists - need to combine them into one hist
         for year in years:
             with Path(f"{templates_dir}/backgrounds/{year}_templates.pkl").open("rb") as f:
-                bg_templates = rem_neg(pickle.load(f))
+                bg_templates = rem_neg(fit_role_templates(pickle.load(f), f.name))
 
             sig_templates = []
 
@@ -545,7 +597,7 @@ def get_templates(
                 with Path(f"{templates_dir}/{hist_names[sig_key]}/{year}_templates.pkl").open(
                     "rb"
                 ) as f:
-                    sig_templates.append(rem_neg(pickle.load(f)))
+                    sig_templates.append(rem_neg(fit_role_templates(pickle.load(f), f.name)))
 
             templates_dict[year] = combine_templates(bg_templates, sig_templates)
 
@@ -1036,10 +1088,10 @@ def main(args):
             logging.warning(f"No signal region subfolders found in {analysis_name}, skipping")
             continue
         if VR_MODE:
-            # one VR model per bmin; vrpass/fail are identical in every signal subdir, the
+            # one VR model per bmin; vr/cr are identical in every signal subdir, the
             # templates are read from the first subdir (sorted) that has the channel
             sr_keys = sorted(sr_subdirs)
-            logging.info(f"VR: reading vrpass/fail templates from (first of) {sr_keys}")
+            logging.info(f"VR: reading vr/cr templates from (first of) {sr_keys}")
         elif len(sr_subdirs) == 1:
             sr_keys = sr_subdirs
             logging.info(f"Found single signal region: {sr_keys[0]}")

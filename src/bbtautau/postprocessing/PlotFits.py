@@ -162,14 +162,20 @@ def build_selection_regions(sig_region: str | None = None, region_mode: str = "s
 
     If sig_region is set (e.g. ggfbbtt, vbfbbtt), regions are {sig_region}hepass, etc.
     Otherwise legacy format: hepass, hefail, etc.
-    With region_mode="vr": vrhepass ("... VR Pass"), vrhefail ("... VR Fail").
+    With region_mode="vr": vrhepass, vrhefail.
+    Labels name the physical regions behind each fit role: SR fit pass = "SR", fail = "CR + VR";
+    VR fit pass = "VR", fail = "CR".
     """
     _check_region_mode(region_mode, sig_region)
     selection_regions = {}
     prefix = _region_prefix(sig_region, region_mode) or ""
-    rlabel = " VR" if region_mode == "vr" else ""
+    labels = (
+        {"pass": " VR", "fail": " CR"}
+        if region_mode == "vr"
+        else {"pass": " SR", "fail": " CR + VR"}
+    )
     for channel in CHANNELS.values():
-        for passfail, plabel in [("pass", f"{rlabel} Pass"), ("fail", f"{rlabel} Fail")]:
+        for passfail, plabel in labels.items():
             region = f"{prefix}{channel.key}{passfail}"
             selection_regions[region] = f"{channel.label}{plabel}"
     return selection_regions
@@ -358,9 +364,27 @@ def load_hists_from_fit(
                             try:
                                 sig_pre = get_pre_templates(Path(templates_dir) / ch / signal)
                                 if sig_pre:
-                                    pf = "pass" if "pass" in region else "fail"
+                                    # template keys: sr / cr + vr (legacy: pass / fail);
+                                    # VR fit: pass = vr, fail = cr
+                                    if "pass" in region:
+                                        if region_mode == "vr":
+                                            pre = sig_pre["vr"]
+                                        else:
+                                            pre = (
+                                                sig_pre["sr"]
+                                                if "sr" in sig_pre
+                                                else sig_pre["pass"]
+                                            )
+                                    elif "cr" in sig_pre:
+                                        pre = (
+                                            sig_pre["cr"]
+                                            if region_mode == "vr"
+                                            else sig_pre["cr"] + sig_pre["vr"]
+                                        )
+                                    else:
+                                        pre = sig_pre["fail"]
                                     idx = np.where(np.array(list(h.axes[0])) == key)[0][0]
-                                    h.view(flow=False)[idx, :] = sig_pre[pf][key + ch, ...].values()
+                                    h.view(flow=False)[idx, :] = pre[key + ch, ...].values()
                             except (FileNotFoundError, KeyError):
                                 pass
                 data_key_index = np.where(np.array(list(h.axes[0])) == data_key)[0][0]
