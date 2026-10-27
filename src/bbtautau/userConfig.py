@@ -113,10 +113,12 @@ CHANNEL_ORDERING = ["hh", "hm", "he"]  # order of applying selection and vetoes
 SIGNAL_ORDERING = ["ggfbbtt", "vbfbbtt"]  # order of applying selection and vetoes
 
 
+# Loose cut L of the CR/VR (Regions.build_validation_regions): bb, glopart tt and, in BDT mode
+# only, the channel's ggF BDT score ("bdt", added 2026-10-27).
 VR_LOOSE_CUTS: dict[str, dict[str, float]] = {
-    "hh": {"txbb": 0.4, "txtt": 0.4},
-    "hm": {"txbb": 0.4, "txtt": 0.4},
-    "he": {"txbb": 0.4, "txtt": 0.4},
+    "hh": {"txbb": 0.4, "txtt": 0.4, "bdt": 0.4},
+    "hm": {"txbb": 0.4, "txtt": 0.4, "bdt": 0.4},
+    "he": {"txbb": 0.4, "txtt": 0.4, "bdt": 0.4},
 }
 
 

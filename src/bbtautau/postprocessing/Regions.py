@@ -316,6 +316,9 @@ def get_selection_regions(
     - ``cr`` (CR, formerly FR): bb < L OR glopart tt < L, L = ``userConfig.VR_LOOSE_CUTS``.
     - ``vr`` (VR): bb >= L AND glopart tt >= L AND NOT any SR in ``vr_vetoes`` (the
       ``get_sr_veto_cuts`` dicts of the SRs of this channel to exclude; default: this SR only).
+    - BDT mode (not ``use_ParT``): both also cut on the channel's ggF BDT score (L = ``"bdt"``):
+      CR = (bb < L OR glopart tt < L OR ggF BDT < L) AND NOT any SR in ``vr_vetoes``;
+      VR adds ggF BDT >= L (see ``build_validation_regions``).
 
     "glopart tt" = ``ttFatJetParTX<channel>vsQCDTop``. CR and VR carry ``signal=False``.
 
@@ -357,20 +360,32 @@ def get_selection_regions(
     loose = VR_LOOSE_CUTS[channel.key]
     glopart_col = f"ttFatJetParTX{channel.tagger_label}vsQCDTop"
     sr_glopart_cut = pass_cuts[glopart_col][0] if glopart_col in pass_cuts else None
+    # BDT mode: the CR/VR also cut on the channel's ggF BDT score (decided 2026-10-27; the VR
+    # stays signal-agnostic, the VBF BDT is not used). ParT mode: no BDT term.
+    vr_bdt_col = None if use_ParT else _get_bdt_key("ggfbbtt", channel, prefix_only=False)
+    sr_bdt_cut = pass_cuts[vr_bdt_col][0] if vr_bdt_col in pass_cuts else None
     if txbb_cut < loose["txbb"] or sr_glopart_cut is None or sr_glopart_cut < loose["txtt"]:
         print(
             f"WARNING: {signal} {channel.key} SR is not inside {{bb >= {loose['txbb']}, "
             f"glopart tt >= {loose['txtt']}}} (txbb cut {txbb_cut}, glopart cut "
             f"{sr_glopart_cut}): SR and CR overlap."
         )
+    if sr_bdt_cut is not None and sr_bdt_cut < loose["bdt"]:
+        print(
+            f"WARNING: {signal} {channel.key} SR BDT cut {sr_bdt_cut} on {vr_bdt_col} is below "
+            f"the CR/VR loose cut {loose['bdt']}: SR and CR overlap."
+        )
 
+    sr_vetoes = [own_veto_cuts] if vr_vetoes is None else vr_vetoes
     vr_regions = build_validation_regions(
         bb_disc=bb_disc,
         glopart_col=glopart_col,
         base_cuts=base_cuts,
         txbb_loose=loose["txbb"],
         txtt_loose=loose["txtt"],
-        sr_vetoes=[own_veto_cuts] if vr_vetoes is None else vr_vetoes,
+        sr_vetoes=sr_vetoes,
+        bdt_col=vr_bdt_col,
+        bdt_loose=loose["bdt"] if vr_bdt_col is not None else None,
     )
 
     regions = {
@@ -417,6 +432,8 @@ def build_validation_regions(
     txbb_loose: float,
     txtt_loose: float,
     sr_vetoes: list[dict],
+    bdt_col: str | None = None,
+    bdt_loose: float | None = None,
 ) -> dict[str, Region]:
     """Build the CR and VR from explicit cut values.
 
@@ -425,21 +442,32 @@ def build_validation_regions(
       VR (``vr``) = bb >= txbb_loose AND glopart >= txtt_loose AND NOT any SR in
                         ``sr_vetoes`` (each a ``get_sr_veto_cuts`` dict)
 
+    With ``bdt_col`` (BDT mode: the channel's ggF BDT score) the box gains a third side:
+      CR = (bb < txbb_loose OR glopart < txtt_loose OR bdt < bdt_loose) AND NOT any SR
+      VR = bb >= txbb_loose AND glopart >= txtt_loose AND bdt >= bdt_loose AND NOT any SR
+    The CR also vetoes the SRs here because an SR cutting on another BDT (VBF) is not inside
+    {ggF BDT >= bdt_loose}; without the veto its low-ggF-BDT events would be in CR and SR.
+
     ``bb_disc`` must already be the event-branch name (``bbFatJet...``, not ``ak8...``).
     Both regions carry ``signal=False`` so they are NOT blinded in data. Taking explicit loose
     values keeps this reusable by the yield-scan tooling.
     """
-    fail_cuts = {
-        **base_cuts,
-        f"{bb_disc}+{glopart_col}": [[-CUT_MAX_VAL, txbb_loose], [-CUT_MAX_VAL, txtt_loose]],
-    }
+    cr_or_vars = [bb_disc, glopart_col]
+    cr_or_ranges = [[-CUT_MAX_VAL, txbb_loose], [-CUT_MAX_VAL, txtt_loose]]
     vr_cuts = {
         **base_cuts,
         bb_disc: [txbb_loose, CUT_MAX_VAL],
         glopart_col: [txtt_loose, CUT_MAX_VAL],
     }
+    if bdt_col is not None:
+        cr_or_vars.append(bdt_col)
+        cr_or_ranges.append([-CUT_MAX_VAL, bdt_loose])
+        vr_cuts[bdt_col] = [bdt_loose, CUT_MAX_VAL]
+    fail_cuts = {**base_cuts, "+".join(cr_or_vars): cr_or_ranges}
     for veto in sr_vetoes:
         _and_cuts(vr_cuts, veto)
+        if bdt_col is not None:
+            _and_cuts(fail_cuts, veto)
 
     return {
         "cr": Region(cuts=fail_cuts, signal=False, label="CR"),
