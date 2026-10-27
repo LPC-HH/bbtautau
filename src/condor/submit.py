@@ -11,7 +11,7 @@ from pathlib import Path
 from string import Template
 
 import yaml
-from boostedhh import run_utils, submit_utils
+from boostedhh import hh_vars, run_utils, submit_utils
 
 from bbtautau import bbtautau_utils
 
@@ -73,15 +73,22 @@ if __name__ == "__main__":
     # YAML check
     if args.yaml is not None:
         with Path(args.yaml).open() as file:
-            samples_to_submit = yaml.safe_load(file)
+            # str keys: an unquoted year (2022) would otherwise load as an int
+            samples_to_submit = {str(k): v for k, v in yaml.safe_load(file).items()}
+
+        # per-year YAML: top-level keys are years (other top-level keys, e.g. YAML anchor
+        # definitions, are ignored); old flat YAML: top-level keys are samples, used for all years
+        per_year = any(k in hh_vars.years for k in samples_to_submit)
 
         tag = args.tag
         for year in years:
             print(f"Submitting for year {year}")
-            if year in samples_to_submit:
+            if per_year:
+                if year not in samples_to_submit:
+                    raise KeyError(f"Year {year} not found in per-year YAML {args.yaml}")
                 tdict = samples_to_submit[year]
             else:
-                print(f"Year-specific settings for {year} not found in YAML; using full YAML")
+                print(f"Flat YAML (no year keys): using the full YAML for {year}")
                 tdict = samples_to_submit
 
             args.year = year
