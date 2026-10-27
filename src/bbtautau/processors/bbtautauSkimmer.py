@@ -46,7 +46,7 @@ from boostedhh.processors.utils import (
 from coffea import processor
 from coffea.analysis_tools import PackedSelection, Weights
 
-from bbtautau.HLTs import HLTs
+from bbtautau.HLTs import HLTs, years_all
 
 from . import GenSelection, objects
 
@@ -313,7 +313,7 @@ class bbtautauSkimmer(SkimmerABC):
         # menu (HLTs.MENU), not the full HLTs.HLTs catalog.
         self.HLTs = {
             year: HLTs.resolve_menu(year, list(HLTs.MENU.keys()), hlt_prefix=False)
-            for year in HLTs.years_all
+            for year in years_all
         }
         self._systematics = save_systematics
         # Kinematic shape propagation (Electron/Muon/Tau/JES/JER shifts).
