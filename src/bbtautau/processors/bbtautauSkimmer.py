@@ -46,7 +46,7 @@ from boostedhh.processors.utils import (
 from coffea import processor
 from coffea.analysis_tools import PackedSelection, Weights
 
-from bbtautau.HLTs import HLTs
+from bbtautau.HLTs import HLTs, years_all
 
 from . import GenSelection, objects
 
@@ -63,6 +63,15 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 package_path = str(pathlib.Path(__file__).parent.parent.resolve())
+
+# Muon trigger SF of the analysis-menu path (HLTs.MENU["muiso24"]) for the tightId muons;
+# get_muon_trigger_sfs computes every *_DEN_CutBasedId* correction in the MUO json.
+MUON_TRIGGER_SF = "NUM_IsoMu24_DEN_CutBasedIdTight_and_PFIsoTight"
+
+
+def _filter_muon_trigger_sfs(muon_trigger_sfs: dict) -> dict:
+    return {MUON_TRIGGER_SF: muon_trigger_sfs[MUON_TRIGGER_SF]}
+
 
 # Ported from HH4b's bbbbSkimmer.py (commit 7332ed8).
 LHEVPT_EDGES = np.arange(0.0, 2001.0, 10.0)
@@ -313,7 +322,7 @@ class bbtautauSkimmer(SkimmerABC):
         # menu (HLTs.MENU), not the full HLTs.HLTs catalog.
         self.HLTs = {
             year: HLTs.resolve_menu(year, list(HLTs.MENU.keys()), hlt_prefix=False)
-            for year in HLTs.years_all
+            for year in years_all
         }
         self._systematics = save_systematics
         # Kinematic shape propagation (Electron/Muon/Tau/JES/JER shifts).
@@ -882,7 +891,9 @@ class bbtautauSkimmer(SkimmerABC):
 
         if not isData:
             muon_id_sfs = get_muon_id_sfs(muons_raw_for_sf, year)
-            muon_trigger_sfs = get_muon_trigger_sfs(muons_raw_for_sf, year)
+            muon_trigger_sfs = _filter_muon_trigger_sfs(
+                get_muon_trigger_sfs(muons_raw_for_sf, year)
+            )
 
             muon_id_vars = {
                 "MuonTightIDSF": pad_val(muon_id_sfs["nom"], num_leptons, 1.0, axis=1),
@@ -918,7 +929,9 @@ class bbtautauSkimmer(SkimmerABC):
 
                     shifted_raw = events.Muon[shifted_muons.rawIdx]
                     shifted_id_sfs = get_muon_id_sfs(shifted_raw, year)
-                    shifted_trigger_sfs = get_muon_trigger_sfs(shifted_raw, year)
+                    shifted_trigger_sfs = _filter_muon_trigger_sfs(
+                        get_muon_trigger_sfs(shifted_raw, year)
+                    )
 
                     muon_id_vars[f"MuonTightIDSF_{shift}"] = pad_val(
                         shifted_id_sfs["nom"], num_leptons, 1.0, axis=1
@@ -1078,7 +1091,7 @@ class bbtautauSkimmer(SkimmerABC):
         taus_corrected = ak.with_field(
             taus_corrected, ak.local_index(events.Tau.pt, axis=1), "rawIdx"
         )
-        taus, ttrigvars = objects.good_taus(events, taus_corrected, year)
+        taus, ttrigvars = objects.good_taus(events, taus_corrected, year, self._nano_version)
         taus_raw_for_sf = events.Tau[taus.rawIdx]
 
         # Build shifted selected taus once; TES pt/mass move together and rawIdx is preserved.
@@ -1087,7 +1100,7 @@ class bbtautauSkimmer(SkimmerABC):
             taus_syst = build_object_variations(
                 taus_corrected,
                 tes_shifted_vars,
-                lambda shifted: objects.good_taus(events, shifted, year)[0],
+                lambda shifted: objects.good_taus(events, shifted, year, self._nano_version)[0],
                 taus,
             )
 
@@ -1150,10 +1163,9 @@ class bbtautauSkimmer(SkimmerABC):
             # print("VSjet Event up   :", tauSFVars["TauVSjetSFEventUp"][:10])
             # print("VSjet Event down :", tauSFVars["TauVSjetSFEventDown"][:10])
 
-            if year == "2024":
-                tau_trig_types = ["ditau", "etau", "mutau", "ditaujet", "vbfditau", "vbfsingletau"]
-            else:
-                tau_trig_types = ["ditau", "etau", "mutau", "ditaujet", "vbftau", "vbfditau"]
+            # Only the analysis-menu di-tau path (HLTs.MENU["ditau"]); etau, mutau, ditaujet,
+            # vbftau, vbfditau, vbfsingletau SFs are not used.
+            tau_trig_types = ["ditau"]
 
             for trigtype in tau_trig_types:
                 trig_sf = get_tau_trigger_sf(taus_raw_for_sf, year, trigtype)
@@ -1183,37 +1195,6 @@ class bbtautauSkimmer(SkimmerABC):
                     tauTriggerVars[f"TauTrig{name}SFDown"] = pad_val(
                         trig_sf["down"], num_leptons, 1.0, axis=1
                     )
-
-            # Re-evaluate nominal Tau ID/trigger SFs for TES-driven selection migration.
-            if self._kinematic_systematics:
-                for shift, shifted_taus in taus_syst.items():
-                    if shift == "":
-                        continue
-
-                    shifted_raw = events.Tau[shifted_taus.rawIdx]
-                    shifted_vsjet_sf = get_tau_vsjet_sf(shifted_raw, year)
-
-                    tauSFVars[f"TauVSjetSF_{shift}"] = pad_val(
-                        shifted_vsjet_sf["nom"], num_leptons, 1.0, axis=1
-                    )
-                    tauSFVars[f"TauVSjetSFEvent_{shift}"] = ak.to_numpy(
-                        ak.prod(shifted_vsjet_sf["nom"], axis=1)
-                    )
-
-                    for trigtype in tau_trig_types:
-                        shifted_trig_sf = get_tau_trigger_sf(shifted_raw, year, trigtype)
-                        name = {
-                            "ditau": "DiTau",
-                            "etau": "ETau",
-                            "mutau": "MuTau",
-                            "ditaujet": "DiTauJet",
-                            "vbftau": "VBFTau",
-                            "vbfditau": "VBFDiTau",
-                            "vbfsingletau": "VBFSingleTau",
-                        }[trigtype]
-                        tauTriggerVars[f"TauTrig{name}SF_{shift}"] = pad_val(
-                            shifted_trig_sf["nom"], num_leptons, 1.0, axis=1
-                        )
 
             # Re-evaluate nominal Tau ID/trigger SFs for TES-driven selection migration.
             if self._kinematic_systematics:

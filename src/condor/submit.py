@@ -51,6 +51,11 @@ def main(args):
         processor_args += f" --fatjet-bb-preselection-cut {args.fatjet_bb_preselection_cut}"
     if args.fatjet_tt_preselection_cut is not None:
         processor_args += f" --fatjet-tt-preselection-cut {args.fatjet_tt_preselection_cut}"
+    processor_args += (
+        " --save-kinematic-systematics"
+        if args.save_kinematic_systematics
+        else " --no-save-kinematic-systematics"
+    )
     submit_utils.submit(args, proxy, t2_prefixes, outdir, local_dir, fileset, processor_args)
 
 

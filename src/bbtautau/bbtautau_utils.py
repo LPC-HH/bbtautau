@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from boostedhh.utils import add_bool_arg
+
 
 def parse_common_run_args(parser):
     parser.add_argument(
@@ -40,6 +42,13 @@ def parse_common_run_args(parser):
         type=float,
         default=None,
         help="if set, require >=1 fatjet with ParTXbbvsQCDTop >= this cut",
+    )
+
+    add_bool_arg(
+        parser,
+        "save-kinematic-systematics",
+        default=False,
+        help="save and propagate kinematic systematic variations (lepton/tau scale and resolution, JES/JER) through object selection, derived variables, and shifted SF matching",
     )
 
     parser.add_argument(

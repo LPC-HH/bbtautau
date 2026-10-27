@@ -80,7 +80,8 @@ SAMPLES = {
         isData=True,
     ),
     "muon": Sample(
-        selector="^Muon",
+        # 2022C is split between SingleMuon (runs <= 356386) and Muon (>= 356426)
+        selector="^(Muon|SingleMuon)",
         # selector="^Muon_Run",
         label="Muon",
         isData=True,
@@ -118,7 +119,7 @@ SAMPLES = {
         isSignal=False,
     ),
     "wjets": Sample(
-        selector="^(Wto2Q-2Jets|WtoLnu-2Jets)",
+        selector="^(Wto2Q-2Jets|WtoLNu-2Jets)",
         label="W+Jets",
         isSignal=False,
     ),

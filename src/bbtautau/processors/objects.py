@@ -279,8 +279,8 @@ def good_electrons(events, leptons: ElectronArray, year: str):
     )
     leptons = leptons[lsel]
 
-    # Trigger: (filterbit, ptcut for matched lepton)
-    triggers = {"EGamma": (1, 31), "ETau": (6, 25)}
+    # Trigger: (filterbit, ptcut for matched lepton); bit 1 = 1e (WPTight) in both v12 and v15
+    triggers = {"EGamma": (1, 31)}
     trig_leptons = trigobj[trigobj.id == PDGID.e]
 
     TrigMatchDict = {
@@ -331,8 +331,8 @@ def good_muons(events, leptons: MuonArray, year: str):
     )
     leptons = leptons[lsel]
 
-    # Trigger: (filterbit, ptcut for matched lepton)
-    triggers = {"Muon": (3, 26), "MuonTau": (6, 22)}
+    # Trigger: (filterbit, ptcut for matched lepton); bit 3 = 1mu in both v12 and v15
+    triggers = {"Muon": (3, 26)}
     trig_leptons = trigobj[trigobj.id == PDGID.mu]
 
     TrigMatchDict = {
@@ -376,8 +376,13 @@ Trigger quality bits in NanoAOD v12
 19 => 1 prong tau paths for Tau;
 """
 
+# Tau TrigObj filter bit of the analysis di-tau path (HLTs.MENU["ditau"]), from the
+# TrigObj_filterBits branch doc: v12 "7 => deeptau di-tau"; v15 "11 => di-tau"
+# (v15 7-10 = e-tau inside filter, mu-tau inside filter, Single Tau, VBF DiTau).
+_TAU_DITAU_FILTERBIT = {"v12": 7, "v15": 11}
 
-def good_taus(events, leptons: TauArray, year: str):
+
+def good_taus(events, leptons: TauArray, year: str, nano_version: str):
     # from https://indico.cern.ch/event/1495537/contributions/6355656/attachments/3012754/5312393/2025.02.11_Run3HHbbtautau_CMSweek.pdf
     trigobj = events.TrigObj
 
@@ -390,8 +395,15 @@ def good_taus(events, leptons: TauArray, year: str):
     )
     leptons = leptons[lsel]
 
+    if nano_version.startswith("v12"):
+        ditau_bit = _TAU_DITAU_FILTERBIT["v12"]
+    elif nano_version.startswith("v15"):
+        ditau_bit = _TAU_DITAU_FILTERBIT["v15"]
+    else:
+        raise NotImplementedError(f"Tau trigger filter bits not implemented for {nano_version}")
+
     # Trigger: (filterbit, ptcut for matched lepton)
-    triggers = {"SingleTau": (10, 185), "DiTau": (7, 37), "ETau": (8, 32), "MuonTau": (9, 30)}
+    triggers = {"DiTau": (ditau_bit, 37)}
     trig_leptons = trigobj[trigobj.id == PDGID.tau]
 
     TrigMatchDict = {

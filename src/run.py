@@ -119,11 +119,6 @@ if __name__ == "__main__":
     run_utils.parse_common_run_args(parser)
     run_utils.parse_common_hh_args(parser)
     bbtautau_utils.parse_common_run_args(parser)
-    parser.add_argument(
-        "--save-kinematic-systematics",
-        action="store_true",
-        help="Save and propagate kinematic systematic variations (lepton/tau scale and resolution, JES/JER) through object selection, derived variables, and shifted SF matching.",
-    )
     args = parser.parse_args()
 
     if isinstance(args.year, list):
