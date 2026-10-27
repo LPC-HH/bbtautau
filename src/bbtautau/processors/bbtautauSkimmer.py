@@ -481,7 +481,7 @@ class bbtautauSkimmer(SkimmerABC):
             # "isDauTau",
             # "mass",
             # "msoftdrop",
-            # "globalParT_massVisApplied",
+            "globalParT_massVisApplied",  # old CA mass: input of the current BDTs, keep until retraining
             # "globalParT_massResApplied",
             # "particleNet_mass_legacy",
             # "dau0_pt",
