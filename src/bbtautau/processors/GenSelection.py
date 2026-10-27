@@ -44,7 +44,7 @@ def _sum_taus(taut):
 
 def gen_selection_HHbbtautau(
     events: NanoEventsArray,
-    fatjets: FatJetArray,  # noqa: ARG001
+    fatjets: FatJetArray,
     selection_args: list,
 ):
     """Gets HH, bb, and tautau 4-vectors + tau decay information"""
@@ -94,14 +94,14 @@ def gen_selection_HHbbtautau(
     GenTauVars["GenTauhm"] = ((tauh == 1) & (taumu == 1)).to_numpy()
     GenTauVars["GenTauhe"] = ((tauh == 1) & (taue == 1)).to_numpy()
 
-    #fatjet gen matching
+    # fatjet gen matching
     Hbb = higgs[ak.sum(is_bb, axis=2) == 2]
     Hbb = ak.pad_none(Hbb, 1, axis=1, clip=True)[:, 0]
 
     Htt = higgs[ak.sum(is_tt, axis=2) == 2]
     Htt = ak.pad_none(Htt, 1, axis=1, clip=True)[:, 0]
 
-    #TODO: check more than just the leading two fatjets!
+    # TODO: check more than just the leading two fatjets!
     bbdr = fatjets.delta_r(Hbb)
     ttdr = fatjets.delta_r(Htt)
 
@@ -140,3 +140,26 @@ def gen_selection_HH4b(
     GenbVars = {f"Genb{key}": pad_val(bs[var], 4, axis=1) for (var, key) in P4.items()}
 
     return {**GenHiggsVars, **GenbVars}
+
+
+def gen_selection_V(
+    events: NanoEventsArray,
+    fatjets: FatJetArray,  # noqa: ARG001
+    selection_args: list,  # noqa: ARG001
+):
+    """Save the LHE-level V (W/Z) pT for the Wto2Q-/Zto2Q- V+jets samples.
+
+    Ported from HH4b's ``gen_selection_V``
+    (https://github.com/LPC-HH/HH4b/commit/7e8dca7, "Skimmer: save LHE-level V pT"); only the
+    ``GenVLHEPt`` piece is needed here (not the fatjet/daughter-flavor matching HH4b also does in
+    that function, which is for V-tagging and out of scope for this).
+
+    Returns an empty dict (no ``GenVLHEPt`` column) if the input NanoAOD doesn't carry the
+    ``LHEPart`` collection, same gating as HH4b's.
+    """
+    if "LHEPart" not in events.fields:
+        return {}
+
+    lhe = events.LHEPart
+    lhe_vs = lhe[((abs(lhe.pdgId) == PDGID.W) | (abs(lhe.pdgId) == PDGID.Z)) & (lhe.status == 2)]
+    return {"GenVLHEPt": pad_val(lhe_vs.pt, 1, axis=1)}

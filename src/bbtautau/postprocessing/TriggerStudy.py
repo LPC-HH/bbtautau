@@ -1428,15 +1428,20 @@ def run_trigger_study_channels(
                         "name": "HLT_AK8PFJet230_SoftDropMass40_PNetBB0p06",
                         "show_name": "PNetBB ",
                     },
+                    # {
+                    #     "type": "tr",
+                    #     "name": "HLT_QuadPFJet103_88_75_15_PFBTagDeepJet_1p3_VBF2",
+                    #     "show_name": "VBF_Quadjet2 ",
+                    # },
+                    # {
+                    #     "type": "tr",
+                    #     "name": "HLT_QuadPFJet103_88_75_15_DoublePFBTagDeepJet_1p3_7p7_VBF1",
+                    #     "show_name": "VBF_Quadjet1 ",
+                    # },
                     {
                         "type": "tr",
-                        "name": "HLT_QuadPFJet103_88_75_15_PFBTagDeepJet_1p3_VBF2",
-                        "show_name": "VBF_Quadjet2 ",
-                    },
-                    {
-                        "type": "tr",
-                        "name": "HLT_QuadPFJet103_88_75_15_DoublePFBTagDeepJet_1p3_7p7_VBF1",
-                        "show_name": "VBF_Quadjet1 ",
+                        "name": "HLT_DoubleMediumDeepTauPFTauHPS35_L2NN_eta2p1",
+                        "show_name": "DiTau ",
                     },
                     {
                         "type": "tr",
@@ -1445,18 +1450,13 @@ def run_trigger_study_channels(
                     },
                     {
                         "type": "tr",
-                        "name": "HLT_DoubleMediumDeepTauPFTauHPS35_L2NN_eta2p1",
-                        "show_name": "DiTau ",
+                        "name": "HLT_AK8PFJet230_SoftDropMass40_PNetTauTau0p03",
+                        "show_name": "PNetTauTau ",
                     },
                     {
                         "type": "tr",
                         "name": "HLT_PFHT280_QuadPFJet30_PNet2BTagMean0p55",
                         "show_name": "Parking",
-                    },
-                    {
-                        "type": "tr",
-                        "name": "HLT_AK8PFJet230_SoftDropMass40_PNetTauTau0p03",
-                        "show_name": "PNetTauTau ",
                     },
                     {
                         "type": "tr",
@@ -1548,7 +1548,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--years",
         nargs="+",
-        default=["2022", "2022EE", "2023", "2023BPix"],
+        default=["2022", "2022EE", "2023", "2023BPix", "2024"],
         help="Years to process (default: all Run3 years)",
     )
     parser.add_argument(
@@ -1588,7 +1588,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--apply-event-filters",
         action="store_true",
-        default=False,
+        default=True,
         help=(
             "Apply base_filter (fat-jet kinematics) when loading; default is unfiltered rows. "
             "Requires those branches in the parquet / get_columns preset (extend get_columns if needed)."

@@ -147,6 +147,8 @@ def main(args):
         extra_args += (" " if extra_args else "") + f"--samples {samples_str}"
     if getattr(args, "tt_preselection", False):
         extra_args += (" " if extra_args else "") + "--tt-preselection"
+    if getattr(args, "bin_features", True):
+        extra_args += (" " if extra_args else "") + "--bin-features"
 
     if args.compare_light:
         if not args.inputs:
@@ -207,7 +209,7 @@ def main(args):
         }
     else:
         # Training mode arguments are passed through $model_args.
-        memory = 32 if getattr(args, "tt_preselection", False) else 80
+        memory = 64 if getattr(args, "tt_preselection", False) else 80
         config_bootstrap, config_arg = _build_config_bootstrap(getattr(args, "config_file", None))
         args_dict = {
             "job_name": "-".join(args.job_name.split("_")),
@@ -314,6 +316,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--tt-preselection",
         default=False,
         help="apply tt preselection",
+        type=bool,
+        action=BooleanOptionalAction,
+    )
+    parser.add_argument(
+        "--bin-features",
+        default=True,
+        help="apply feature binning to gloParT tautauvsQCDTop scores (training mode only)",
         type=bool,
         action=BooleanOptionalAction,
     )
