@@ -276,6 +276,16 @@ class bbtautauSkimmer(SkimmerABC):
         "mreg": 0,
     }
 
+    # Loose AK8 pre-filter on the uncorrected NanoAOD FatJets, applied before any object
+    # corrections / systematic variations when a bb or tt preselection is set. Thresholds are
+    # well below ``fatjet_selection`` so JEC/JER shifts cannot move an event across them;
+    # the exact cuts are still applied in the final selection.
+    fatjet_prefilter = {  # noqa: RUF012
+        "object_pt": 120,
+        "pt": 160,
+        "eta": 2.5,
+    }
+
     vbf_jet_selection = {  # noqa: RUF012
         "pt": 25,
         "eta_max": 4.7,
@@ -600,6 +610,49 @@ class bbtautauSkimmer(SkimmerABC):
         cutflow = OrderedDict()
         cutflow["all"] = n_events
         selection_args = (selection, cutflow, isData, gen_weights)
+
+        # Normalization totals and per-event weights need all events, so compute them before the
+        # pre-filter (they only use event-level gen / LHE / pileup / PS information).
+        if not isData:
+            gen_selection_all = PackedSelection()
+            gen_selection_args = (gen_selection_all, OrderedDict(), isData, gen_weights)
+            genVars_all = {}
+            for d in gen_selection_dict:
+                if d in dataset:
+                    genVars_all.update(
+                        gen_selection_dict[d](events, events.FatJet, gen_selection_args)
+                    )
+            gen_selected_all = (
+                gen_selection_all.all(*gen_selection_all.names)
+                if len(gen_selection_all.names)
+                else np.ones(len(events)).astype(bool)
+            )
+            # LHE V pT of every event, set by gen_selection_V only (Wto2Q-2Jets/Zto2Q-2Jets with LHEPart)
+            lhe_v_pt = genVars_all.get("GenVLHEPt")
+            weights_dict_all, totals_weights = self.add_weights(
+                events,
+                year,
+                dataset,
+                gen_weights,
+                gen_selected_all,
+                lhe_v_pt=None if lhe_v_pt is None else lhe_v_pt[:, 0],
+            )
+
+        # Loose AK8 pre-filter: skip the expensive corrections / variations for MC events that
+        # cannot pass the final AK8 selection. Not applied to data, which has no kinematic
+        # variations (and slicing the events before the data MET correction breaks coffea's lazy arrays).
+        prefilter = None if isData else self._ak8_prefilter(events)
+        if prefilter is not None:
+            cutflow["ak8_prefilter"] = np.sum(gen_weights[prefilter])
+            if not np.any(prefilter):
+                totals_dict = {"nevents": n_events, **totals_weights}
+                logger.info(f"Cutflow:\n{cutflow}")
+                return {year: {dataset: {"totals": totals_dict, "cutflow": cutflow}}}
+
+            events = events[prefilter]
+            gen_weights = gen_weights[prefilter]
+            selection_args = (selection, cutflow, isData, gen_weights)
+            logging.info(f"Passing AK8 pre-filter: {np.sum(prefilter)} / {len(prefilter)}")
 
         # JEC factory loader
         JEC_loader = JECs(year)
@@ -1920,20 +1973,16 @@ class bbtautauSkimmer(SkimmerABC):
         totals_dict = {"nevents": n_events}
 
         if isData:
-            skimmed_events["weight"] = np.ones(n_events)
+            skimmed_events["weight"] = np.ones(len(events))
         else:
-            # LHE V pT of every event, set by gen_selection_V only (Wto2Q-2Jets/Zto2Q-2Jets with LHEPart)
-            lhe_v_pt = genVars.get("GenVLHEPt")
-            weights_dict, totals_temp = self.add_weights(
-                events,
-                year,
-                dataset,
-                gen_weights,
-                gen_selected,
-                lhe_v_pt=None if lhe_v_pt is None else lhe_v_pt[:, 0],
+            # per-event weights and totals were computed on all events, before the pre-filter
+            weights_dict = (
+                {key: val[prefilter] for key, val in weights_dict_all.items()}
+                if prefilter is not None
+                else weights_dict_all
             )
             skimmed_events = {**skimmed_events, **weights_dict}
-            totals_dict = {**totals_dict, **totals_temp}
+            totals_dict = {**totals_dict, **totals_weights}
 
         ##############################
         # Reshape and apply selections
@@ -1957,6 +2006,35 @@ class bbtautauSkimmer(SkimmerABC):
 
     def postprocess(self, accumulator):
         return accumulator
+
+    def _ak8_prefilter(self, events) -> np.ndarray | None:
+        """Event mask of the loose AK8 pre-filter (see ``fatjet_prefilter``), computed on the
+        uncorrected NanoAOD FatJets. Returns None if no bb or tt preselection is set."""
+        if self._fatjet_bb_preselection_cut is None and self._fatjet_tt_preselection_cut is None:
+            return None
+
+        fatjets = objects.get_ak8jets(events.FatJet, nano_version=self._nano_version)
+        fatjets = fatjets[
+            (fatjets.pt > self.fatjet_prefilter["object_pt"])
+            & (np.abs(fatjets.eta) < self.fatjet_prefilter["eta"])
+        ]
+        mask = (ak.num(fatjets) >= 2) & ak.any(fatjets.pt > self.fatjet_prefilter["pt"], axis=1)
+
+        if self._fatjet_bb_preselection_cut is not None:
+            mask = mask & ak.any(
+                fatjets.globalParT_XbbvsQCDTop >= self._fatjet_bb_preselection_cut, axis=1
+            )
+
+        if self._fatjet_tt_preselection_cut is not None:
+            tt_disc = np.maximum(
+                np.maximum(
+                    fatjets.globalParT_XtauhtauevsQCDTop, fatjets.globalParT_XtauhtaumvsQCDTop
+                ),
+                fatjets.globalParT_XtauhtauhvsQCDTop,
+            )
+            mask = mask & ak.any(tt_disc >= self._fatjet_tt_preselection_cut, axis=1)
+
+        return ak.to_numpy(mask)
 
     def add_weights(
         self,
