@@ -109,6 +109,18 @@ def lhevpt_totals(
     }
 
 
+def nominal_shifted_vars(objects, fields, shifts):
+    """
+    Shift dict in the format of the correction helpers with every shift equal to nominal.
+
+    get_tau_tes / get_electron_scale_smearing return None for the shifts when the chunk has
+    no raw taus / electrons at all. Without a fallback, that chunk's output lacks the
+    corresponding *_up/_down columns, and merging chunks fills them with NaN. With no objects
+    to shift, the shifted values are the nominal ones.
+    """
+    return {field: {"": objects[field], **{s: objects[field] for s in shifts}} for field in fields}
+
+
 def build_object_variations(corrected_objects, shifted_vars, selection_func, nominal_selected):
     """
     Build selected object collections for all kinematic variations.
@@ -669,6 +681,17 @@ class bbtautauSkimmer(SkimmerABC):
         electrons_corr, electron_shifted_vars = get_electron_scale_smearing(
             events, events.Electron, year, isData
         )
+        if electron_shifted_vars is None and not isData:
+            electron_shifted_vars = nominal_shifted_vars(
+                electrons_corr,
+                ["pt"],
+                [
+                    "ElectronScale_up",
+                    "ElectronScale_down",
+                    "ElectronSmear_up",
+                    "ElectronSmear_down",
+                ],
+            )
         # Keep the original NanoAOD Electron index before good_electrons().
         # Selection and saved kinematics use corrected electrons, while EGM SFs are evaluated on the matched raw electrons.
         # rawIdx is only a temporary in-memory bridge and is not written to the skim.
@@ -1138,6 +1161,10 @@ class bbtautauSkimmer(SkimmerABC):
         # ============================================================
 
         taus_corrected, tes_shifted_vars = get_tau_tes(events.Tau, year, isData=isData)
+        if tes_shifted_vars is None and not isData:
+            tes_shifted_vars = nominal_shifted_vars(
+                taus_corrected, ["pt", "mass"], ["TES_up", "TES_down"]
+            )
         # Keep the original NanoAOD Tau index before good_taus().
         # Selection and CA kinematics use TES-corrected taus, while Tau ID/trigger SFs are evaluated on the matched raw taus.
         # rawIdx is only a temporary in-memory bridge and is not written to the skim.
