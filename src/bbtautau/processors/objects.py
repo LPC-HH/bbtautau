@@ -870,9 +870,9 @@ def get_CA_MASS(
     for name, (default, dtype) in init_fields.items():
         fatjets[name] = ak.full_like(fatjets.pt, default, dtype=dtype)
 
-    # more than one fatjet and tau
-    can_match = (ak.num(fatjets, axis=1) > 0) & (ak.num(taus, axis=1) > 0)
-    if not ak.any(can_match):
+    # Skip only if there are no fatjets at all. Fatjets without matched taus still get the
+    # lepton / no-lepton CA masses, independently of whether other events in the chunk have taus.
+    if not ak.any(ak.num(fatjets, axis=1) > 0):
         return fatjets
 
     met_pt = met.pt
