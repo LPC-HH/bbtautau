@@ -1692,10 +1692,12 @@ class bbtautauSkimmer(SkimmerABC):
                     )
 
         # Keep all nominal branch names unchanged. When kinematic systematics are enabled,
-        # append the derived CA_* variations produced by get_CA_MASS.
+        # append the variations of the CA mass used in the BDT; the other CA_* fields
+        # (flags, old CA mass) are saved at nominal only.
         if self._kinematic_systematics and not isData:
             ca_skimvars = {
-                var: key for var, key in fatjet_skimvars.items() if var.startswith("CA_")
+                var: fatjet_skimvars[var]
+                for var in ["CA_globalParT_massVisApplied_with_delta_axis_merged"]
             }
             for shift, shifted_fatjets in fatjets_all.items():
                 if shift == "":
