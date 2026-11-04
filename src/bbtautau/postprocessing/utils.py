@@ -7,6 +7,8 @@ Authors: Raghav Kansal, Ludovico Mori
 from __future__ import annotations
 
 import copy
+import dataclasses
+import re
 import warnings
 from collections.abc import Iterable
 from pathlib import Path
@@ -24,7 +26,11 @@ from joblib import Parallel, delayed
 from bbtautau.HLTs import HLTs
 from bbtautau.postprocessing import Samples
 from bbtautau.postprocessing.bbtautau_types import Channel, LoadedSample
-from bbtautau.postprocessing.bdt_utils import compute_or_load_bdt_preds
+from bbtautau.postprocessing.bdt_utils import (
+    DATASET_ID_COLUMN,
+    compute_or_load_bdt_preds,
+    dataset_id,
+)
 from bbtautau.postprocessing.Samples import CHANNELS
 from bbtautau.userConfig import BDT_EVAL_DIR, DATA_PATHS, LEPTON_CONE_DR, MODEL_DIR
 
@@ -394,6 +400,49 @@ def get_columns(
     return columns
 
 
+def load_sample_with_dataset_id(
+    sample: Sample,
+    year: str,
+    paths: dict[str],
+    filters: list = None,
+) -> pd.DataFrame | None:
+    """``boostedhh.utils.load_sample``, plus a per-event column ``bdt_utils.DATASET_ID_COLUMN``
+    identifying the dataset directory each event comes from (``bdt_utils.dataset_id``; part of
+    the BDT event identifiers, since (luminosityBlock, event) repeat across MC datasets).
+
+    Loads the datasets matched by ``sample`` one at a time, in the order and from the path that
+    ``load_sample`` uses, so the events are the same as ``load_sample(sample, ...)``.
+    """
+    if sample.isData:
+        sample_paths = paths["data"]
+    elif sample.isSignal:
+        sample_paths = paths["signal"]
+    else:
+        sample_paths = paths["bg"]
+    if not isinstance(sample_paths, list):
+        sample_paths = [sample_paths]
+
+    # same directory search as load_sample: the first path with a matching dataset
+    datasets = []
+    for sp in sample_paths:
+        datasets = [
+            d.name for d in (Path(sp) / year).iterdir() if sample.get_selector(year).match(d.name)
+        ]
+        if datasets:
+            break
+
+    events_list = []
+    for dataset in datasets:
+        single = dataclasses.replace(sample, selector=f"^{re.escape(dataset)}$")
+        events = utils.load_sample(single, year, paths, filters)
+        if events is None:
+            continue
+        events[DATASET_ID_COLUMN] = dataset_id(year, dataset)
+        events_list.append(events)
+
+    return pd.concat(events_list) if events_list else None
+
+
 def load_samples(
     year: str,
     paths: dict[str],
@@ -556,7 +605,7 @@ def load_samples(
 
         def _load_loaded_sample(sample: Sample) -> LoadedSample:
             filters = filters_dict[sample.get_type()] if filters_dict is not None else None
-            events = utils.load_sample(
+            events = load_sample_with_dataset_id(
                 sample,
                 year,
                 paths,
@@ -581,7 +630,7 @@ def load_samples(
 
             if sample.selector is not None:
 
-                events = utils.load_sample(
+                events = load_sample_with_dataset_id(
                     sample,
                     year,
                     paths,

@@ -36,6 +36,7 @@ from bbtautau.postprocessing.bdt_utils import (
     get_sample_fold_assignments,
     load_fold_lookup_from_dir,
     load_training_wps_from_dir,
+    make_event_ids,
     predict_bdt,
     save_training_wps,
 )
@@ -296,7 +297,8 @@ class Trainer:
                 training-time stats must not be overwritten (e.g. compare_models).
 
         Returns:
-            tuple: (X, y, weights, weights_rescaled, masks, event_ids_list, sample_names_labels)
+            tuple: (X, y, weights, weights_rescaled, masks, event_ids, sample_names_labels),
+                event_ids a structured array with dtype bdt_utils.EVENT_ID_DTYPE
         """
         if balance not in [
             "bysample",
@@ -310,7 +312,7 @@ class Trainer:
         weights_list = []
         weights_rescaled_list = []
         sample_names_labels = []
-        event_ids_list = []  # List of (luminosityBlock, event) tuples
+        event_ids_list = []  # per-sample event identifier arrays (EVENT_ID_DTYPE)
         masks_list = {"tt_mask": [], "bb_mask": [], "m_mask": [], "e_mask": []}
         weight_stats_by_stage_sample = {}
 
@@ -393,11 +395,7 @@ class Trainer:
                 weights_rescaled_list.append(weights_rescaled)
                 sample_names_labels.extend([sample_name] * len(sample.events))
 
-                # Extract event identifiers (luminosityBlock, event) tuples
-                luminosity_block = sample.get_var("luminosityBlock")
-                event = sample.get_var("event")
-                event_ids = list(zip(luminosity_block, event))
-                event_ids_list.extend(event_ids)
+                event_ids_list.append(make_event_ids(sample))
 
                 # Collect masks
                 for mask_name in masks_list:
@@ -517,7 +515,8 @@ class Trainer:
         for i, class_name in enumerate(self.sample_names):
             print(f"Class {i}: {class_name}")
 
-        return X, y, weights, weights_rescaled, masks, event_ids_list, sample_names_labels
+        event_ids = np.concatenate(event_ids_list)
+        return X, y, weights, weights_rescaled, masks, event_ids, sample_names_labels
 
     def _apply_balance_rescaling(
         self,
@@ -592,7 +591,7 @@ class Trainer:
             weights,
             weights_rescaled,
             masks,
-            event_ids_list,
+            event_ids,
             sample_names_labels,
         ) = self._process_samples_for_training(balance=balance)
 
@@ -721,7 +720,7 @@ class Trainer:
         if self.n_folds > 1:
             fold_indices_path = self.output_dir / "fold_indices.npz"
 
-            # Create event-to-fold mapping using (luminosityBlock, event) tuples
+            # Create event-to-fold mapping, keyed by the event identifiers (EVENT_ID_DTYPE)
             event_fold_assignment = np.full(len(y), -1, dtype=int)
             for fold_idx, (_, val_idx) in enumerate(self.fold_data["fold_indices"]):
                 event_fold_assignment[val_idx] = fold_idx
@@ -729,16 +728,13 @@ class Trainer:
             print("Cross check: ", np.sum(event_fold_assignment == -1)), "has to be zero "
 
             # Persist compact numeric arrays instead of a large JSON dict with string keys.
-            lumi_values = np.asarray([lumi for lumi, _ in event_ids_list], dtype=np.int32)
-            event_values = np.asarray([event for _, event in event_ids_list], dtype=np.int64)
             np.savez_compressed(
                 fold_indices_path,
                 n_folds=np.array([self.n_folds], dtype=np.int16),
                 random_seed=np.array(
                     [self.bdt_config[self.modelname]["random_seed"]], dtype=np.int32
                 ),
-                luminosityBlock=lumi_values,
-                event=event_values,
+                **{name: event_ids[name] for name in event_ids.dtype.names},
                 fold=event_fold_assignment.astype(np.int16),
             )
             print(f"Fold indices saved to {fold_indices_path}")
@@ -752,14 +748,11 @@ class Trainer:
             train_idx_all = self.fold_data["fold_indices"][0][0]
 
             sample_names_arr = np.asarray(sample_names_labels)
-            lumi_values = np.asarray([lumi for lumi, _ in event_ids_list], dtype=np.int64)
-            event_values = np.asarray([event for _, event in event_ids_list], dtype=np.int64)
 
             np.savez_compressed(
                 train_event_ids_path,
                 sample_names=sample_names_arr[train_idx_all].astype("U64"),
-                luminosityBlock=lumi_values[train_idx_all],
-                event=event_values[train_idx_all],
+                **{name: event_ids[name][train_idx_all] for name in event_ids.dtype.names},
                 test_size=np.array(
                     [self.bdt_config[self.modelname]["test_size"]], dtype=np.float32
                 ),
@@ -2339,16 +2332,15 @@ def compare_models(
             raise ValueError(f"Model '{label}' saw a different event ordering than the first model")
 
         # Out-of-fold predictions: each event is scored only by the fold model that did not
-        # train on it, using this model's *own* saved fold assignment (matched by
-        # (luminosityBlock, event)). Events this model never saw (fold = -1) are held-out by
+        # train on it, using this model's *own* saved fold assignment (matched by the event
+        # identifiers, or (luminosityBlock, event) for fold files written before Nov 2026).
+        # Events this model never saw (fold = -1) are held-out by
         # construction and get the average over all fold models.
         fold_lookup = load_fold_lookup_from_dir(model_dir)
         if fold_lookup is None:
             raise FileNotFoundError(f"No fold_indices.npz found in {model_dir}")
-        lumi = np.fromiter((e[0] for e in event_ids), dtype=np.int64, count=len(event_ids))
-        evt = np.fromiter((e[1] for e in event_ids), dtype=np.int64, count=len(event_ids))
         fold = get_sample_fold_assignments(
-            Path(model_dir), model_name, lumi, evt, fold_lookup=fold_lookup
+            Path(model_dir), model_name, event_ids, fold_lookup=fold_lookup
         )
         y_pred = _oof_predict(tr.boosters, X, fold, len(ref_sample_names))
         n_unseen = int(np.sum(fold < 0))

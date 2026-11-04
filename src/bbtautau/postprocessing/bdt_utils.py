@@ -6,6 +6,7 @@ Authors: Ludovico Mori
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pickle
 from concurrent.futures import ThreadPoolExecutor
@@ -33,8 +34,47 @@ CHANNEL_ORDER_BDT = ["he", "hh", "hm"]
 
 WPS_FILENAME = "wps_ttpart.json"
 
-# Structured dtype for event identifiers (luminosityBlock, event) used in caching.
-EVENT_ID_DTYPE = np.dtype([("luminosityBlock", np.int64), ("event", np.int64)])
+# Event identifiers matching events between training (fold_indices.npz, train_event_ids.npz),
+# inference and the prediction cache. (luminosityBlock, event) alone is not unique: MC datasets
+# and years reuse them (run = 1 in MC), so the key also has the dataset (year + dataset
+# directory, see dataset_id; column DATASET_ID_COLUMN, added at load time) and the run.
+# Files written before Nov 2026 have the legacy (luminosityBlock, event) key; they are read and
+# matched with LEGACY_EVENT_ID_DTYPE, as before.
+DATASET_ID_COLUMN = "datasetId"
+EVENT_ID_DTYPE = np.dtype(
+    [
+        (DATASET_ID_COLUMN, np.int64),
+        ("run", np.int64),
+        ("luminosityBlock", np.int64),
+        ("event", np.int64),
+    ]
+)
+LEGACY_EVENT_ID_DTYPE = np.dtype([("luminosityBlock", np.int64), ("event", np.int64)])
+
+
+def dataset_id(year: str, dataset: str) -> int:
+    """Stable int64 identifier of a dataset directory (e.g. ``QCD-4Jets_HT-400to600``) in a year.
+
+    A hash of the names, so it does not depend on load order or on which datasets are loaded.
+    """
+    digest = hashlib.blake2b(f"{year}/{dataset}".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "little", signed=True)
+
+
+def event_id_dtype(fields) -> np.dtype:
+    """Key dtype for a file with these fields: EVENT_ID_DTYPE if it has all its fields, else legacy."""
+    return EVENT_ID_DTYPE if set(EVENT_ID_DTYPE.names) <= set(fields) else LEGACY_EVENT_ID_DTYPE
+
+
+def make_event_ids(source, dtype: np.dtype = EVENT_ID_DTYPE) -> np.ndarray:
+    """Structured array of event identifiers (``dtype``) from a LoadedSample or a mapping
+    of field name -> array (e.g. an npz file)."""
+    get = source.get_var if isinstance(source, LoadedSample) else source.__getitem__
+    columns = {name: np.asarray(get(name), dtype=np.int64) for name in dtype.names}
+    ids = np.empty(len(columns[dtype.names[0]]), dtype=dtype)
+    for name, values in columns.items():
+        ids[name] = values
+    return ids
 
 
 def save_training_wps(output_dir: Path, wps: dict[str, np.ndarray]) -> None:
@@ -586,18 +626,12 @@ def compute_bdt_preds(
             n_new = len(new_event_indices) if new_event_indices is not None else -1
             needs_prediction = not use_incremental or n_new > 0
 
-            # Fetch event-level identifiers only when needed (k-fold OOF or saving).
-            need_event_vars = (n_folds > 1 and not is_data) or save_dir is not None
-            luminosity_block = sample_data.get_var("luminosityBlock") if need_event_vars else None
-            event = sample_data.get_var("event") if need_event_vars else None
-
             fold_assignments = None
             if n_folds > 1 and not is_data and needs_prediction:
                 fold_assignments_all = get_sample_fold_assignments(
                     model_dir,
                     modelname,
-                    luminosity_block=luminosity_block,
-                    event=event,
+                    sample_data,
                     fold_lookup=fold_lookup,
                 )
 
@@ -701,7 +735,12 @@ def compute_bdt_preds(
                     test_mode=test_mode,
                 )
 
-                event_ids = _extract_event_ids(luminosity_block=luminosity_block, event=event)
+                # Keep the key format of an existing cache (legacy caches stay legacy).
+                event_ids = (
+                    current_event_ids
+                    if current_event_ids is not None
+                    else make_event_ids(sample_data)
+                )
                 _save_cached_predictions(file_dir, sample, y_pred, event_ids)
 
     elapsed = time.time() - start_time
@@ -721,7 +760,8 @@ def _load_cached_predictions(
 
     Returns:
         Tuple of (predictions, event_ids) or (None, None) if not found.
-        event_ids is a structured array with dtype EVENT_ID_DTYPE.
+        event_ids is a structured array with dtype EVENT_ID_DTYPE, or LEGACY_EVENT_ID_DTYPE
+        for caches written before the dataset/run fields were added.
     """
     preds_file = cache_dir / f"{sample}_preds.pkl"
     event_ids_file = cache_dir / f"{sample}_event_ids.pkl"
@@ -743,7 +783,10 @@ def _load_cached_predictions(
             return None, None
 
         # Validate that event_ids is a structured array with the expected dtype
-        if not (isinstance(event_ids, np.ndarray) and event_ids.dtype == EVENT_ID_DTYPE):
+        if not (
+            isinstance(event_ids, np.ndarray)
+            and event_ids.dtype in (EVENT_ID_DTYPE, LEGACY_EVENT_ID_DTYPE)
+        ):
             print(f"Warning: Stale cache format for {sample} - will recompute")
             return None, None
 
@@ -765,7 +808,7 @@ def _save_cached_predictions(
         cache_dir: Directory to save cache files
         sample: Sample name
         predictions: Predictions array
-        event_ids: Structured array with dtype EVENT_ID_DTYPE
+        event_ids: Structured array with dtype EVENT_ID_DTYPE (or LEGACY_EVENT_ID_DTYPE)
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -773,31 +816,6 @@ def _save_cached_predictions(
         pickle.dump(predictions, f)
     with (cache_dir / f"{sample}_event_ids.pkl").open("wb") as f:
         pickle.dump(event_ids, f)
-
-
-def _extract_event_ids(
-    sample_data: LoadedSample = None,
-    luminosity_block: np.ndarray = None,
-    event: np.ndarray = None,
-) -> np.ndarray:
-    """Extract event identifiers as a structured numpy array.
-
-    Accepts either a LoadedSample (from which arrays are extracted) or
-    pre-fetched luminosityBlock/event arrays to avoid redundant get_var calls.
-
-    Returns:
-        Structured array with dtype EVENT_ID_DTYPE.
-    """
-    if luminosity_block is None or event is None:
-        if sample_data is None:
-            raise ValueError("Must provide either sample_data or both luminosity_block and event")
-        luminosity_block = sample_data.get_var("luminosityBlock")
-        event = sample_data.get_var("event")
-
-    ids = np.empty(len(luminosity_block), dtype=EVENT_ID_DTYPE)
-    ids["luminosityBlock"] = np.asarray(luminosity_block, dtype=np.int64)
-    ids["event"] = np.asarray(event, dtype=np.int64)
-    return ids
 
 
 def _merge_predictions(
@@ -853,8 +871,9 @@ def check_bdt_prediction_cache(
 ) -> dict[str, dict[str, dict]]:
     """Check BDT prediction cache and identify which events need computation.
 
-    This function compares current events with cached predictions using (luminosityBlock, event)
-    tuples, allowing for incremental updates when only some events are new.
+    This function compares current events with cached predictions using event identifiers
+    (EVENT_ID_DTYPE, or the legacy (luminosityBlock, event) key for caches written in that
+    format), allowing for incremental updates when only some events are new.
 
     Args:
         events_dict: Dictionary with structure {year: {sample: LoadedSample}}
@@ -893,8 +912,11 @@ def check_bdt_prediction_cache(
             # Try to load cached predictions
             cached_preds, cached_event_ids = _load_cached_predictions(preds_dir, sample)
 
-            # Extract current event IDs
-            current_event_ids = _extract_event_ids(sample_data)
+            # Extract current event IDs, in the key format of the cache (new key if no cache)
+            current_event_ids = make_event_ids(
+                sample_data,
+                cached_event_ids.dtype if cached_event_ids is not None else EVENT_ID_DTYPE,
+            )
 
             if current_event_ids is None:
                 # Cannot use event-based caching without event identifiers
@@ -1157,7 +1179,8 @@ def load_train_event_ids(
     """Load per-sample training event IDs saved by the Trainer when n_folds=1.
 
     Returns a mapping ``sample_name -> sorted_event_ids`` where each value is a
-    sorted structured array with dtype ``EVENT_ID_DTYPE`` ready for binary search
+    sorted structured array with dtype ``EVENT_ID_DTYPE`` (``LEGACY_EVENT_ID_DTYPE`` for files
+    written before the dataset/run fields were added) ready for binary search
     via :func:`numpy.searchsorted`. Returns ``None`` if no metadata file is
     present (e.g. the model predates this feature, or was trained with k-fold
     which uses OOF predictions instead).
@@ -1168,15 +1191,11 @@ def load_train_event_ids(
 
     data = np.load(path, allow_pickle=False)
     sample_names = data["sample_names"].astype(str)
-    lumi = data["luminosityBlock"].astype(np.int64, copy=False)
-    event = data["event"].astype(np.int64, copy=False)
+    all_ids = make_event_ids(data, event_id_dtype(data.files))
 
     result: dict[str, np.ndarray] = {}
     for name in np.unique(sample_names):
-        mask = sample_names == name
-        ids = np.empty(int(mask.sum()), dtype=EVENT_ID_DTYPE)
-        ids["luminosityBlock"] = lumi[mask]
-        ids["event"] = event[mask]
+        ids = all_ids[sample_names == name]
         ids.sort()
         result[str(name)] = ids
 
@@ -1206,15 +1225,9 @@ def _apply_unbiased_mc_eval(
     if train_ids is None or len(train_ids) == 0:
         return False
 
-    lumi = np.asarray(sample_data.get_var("luminosityBlock"), dtype=np.int64)
-    event = np.asarray(sample_data.get_var("event"), dtype=np.int64)
-
-    if len(lumi) == 0:
+    cur_ids = make_event_ids(sample_data, train_ids.dtype)
+    if len(cur_ids) == 0:
         return False
-
-    cur_ids = np.empty(len(lumi), dtype=EVENT_ID_DTYPE)
-    cur_ids["luminosityBlock"] = lumi
-    cur_ids["event"] = event
 
     positions = np.searchsorted(train_ids, cur_ids)
     in_bounds = positions < len(train_ids)
@@ -1246,7 +1259,7 @@ def _apply_unbiased_mc_eval(
         sample_data.events["finalWeight"] = sample_data.events["finalWeight"] * scale
 
     print(
-        f"  [unbiased-mc-eval] {sample_name}: dropped {n_train}/{len(lumi)} training events, "
+        f"  [unbiased-mc-eval] {sample_name}: dropped {n_train}/{len(cur_ids)} training events, "
         f"rescaled val weights by {total_weight_pre / new_sum if new_sum > 0 else 0:.4g} "
         f"(pre-total={total_weight_pre:.4g}, val-sum-pre-rescale={new_sum:.4g})"
     )
@@ -1261,7 +1274,8 @@ def load_fold_lookup(
 
     Returns:
         Tuple of (sorted_keys, sorted_fold) ready for searchsorted, or None if
-        no fold indices file exists.
+        no fold indices file exists. sorted_keys has dtype EVENT_ID_DTYPE, or
+        LEGACY_EVENT_ID_DTYPE for files written before the dataset/run fields were added.
     """
     return load_fold_lookup_from_dir(model_dir / modelname)
 
@@ -1275,16 +1289,8 @@ def load_fold_lookup_from_dir(
         return None
 
     fold_info = np.load(fold_indices_npz_path)
-    train_lumi = fold_info["luminosityBlock"].astype(np.int64, copy=False)
-    train_event = fold_info["event"].astype(np.int64, copy=False)
+    train_keys = make_event_ids(fold_info, event_id_dtype(fold_info.files))
     train_fold = fold_info["fold"].astype(np.int64, copy=False)
-
-    if len(train_lumi) == 0:
-        return np.empty(0, dtype=EVENT_ID_DTYPE), np.empty(0, dtype=np.int64)
-
-    train_keys = np.empty(len(train_lumi), dtype=EVENT_ID_DTYPE)
-    train_keys["luminosityBlock"] = train_lumi
-    train_keys["event"] = train_event
 
     order = np.argsort(train_keys)
     return train_keys[order], train_fold[order]
@@ -1293,8 +1299,7 @@ def load_fold_lookup_from_dir(
 def get_sample_fold_assignments(
     model_dir: Path,
     modelname: str,
-    luminosity_block: np.ndarray | None = None,
-    event: np.ndarray | None = None,
+    events,
     fold_lookup: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray | None:
     """Get fold assignments for a specific sample from the k-fold training metadata.
@@ -1305,8 +1310,8 @@ def get_sample_fold_assignments(
     Args:
         model_dir: Path to the directory containing the model
         modelname: Name of the BDT model
-        luminosity_block: Array of luminosityBlock values for each event (required)
-        event: Array of event numbers for each event (required)
+        events: LoadedSample, or mapping of field name -> array, with the event-identifier
+            fields of the fold lookup's key (see make_event_ids)
         fold_lookup: Pre-loaded (sorted_keys, sorted_fold) from load_fold_lookup.
             If None, loads from disk (backward-compatible).
 
@@ -1320,14 +1325,11 @@ def get_sample_fold_assignments(
         return None
 
     sorted_keys, sorted_fold = fold_lookup
-    n_events = len(luminosity_block)
-    fold_assignments = np.full(n_events, -1, dtype=int)
+    # Query with the key format of the fold file (legacy files: (luminosityBlock, event))
+    query_keys = make_event_ids(events, sorted_keys.dtype)
+    fold_assignments = np.full(len(query_keys), -1, dtype=int)
     if len(sorted_keys) == 0:
         return fold_assignments
-
-    query_keys = np.empty(n_events, dtype=EVENT_ID_DTYPE)
-    query_keys["luminosityBlock"] = np.asarray(luminosity_block, dtype=np.int64)
-    query_keys["event"] = np.asarray(event, dtype=np.int64)
 
     positions = np.searchsorted(sorted_keys, query_keys)
     in_bounds = positions < len(sorted_keys)
