@@ -121,6 +121,11 @@ VR_LOOSE_CUTS: dict[str, dict[str, float]] = {
     "he": {"txbb": 0.4, "txtt": 0.4, "bdt": 0.4},
 }
 
+# Lower bound on the SR cuts scanned by the SensitivityStudy grid search, on both axes (bb
+# TXbb and the tt discriminant: BDT score or ParT tt; ggF and VBF SRs). Must stay above
+# VR_LOOSE_CUTS so that every SR lies strictly inside the VR box (no SR/CR overlap).
+SR_MIN_CUT = 0.5
+
 
 # Working point bin edges for tt GloParT discriminants
 # Determine using the plot_cuts_hist.py script

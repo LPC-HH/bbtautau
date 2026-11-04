@@ -37,6 +37,7 @@ from bbtautau.userConfig import (
     PT_CUTS,
     SHAPE_VAR,
     SIGNAL_ORDERING,
+    SR_MIN_CUT,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -123,6 +124,29 @@ FOMS_TO_OPTIMIZE = [FOMS["2sqrtB_S_var"]]
 #    b_qcd_sb = data-ttbar in region B
 #    tf = TF derived from (data-ttbar) in B, C, D
 """
+
+
+def _cap_sig_eff_lims(lims, discriminant, axis):
+    """Lower the upper sig-eff limit ``lims[1]`` to the signal efficiency of a cut at SR_MIN_CUT.
+
+    The SR must lie inside the VR box (``userConfig.VR_LOOSE_CUTS``), so the grid never scans
+    cuts below SR_MIN_CUT. Signal efficiency at a cut c = TPR of the ROC at the threshold >= c.
+    """
+    tpr, thresholds = discriminant.roc.tpr, discriminant.roc.thresholds
+    above = thresholds >= SR_MIN_CUT
+    eff_max = float(np.max(tpr[above])) if np.any(above) else 0.0
+    lo, hi = lims
+    if eff_max <= lo:
+        raise ValueError(
+            f"{axis} discriminant {discriminant.get_name()}: signal efficiency at the cut "
+            f"SR_MIN_CUT={SR_MIN_CUT} is {eff_max:.3f}, below the grid lower limit {lo}."
+        )
+    if eff_max < hi:
+        print(
+            f"{axis} grid: sig-eff upper limit {hi} -> {eff_max:.3f} (cut >= SR_MIN_CUT={SR_MIN_CUT})"
+        )
+        hi = eff_max
+    return (lo, hi)
 
 
 class Analyser:
@@ -1137,26 +1161,36 @@ class Analyser:
                     f"TT discriminant '{self.tt_disc_name_channel}' (key: '{tt_disc_key}') not found in ROC analyzer. Available: {list(self.rocAnalyzer.discriminants.keys())}"
                 )
 
+            # Get discriminant objects for threshold lookup (using keys from previous check)
+            bb_discriminant = self.rocAnalyzer.discriminants[bb_disc_key]
+            tt_discriminant = self.rocAnalyzer.discriminants[tt_disc_key]
+
+            # Cap the cuts at >= SR_MIN_CUT: the upper sig-eff limit of each axis is lowered to
+            # the signal efficiency of a cut at SR_MIN_CUT (the tight end is unchanged)
+            gridlims_x = _cap_sig_eff_lims(gridlims_x, bb_discriminant, "bb")
+            gridlims_y = _cap_sig_eff_lims(gridlims_y, tt_discriminant, "tt")
+
             # Create signal efficiency grid with separate limits for each axis
             bbcutSigEff = np.linspace(*gridlims_x, gridsize)
             ttcutSigEff = np.linspace(*gridlims_y, gridsize)
             BBcutSigEff, TTcutSigEff = np.meshgrid(bbcutSigEff, ttcutSigEff)
 
-            # Get discriminant objects for threshold lookup (using keys from previous check)
-            bb_discriminant = self.rocAnalyzer.discriminants[bb_disc_key]
-            tt_discriminant = self.rocAnalyzer.discriminants[tt_disc_key]
-
-            # VECTORIZED threshold computation
-            bbcut_thresholds = bb_discriminant.get_cut_from_sig_eff(bbcutSigEff)
-            ttcut_thresholds = tt_discriminant.get_cut_from_sig_eff(ttcutSigEff)
+            # VECTORIZED threshold computation (the max() only guards against the ROC
+            # interpolation landing a hair below SR_MIN_CUT at the loose end)
+            bbcut_thresholds = np.maximum(
+                bb_discriminant.get_cut_from_sig_eff(bbcutSigEff), SR_MIN_CUT
+            )
+            ttcut_thresholds = np.maximum(
+                tt_discriminant.get_cut_from_sig_eff(ttcutSigEff), SR_MIN_CUT
+            )
 
             # Create threshold meshgrids for actual cuts
             BBcut, TTcut = np.meshgrid(bbcut_thresholds, ttcut_thresholds)
 
         else:
-            # for optimization, pass a full grid
-            bbcut = np.linspace(*gridlims_x, gridsize)
-            ttcut = np.linspace(*gridlims_y, gridsize)
+            # for optimization, pass a full grid (cuts capped at >= SR_MIN_CUT)
+            bbcut = np.linspace(max(gridlims_x[0], SR_MIN_CUT), gridlims_x[1], gridsize)
+            ttcut = np.linspace(max(gridlims_y[0], SR_MIN_CUT), gridlims_y[1], gridsize)
 
             BBcut, TTcut = np.meshgrid(bbcut, ttcut)
 
