@@ -1353,15 +1353,15 @@ class bbtautauSkimmer(SkimmerABC):
         jets_corr = jets
 
         # MET
-        # NanoAOD v15: use PUPPI MET as the nominal MET definition.
+        # PUPPI MET (Type-1, as stored in NanoAOD) is the Run-3 recommended MET, used for
+        # both NanoAOD v12 (2022-2023) and v15 (2024) so that all eras share one definition.
         # For kinematic nuisances, propagate the object pT changes through the
         # transverse recoil and add the native PUPPI unclustered-energy variation.
-        if self._nano_version == "v15":
-            met = events.PuppiMET
-        elif JEC_loader.met_factory is not None:
-            met = JEC_loader.met_factory.build(events.MET, jets_corr, {}) if isData else events.MET
-        else:
-            met = events.MET
+        met = events.PuppiMET
+        if "significance" not in ak.fields(met):
+            # v12 PuppiMET has no significance branch; the saved METsignificance (a BDT input)
+            # is then taken from PF MET.
+            met = ak.with_field(met, events.MET.significance, "significance")
 
         met_syst = {"": met}
         if self._kinematic_systematics and not isData:
@@ -1373,27 +1373,26 @@ class bbtautauSkimmer(SkimmerABC):
             met_syst.update(build_met_recoil_variations(met, taus_corrected, tes_shifted_vars))
             met_syst.update(build_met_recoil_variations(met, jets_corr, jec_shifted_jetvars))
 
-            # NanoAOD PUPPI MET stores the unclustered-energy Up/Down directly.
-            if self._nano_version == "v15":
-                met_fields = set(ak.fields(met))
-                required_uncl = {
-                    "ptUnclusteredUp",
-                    "phiUnclusteredUp",
-                    "ptUnclusteredDown",
-                    "phiUnclusteredDown",
-                }
-                if required_uncl.issubset(met_fields):
-                    met_syst["UnclusteredEnergy_up"] = _met_from_pt_phi(
-                        met, met.ptUnclusteredUp, met.phiUnclusteredUp
-                    )
-                    met_syst["UnclusteredEnergy_down"] = _met_from_pt_phi(
-                        met, met.ptUnclusteredDown, met.phiUnclusteredDown
-                    )
-                else:
-                    logger.warning(
-                        "PuppiMET unclustered-energy branches are missing; "
-                        "UnclusteredEnergy_up/down will not be saved."
-                    )
+            # NanoAOD PUPPI MET stores the unclustered-energy Up/Down directly (v12 and v15).
+            met_fields = set(ak.fields(met))
+            required_uncl = {
+                "ptUnclusteredUp",
+                "phiUnclusteredUp",
+                "ptUnclusteredDown",
+                "phiUnclusteredDown",
+            }
+            if required_uncl.issubset(met_fields):
+                met_syst["UnclusteredEnergy_up"] = _met_from_pt_phi(
+                    met, met.ptUnclusteredUp, met.phiUnclusteredUp
+                )
+                met_syst["UnclusteredEnergy_down"] = _met_from_pt_phi(
+                    met, met.ptUnclusteredDown, met.phiUnclusteredDown
+                )
+            else:
+                logger.warning(
+                    "PuppiMET unclustered-energy branches are missing; "
+                    "UnclusteredEnergy_up/down will not be saved."
+                )
 
         print("ak4 JECs", f"{time.time() - start:.2f}")
         jets = objects.good_ak4jets(jets_corr, nano_version=self._nano_version)
