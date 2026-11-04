@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gc
 import json
 import logging
 import shlex
@@ -1652,34 +1653,58 @@ def main(args):
 
     run_args_written: set[Path] = set()  # one run_args.txt per run (top dir, see below)
 
+    additional_samples = (
+        {sample: SAMPLES[sample] for sample in NON_QCD_BGS}
+        if (args.dataMinusSimABCD or args.showNonDataDrivenPortion)
+        else None
+    )
+
+    # A priori channels: load the data once for all channels and split it per channel below.
+    # The CHANNEL_ORDERING veto chain and --gen-split still load once per channel (deprecated).
+    load_once = args.a_priori_channels and not args.gen_split
+    if load_once:
+        all_events_dict = utils.load_data_all_channels(
+            years=args.years,
+            signals=SM_SIGNALS,
+            channels=[CHANNELS[channel_key] for channel_key in args.channels],
+            test_mode=args.test_mode,
+            tt_pres=args.tt_pres,
+            additional_samples=additional_samples,
+        )
+
     for channel_key in args.channels:
         print(f"\n{'='*60}\nProcessing channel: {channel_key}\n{'='*60}")
 
-        additional_samples = (
-            {sample: SAMPLES[sample] for sample in NON_QCD_BGS}
-            if (args.dataMinusSimABCD or args.showNonDataDrivenPortion)
-            else None
-        )
+        if load_once:
+            events_dict = utils.split_channel(
+                all_events_dict,
+                CHANNELS[channel_key],
+                tt_pres=args.tt_pres,
+                test_mode=args.test_mode,
+                models=models,
+                at_inference=args.at_inference,
+                unbiased_mc_eval=args.unbiased_mc_eval,
+            )
+        else:
+            events_dict = load_data_channel(
+                years=args.years,
+                signals=SM_SIGNALS,
+                channel=CHANNELS[channel_key],
+                test_mode=args.test_mode,
+                tt_pres=args.tt_pres,
+                models=models,
+                additional_samples=additional_samples,
+                at_inference=args.at_inference,
+                unbiased_mc_eval=args.unbiased_mc_eval,
+                restrict_signal_to_channel_gen=args.gen_split,
+            )
 
-        events_dict = load_data_channel(
-            years=args.years,
-            signals=SM_SIGNALS,
-            channel=CHANNELS[channel_key],
-            test_mode=args.test_mode,
-            tt_pres=args.tt_pres,
-            models=models,
-            additional_samples=additional_samples,
-            at_inference=args.at_inference,
-            unbiased_mc_eval=args.unbiased_mc_eval,
-            restrict_signal_to_channel_gen=args.gen_split,
-        )
-
-        if args.a_priori_channels:
-            for year in events_dict:
-                utils.assign_lepton_channel(events_dict[year])
-                for key, sample in events_dict[year].items():
-                    keep = sample.get_var("lepton_channel") == channel_key
-                    events_dict[year][key] = sample.copy_from_selection(keep)
+            if args.a_priori_channels:
+                for year in events_dict:
+                    utils.assign_lepton_channel(events_dict[year])
+                    for key, sample in events_dict[year].items():
+                        keep = sample.get_var("lepton_channel") == channel_key
+                        events_dict[year][key] = sample.copy_from_selection(keep)
 
         production_events_dict: dict[str, dict[str, dict]] | None = None
         if args.a_priori_production_mode is not None:
@@ -1780,6 +1805,10 @@ def main(args):
                     optimized_regions_by_cut[tt_glopart_cut][
                         f"{sr_config.name}{sr_config.channel}"
                     ] = sr_config
+
+        # free this channel's events before the next one
+        del events_dict, production_events_dict
+        gc.collect()
 
 
 if __name__ == "__main__":

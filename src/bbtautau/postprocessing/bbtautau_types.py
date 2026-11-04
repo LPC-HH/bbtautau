@@ -172,6 +172,8 @@ class LoadedSample(utils.LoadedSampleABC):
             events=deepcopy(self.events[selection]) if do_deepcopy else self.events[selection],
             bb_mask=self.bb_mask[selection] if self.bb_mask is not None else None,
             tt_mask=self.tt_mask[selection] if self.tt_mask is not None else None,
+            m_mask=self.m_mask[selection] if self.m_mask is not None else None,
+            e_mask=self.e_mask[selection] if self.e_mask is not None else None,
         )
 
     def get_mask(self, jet: str) -> np.ndarray:

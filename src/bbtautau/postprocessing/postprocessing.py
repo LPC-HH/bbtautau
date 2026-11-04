@@ -228,7 +228,7 @@ def main(args: argparse.Namespace):
     if args.bgs is None:
         args.bgs = {bkey: b for bkey, b in SAMPLES.items() if b.get_type() == "bg"}
 
-    CHANNEL = CHANNELS[args.channel]
+    channels = [CHANNELS[ch] for ch in ([args.channel] if args.channel else args.channels)]
 
     if args.use_ParT and args.tt_glopart_cut is not None:
         print(
@@ -241,30 +241,57 @@ def main(args: argparse.Namespace):
         # by resolving the same CSV lookup used later for real, before the slow (~1hr/year) data
         # load below -- reuses extract_optimal_cuts_from_csv itself so this can't drift from the
         # real resolution logic.
-        for signal_region in signal_regions:
-            for bmin in args.bmin:
-                Regions.extract_optimal_cuts_from_csv(
-                    args.sensitivity_dir,
-                    signal_region,
-                    CHANNEL.key,
-                    args.combined_signals,
-                    bmin,
-                    args.use_ParT,
-                    args.do_vbf,
-                    test_mode=args.test_mode,
-                    tt_pres=args.tt_pres,
-                    overlapping_channels=args.overlapping_channels,
-                    sensitivity_disc_tag=args.sensitivity_disc_tag,
-                    ggf_modelname=args.ggf_modelname,
-                    tt_glopart_cut=args.tt_glopart_cut,
-                    a_priori_channels=args.a_priori_channels,
-                    a_priori_production_mode=args.a_priori_production_mode,
-                )
+        for channel in channels:
+            for signal_region in signal_regions:
+                for bmin in args.bmin:
+                    Regions.extract_optimal_cuts_from_csv(
+                        args.sensitivity_dir,
+                        signal_region,
+                        channel.key,
+                        args.combined_signals,
+                        bmin,
+                        args.use_ParT,
+                        args.do_vbf,
+                        test_mode=args.test_mode,
+                        tt_pres=args.tt_pres,
+                        overlapping_channels=args.overlapping_channels,
+                        sensitivity_disc_tag=args.sensitivity_disc_tag,
+                        ggf_modelname=args.ggf_modelname,
+                        tt_glopart_cut=args.tt_glopart_cut,
+                        a_priori_channels=args.a_priori_channels,
+                        a_priori_production_mode=args.a_priori_production_mode,
+                    )
 
     models = None
     if not args.use_ParT:
         models = [args.ggf_modelname] + ([args.vbf_modelname] if args.do_vbf else [])
 
+    if args.channels is not None:
+        # Load once for all channels, then make each channel's events in memory
+        all_events_dict = putils.load_data_all_channels(
+            years=years,
+            signals=args.sigs,
+            channels=channels,
+            test_mode=args.test_mode,
+            tt_pres=args.tt_pres,
+            load_bgs=True,
+        )
+        for channel in channels:
+            events_dict = putils.split_channel(
+                all_events_dict,
+                channel,
+                tt_pres=args.tt_pres,
+                test_mode=args.test_mode,
+                models=models,
+            )[year_label]
+            plot_dir = args.plot_dir / channel.key / year_label if args.plot_dir else ""
+            make_channel_templates(args, events_dict, channel, signal_regions, year_label, plot_dir)
+            del events_dict
+            gc.collect()
+        return
+
+    # Deprecated: one channel per process
+    CHANNEL = channels[0]
     events_dict, cutflow = load_data_channel(
         years=years,
         signals=args.sigs,
@@ -283,13 +310,27 @@ def main(args: argparse.Namespace):
     if args.a_priori_channels:
         # Classify every sample (data/background/signal alike) by lepton content and keep only
         # this channel's events -- replaces the CHANNEL_ORDERING veto chain in get_templates.
-        # copy_from_selection doesn't preserve e_mask/m_mask, but that's fine here: BDT
-        # prediction (the only consumer of ttMuon*/ttElectron* features) already ran inside
-        # load_data_channel above, and nothing downstream touches e_mask/m_mask directly.
         putils.assign_lepton_channel(events_dict)
         for key, sample in events_dict.items():
             keep = sample.get_var("lepton_channel") == CHANNEL.key
             events_dict[key] = sample.copy_from_selection(keep)
+
+    make_channel_templates(args, events_dict, CHANNEL, signal_regions, year_label, args.plot_dir)
+
+
+def make_channel_templates(
+    args: argparse.Namespace,
+    events_dict: dict[str, LoadedSample],
+    CHANNEL: Channel,
+    signal_regions: list[str],
+    year_label: str,
+    plot_dir: Path,
+):
+    """Templates of one channel and year for every bmin and signal region (main() loads)."""
+    print(
+        f"{CHANNEL.key} events per sample:",
+        {key: len(sample.events) for key, sample in events_dict.items()},
+    )
 
     # A priori ggf/vbf category per event. Applied as a cut on each SR pass (Regions._get_sr_cuts),
     # not by splitting events_dict: CR and VR are filled from all events of the channel.
@@ -308,7 +349,7 @@ def main(args: argparse.Namespace):
             "not filling it in this run."
         )
 
-    args.sigs = {s + CHANNEL.key: SAMPLES[s + CHANNEL.key] for s in args.sigs}
+    sigs = {s + CHANNEL.key: SAMPLES[s + CHANNEL.key] for s in args.sigs}
     systematics: dict[str, dict] = {}
     systematics_path: Path | None = None
     if args.template_dir:
@@ -349,7 +390,7 @@ def main(args: argparse.Namespace):
                 / (CHANNEL.key if args.template_dir else "")
             )
             plot_dir_bmin = (
-                args.plot_dir / f"bmin_{bmin}" / signal_key / (CHANNEL.key if args.plot_dir else "")
+                plot_dir / f"bmin_{bmin}" / signal_key / (CHANNEL.key if plot_dir else "")
             )
 
             if template_dir_bmin:
@@ -360,7 +401,7 @@ def main(args: argparse.Namespace):
             templates = get_templates(
                 events_dict,  # Same data for all bmin values
                 year_label,
-                args.sigs,
+                sigs,
                 args.bgs,
                 CHANNEL,  # Updated channel with new cuts
                 signal_key,
@@ -429,7 +470,7 @@ def main(args: argparse.Namespace):
 
         print(f"Completed processing for bmin={bmin}")
 
-    print(f"\nCompleted processing all bmin values: {args.bmin}")
+    print(f"\nCompleted processing all bmin values: {args.bmin} for {CHANNEL.key}")
 
 
 def control_plots(
@@ -1082,11 +1123,21 @@ def parse_args(parser=None):
     if parser is None:
         parser = argparse.ArgumentParser()
 
-    parser.add_argument(
+    channel_group = parser.add_mutually_exclusive_group(required=True)
+    channel_group.add_argument(
         "--channel",
-        required=True,
         choices=list(Samples.CHANNELS.keys()),
-        help="channel",
+        help="channel (deprecated for templates: loads the data once per channel; use --channels)",
+        type=str,
+    )
+    channel_group.add_argument(
+        "--channels",
+        nargs="+",
+        choices=list(Samples.CHANNELS.keys()),
+        help=(
+            "templates for several channels from one data load per year (see "
+            "utils.load_data_all_channels); requires --a-priori-channels, no --gen-split"
+        ),
         type=str,
     )
 
@@ -1373,6 +1424,15 @@ def parse_args(parser=None):
     if args.a_priori_production_mode == "none":
         args.a_priori_production_mode = None
 
+    if args.channels is not None and (
+        args.control_plots or not args.a_priori_channels or args.gen_split
+    ):
+        parser.error(
+            "--channels supports templates with --a-priori-channels and without --gen-split "
+            "only; use --channel for --control-plots, the CHANNEL_ORDERING veto chain or "
+            "--gen-split"
+        )
+
     args.model_dir = Path(args.model_dir)
 
     if args.data_dir:
@@ -1401,8 +1461,10 @@ def parse_args(parser=None):
                 "test" if args.test_mode else ("tt-presel" if args.tt_pres else "no-presel")
             )
             args.plot_dir = base_plot_dir / today / presel_label / args.channel / year_label
-        else:
+        elif args.channel is not None:
             args.plot_dir = base_plot_dir / args.channel / year_label
+        else:  # --channels: <channel>/<year_label> is added per channel in main()
+            args.plot_dir = base_plot_dir
 
         args.plot_dir.mkdir(parents=True, exist_ok=True)
         # with (args.plot_dir / "args.json").open("w") as f:

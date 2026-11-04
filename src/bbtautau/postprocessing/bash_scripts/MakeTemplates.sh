@@ -265,90 +265,86 @@ for year in "${years[@]}"
 do
     echo "Data dir: $DATA_DIR"
 
-    echo "Templates for $year"
-    for channel in "${channels[@]}"
-    do
-        echo "    Templates for $channel with bmin values: ${bmin_values[*]}"
+    echo "Templates for $year, channels ${channels[*]} (data loaded once) with bmin values: ${bmin_values[*]}"
 
-        # Build command as array to handle spaces and special characters properly
-        cmd=(
-            python -u "${SCRIPT_DIR}/postprocessing.py"
-            --year "$year"
-            --channel "$channel"
-            --data-dir "$DATA_DIR"
-            --plot-dir "${MAIN_DIR}/plots/Templates/$TAG"
-            --template-dir "$TEMPLATE_DIR"
-            --templates
-            --ggf-modelname "$GGF_MODEL"
-            --vbf-modelname "$VBF_MODEL"
-        )
+    # Build command as array to handle spaces and special characters properly
+    cmd=(
+        python -u "${SCRIPT_DIR}/postprocessing.py"
+        --year "$year"
+        --channels "${channels[@]}"
+        --data-dir "$DATA_DIR"
+        --plot-dir "${MAIN_DIR}/plots/Templates/$TAG"
+        --template-dir "$TEMPLATE_DIR"
+        --templates
+        --ggf-modelname "$GGF_MODEL"
+        --vbf-modelname "$VBF_MODEL"
+    )
 
-        # Add --use_ParT if enabled (use ParT instead of BDT)
-        if [[ $USE_PART -eq 1 ]]; then
-            cmd+=(--use_ParT)
-        fi
+    # Add --use_ParT if enabled (use ParT instead of BDT)
+    if [[ $USE_PART -eq 1 ]]; then
+        cmd+=(--use_ParT)
+    fi
 
-        # Add --do-vbf if enabled
-        if [[ $DO_VBF -eq 1 ]]; then
-            cmd+=(--do-vbf)
-        fi
+    # Add --do-vbf if enabled
+    if [[ $DO_VBF -eq 1 ]]; then
+        cmd+=(--do-vbf)
+    fi
 
-        # Add --a-priori-channels if enabled (dev_channel_separation)
-        if [[ $A_PRIORI_CHANNELS -eq 1 ]]; then
-            cmd+=(--a-priori-channels)
-        fi
+    # Add --a-priori-channels if enabled (dev_channel_separation)
+    if [[ $A_PRIORI_CHANNELS -eq 1 ]]; then
+        cmd+=(--a-priori-channels)
+    fi
 
-        # Add --sensitivity-dir if enabled
-        if [[ $USE_SENSITIVITY_DIR -eq 1 ]]; then
-            cmd+=(--sensitivity-dir "$SENSITIVITY_DIR")
-        fi
+    # Add --sensitivity-dir if enabled
+    if [[ $USE_SENSITIVITY_DIR -eq 1 ]]; then
+        cmd+=(--sensitivity-dir "$SENSITIVITY_DIR")
+    fi
 
-        # Add --test-mode if enabled
-        if [[ $TEST_MODE -eq 1 ]]; then
-            cmd+=(--test-mode)
-        fi
+    # Add --test-mode if enabled
+    if [[ $TEST_MODE -eq 1 ]]; then
+        cmd+=(--test-mode)
+    fi
 
-        # Add --tt-pres if enabled
-        if [[ $TT_PRES -eq 1 ]]; then
-            cmd+=(--tt-pres)
-        fi
+    # Add --tt-pres if enabled
+    if [[ $TT_PRES -eq 1 ]]; then
+        cmd+=(--tt-pres)
+    fi
 
-        if [[ $TXBB_SF -eq 1 ]]; then
-            cmd+=(--txbb-sf)
-        fi
+    if [[ $TXBB_SF -eq 1 ]]; then
+        cmd+=(--txbb-sf)
+    fi
 
-        if [[ -n "$APRIORI_PROD_MODE" ]]; then
-            cmd+=(--a-priori-production-mode "$APRIORI_PROD_MODE")
-        fi
+    if [[ -n "$APRIORI_PROD_MODE" ]]; then
+        cmd+=(--a-priori-production-mode "$APRIORI_PROD_MODE")
+    fi
 
-        # Add --combined-signals when set (non-empty string)
-        if [[ -n "$COMBINED_SIGNALS" ]]; then
-            cmd+=(--combined-signals "$COMBINED_SIGNALS")
-        fi
+    # Add --combined-signals when set (non-empty string)
+    if [[ -n "$COMBINED_SIGNALS" ]]; then
+        cmd+=(--combined-signals "$COMBINED_SIGNALS")
+    fi
 
-        # Add --sigs if set (overrides postprocessing.py's default of all SIGNALS)
-        if [[ ${#sigs_values[@]} -gt 0 ]]; then
-            cmd+=(--sigs "${sigs_values[@]}")
-        fi
+    # Add --sigs if set (overrides postprocessing.py's default of all SIGNALS)
+    if [[ ${#sigs_values[@]} -gt 0 ]]; then
+        cmd+=(--sigs "${sigs_values[@]}")
+    fi
 
-        # Add --tt-glopart-cut if set
-        if [[ -n "$TT_GLOPART_CUT" ]]; then
-            cmd+=(--tt-glopart-cut "$TT_GLOPART_CUT")
-        fi
+    # Add --tt-glopart-cut if set
+    if [[ -n "$TT_GLOPART_CUT" ]]; then
+        cmd+=(--tt-glopart-cut "$TT_GLOPART_CUT")
+    fi
 
-        # Add --sensitivity-disc-tag if set
-        if [[ -n "$SENSITIVITY_DISC_TAG" ]]; then
-            cmd+=(--sensitivity-disc-tag "$SENSITIVITY_DISC_TAG")
-        fi
+    # Add --sensitivity-disc-tag if set
+    if [[ -n "$SENSITIVITY_DISC_TAG" ]]; then
+        cmd+=(--sensitivity-disc-tag "$SENSITIVITY_DISC_TAG")
+    fi
 
-        # Add bmin values (passed as multiple arguments)
-        cmd+=(--bmin "${bmin_values[@]}")
+    # Add bmin values (passed as multiple arguments)
+    cmd+=(--bmin "${bmin_values[@]}")
 
-        # Print command for debugging
-        echo "    Running: ${cmd[*]}"
+    # Print command for debugging
+    echo "    Running: ${cmd[*]}"
 
-        # Execute the command
-        "${cmd[@]}"
+    # Execute the command
+    "${cmd[@]}"
 
-    done
 done

@@ -1023,7 +1023,7 @@ def compute_or_load_bdt_preds(
     tt_pres: bool,
     channel: Channel,
     bdt_preds_dir: Path,
-    n_folds: int = 1,
+    n_folds: int | None = None,
     test_mode: bool = False,
     at_inference: bool = False,
     unbiased_mc_eval: bool = True,
@@ -1048,7 +1048,8 @@ def compute_or_load_bdt_preds(
         tt_pres: Whether tt preselection is applied
         channel: Channel object with .key attribute
         bdt_preds_dir: Directory containing/to save BDT predictions
-        n_folds: Number of folds (1 for single model, >1 for k-fold)
+        n_folds: Number of folds (1 for single model, >1 for k-fold); None (default) = the
+            model config's ``n_folds`` (1 if unset)
         test_mode: Whether in test mode
         at_inference: If True, always compute predictions (don't try to load)
         unbiased_mc_eval: Only applies to n_folds=1 models. When True (default),
@@ -1071,6 +1072,9 @@ def compute_or_load_bdt_preds(
             f"Model '{modelname}' has invalid 'signals' in config: {signal_objectives}. "
             f"Must be a list with 1 or 2 elements."
         )
+
+    if n_folds is None:
+        n_folds = int(BDT_CONFIG[modelname].get("n_folds", 1))
 
     if n_folds > 1:
         print(f"Using {n_folds}-fold k-fold BDT inference.")

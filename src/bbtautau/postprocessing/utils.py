@@ -24,7 +24,6 @@ from joblib import Parallel, delayed
 from bbtautau.HLTs import HLTs
 from bbtautau.postprocessing import Samples
 from bbtautau.postprocessing.bbtautau_types import Channel, LoadedSample
-from bbtautau.postprocessing.bdt_config import BDT_CONFIG
 from bbtautau.postprocessing.bdt_utils import compute_or_load_bdt_preds
 from bbtautau.postprocessing.Samples import CHANNELS
 from bbtautau.userConfig import BDT_EVAL_DIR, DATA_PATHS, LEPTON_CONE_DR, MODEL_DIR
@@ -411,6 +410,7 @@ def load_samples(
     multithread: bool = True,
     loader_n_jobs: int | None = None,
     restrict_signal_to_channel_gen: bool = True,
+    split_signals_by_channel: bool = True,
 ) -> dict[str, LoadedSample | pd.DataFrame]:
     """
     Loads and preprocesses physics event samples for a given year and analysis channel.
@@ -432,7 +432,8 @@ def load_samples(
     additional_samples : dict[str, Sample], optional
         Dictionary of additional samples to load, without overriding the default samples. Useful when not using `samples` arg, and taking channel-specific samples from `CHANNELS`.
     restrict_data_to_channel : bool, optional
-        If True, restricts data loading to samples associated only with the specified channels (default: True). Practical to be used without providing samples.
+        If True, loads only the data samples of the specified channels (the union over them;
+        default: True). Practical to be used without providing samples.
     filters_dict : dict[str, list[list[tuple]]], optional
         Dictionary of filter definitions to be applied per sample type. If not provided or not a dictionary, no filters are applied.
     load_columns : dict[str, list[tuple]], optional
@@ -455,6 +456,11 @@ def load_samples(
         data/background. Used by the final-template and sensitivity-optimization paths
         (`postprocessing.py`, `SensitivityStudy.py`) to avoid losing/hiding signal that migrates
         across channels at reco level. See untracked_utils channel migration diagnostic notebook.
+    split_signals_by_channel : bool, optional
+        If True (default), each signal is copied per channel as `f"{signal}{channel.key}"` (see
+        `restrict_signal_to_channel_gen`). If False, each signal is kept once, unsplit, under its
+        own key (moved to the end of the dict, where the per-channel copies would be); used by
+        `load_data_all_channels`, with `split_channel` making the per-channel copies later.
 
     Returns
     -------
@@ -514,11 +520,10 @@ def load_samples(
         print("Note: samples are provided. Ignoring load_samples kwargs load_bgs, load_data.")
 
     if restrict_data_to_channel:
-        # remove unnecessary data samples
-        for channel in channels:
-            for key in Samples.DATASETS:
-                if (key in samples) and (key not in channel.data_samples):
-                    del samples[key]
+        # remove data samples not used by any of the channels
+        for key in Samples.DATASETS:
+            if key in samples and not any(key in channel.data_samples for channel in channels):
+                del samples[key]
 
     if additional_samples is not None:
         for key, sample in additional_samples.items():
@@ -596,6 +601,9 @@ def load_samples(
             print(f"  Available keys in events_dict: {list(events_dict.keys())}")
             print(f"  Signals requested: {signals}")
             continue
+        if not split_signals_by_channel:
+            events_dict[signal] = events_dict.pop(signal)
+            continue
         for channel in channels:
             if not loaded_samples:
                 # quick fix due to old naming still in samples
@@ -624,15 +632,19 @@ def load_samples(
     return events_dict
 
 
-def apply_triggers_data(events_dict: dict[str, LoadedSample], year: str, channel: Channel):
-    """Apply triggers to data and remove overlap between datasets due to multiple triggers fired in an event."""
+def trigger_masks_data(
+    events_dict: dict[str, LoadedSample], year: str, channel: Channel
+) -> dict[str, np.ndarray]:
+    """Trigger masks for the data samples of ``channel``, removing the overlap between datasets
+    due to multiple triggers fired in an event. Data samples not in ``channel.data_samples``
+    (e.g. other channels' PDs in ``load_data_all_channels``) get no mask."""
     ldataset = channel.lepton_dataset
 
     # storing triggers fired per dataset
     # "tau" PD is only present for channels whose menu has a Tau-dataset trigger
     # (currently only hh); hm/he dropped it (see Samples.py data_samples).
     trigdict = {"jetmet": {}}
-    if "tau" in events_dict:
+    if "tau" in events_dict and "tau" in channel.data_samples:
         trigdict["tau"] = {}
     if channel.isLepton:
         trigdict[ldataset] = {}
@@ -652,11 +664,13 @@ def apply_triggers_data(events_dict: dict[str, LoadedSample], year: str, channel
         channel.menu_triggers(year, data_only=True),
     )
 
+    masks = {}
     for key, d in trigdict.items():
         d["jets"] = np.sum([events_dict[key].get_var(hlt) for hlt in jet_triggers], axis=0).astype(
             bool
         )
         if key == "jetmet":
+            masks[key] = d["jets"]
             continue
 
         d["taus"] = np.sum([events_dict[key].get_var(hlt) for hlt in tau_triggers], axis=0).astype(
@@ -665,6 +679,7 @@ def apply_triggers_data(events_dict: dict[str, LoadedSample], year: str, channel
         d["taunojets"] = ~d["jets"] & d["taus"]
 
         if key == "tau":
+            masks[key] = d["taunojets"]
             continue
 
         if channel.isLepton:
@@ -673,15 +688,45 @@ def apply_triggers_data(events_dict: dict[str, LoadedSample], year: str, channel
             ).astype(bool)
 
             d[f"{ldataset}noothers"] = ~d["jets"] & ~d["taus"] & d[ldataset]
+            masks[key] = d[f"{ldataset}noothers"]
 
-            events_dict[ldataset].apply_selection(trigdict[ldataset][f"{ldataset}noothers"])
+    return masks
 
-    # remove overlap
-    # print(trigdict["jetmet"])
 
-    events_dict["jetmet"].apply_selection(trigdict["jetmet"]["jets"])
-    if "tau" in events_dict:
-        events_dict["tau"].apply_selection(trigdict["tau"]["taunojets"])
+def trigger_masks(
+    events_dict: dict[str, LoadedSample],
+    year: str,
+    channel: Channel | None = None,
+) -> dict[str, np.ndarray]:
+    """Trigger masks per sample: MC = OR of the channel's menu triggers (of all channels if
+    ``channel`` is None, i.e. agnostic, used for BDT training); data = see
+    ``trigger_masks_data``."""
+
+    masks = {}
+    channels = CHANNELS.values() if channel is None else [channel]
+    for skey, sample in events_dict.items():
+        if not sample.sample.isData:
+            masks[skey] = np.sum(
+                [
+                    sample.get_var(hlt)
+                    for ch in channels
+                    for hlt in ch.menu_triggers(year, mc_only=True)
+                ],
+                axis=0,
+            ).astype(bool)
+
+    if any(sample.sample.isData for sample in events_dict.values()):
+        if channel is None:
+            raise ValueError("Channel is required to apply triggers to data")
+        masks.update(trigger_masks_data(events_dict, year, channel))
+
+    return masks
+
+
+def apply_triggers_data(events_dict: dict[str, LoadedSample], year: str, channel: Channel):
+    """Apply triggers to data and remove overlap between datasets due to multiple triggers fired in an event."""
+    for key, mask in trigger_masks_data(events_dict, year, channel).items():
+        events_dict[key].apply_selection(mask)
 
     return events_dict
 
@@ -692,33 +737,8 @@ def apply_triggers(
     channel: Channel | None = None,
 ):
     """Apply triggers in MC and data, and remove overlap between datasets."""
-
-    if channel is None:  # agnostic, used for BDT training
-        for _skey, sample in events_dict.items():
-            if not sample.sample.isData:
-                triggered = np.sum(
-                    [
-                        sample.get_var(hlt)
-                        for ch in CHANNELS.values()
-                        for hlt in ch.menu_triggers(year, mc_only=True)
-                    ],
-                    axis=0,
-                ).astype(bool)
-                sample.events = sample.events[triggered]
-    else:
-        # MC: apply only the triggers for the specific channel
-        for _skey, sample in events_dict.items():
-            if not sample.sample.isData:
-                triggered = np.sum(
-                    [sample.get_var(hlt) for hlt in channel.menu_triggers(year, mc_only=True)],
-                    axis=0,
-                ).astype(bool)
-                sample.events = sample.events[triggered]
-
-    if any(sample.sample.isData for sample in events_dict.values()):
-        if channel is None:
-            raise ValueError("Channel is required to apply triggers to data")
-        apply_triggers_data(events_dict, year, channel)
+    for key, mask in trigger_masks(events_dict, year, channel).items():
+        events_dict[key].apply_selection(mask)
 
     return events_dict
 
@@ -1345,26 +1365,15 @@ def load_data_channel(
     # Load or compute BDT predictions for every requested model.
     if models is not None:
         for model in models:
-            if model not in BDT_CONFIG:
-                raise ValueError(f"Could not find config for modelname '{model}' in BDT_CONFIG")
-
-            model_signals = BDT_CONFIG[model].get("signals", [])
-            if not isinstance(model_signals, list) or len(model_signals) == 0:
-                raise ValueError(
-                    f"Model '{model}' has invalid 'signals' in config: {model_signals}. Expected a non-empty list."
-                )
-
-            n_folds = int(BDT_CONFIG[model].get("n_folds", 1))
             compute_or_load_bdt_preds(
                 events_dict=events_dict,
                 modelname=model,
                 model_dir=model_dir,
+                tt_pres=tt_pres,
                 channel=channel,
                 bdt_preds_dir=bdt_eval_dir,
-                tt_pres=tt_pres,
                 test_mode=test_mode,
                 at_inference=at_inference,
-                n_folds=n_folds,
                 unbiased_mc_eval=unbiased_mc_eval,
             )
 
@@ -1372,6 +1381,118 @@ def load_data_channel(
         return events_dict, cutflow
     else:
         return events_dict
+
+
+def load_data_all_channels(
+    years: list[str],
+    signals: list[str],
+    channels: list[Channel],
+    test_mode: bool,
+    tt_pres: bool,
+    ttvsbb: bool = True,
+    **kwargs,
+) -> dict[str, dict[str, LoadedSample]]:
+    """Load data for all years and signals once for several channels, with a priori channels.
+
+    Returns ``{year: {sample: LoadedSample}}`` with the data samples of all ``channels``, the HLT
+    columns of all their menus, each signal once (unsplit, key ``signal``), no trigger selection,
+    and the a priori ``lepton_channel`` assigned. ``split_channel`` then makes each channel's
+    events_dict from it, as ``load_data_channel`` + the ``lepton_channel`` selection would.
+    Supports neither the CHANNEL_ORDERING veto chain nor the gen-truth signal split.
+    """
+    events_dict = {}
+    for year in years:
+        filters_dict = base_filter(test_mode)
+
+        if tt_pres:
+            # agnostic (not channel dependent), as in load_data_channel
+            filters_dict = tt_filters(in_filters=filters_dict, num_fatjets=3, qcd_only=False)
+
+        columns = get_columns(year, hlts_channels=channels)
+
+        events_dict[year] = load_samples(
+            year=year,
+            paths=DATA_PATHS[year],
+            signals=signals,
+            channels=channels,
+            filters_dict=filters_dict,
+            load_columns=columns,
+            restrict_data_to_channel=True,
+            loaded_samples=True,
+            multithread=True,
+            split_signals_by_channel=False,
+            **kwargs,
+        )
+
+        derive_variables(events_dict[year])
+        bbtautau_assignment(events_dict[year], ttvsbb=ttvsbb)
+        leptons_assignment(events_dict[year], dR_cut=LEPTON_CONE_DR)
+        derive_lepton_variables(events_dict[year])
+        derive_vbf_variables(events_dict[year])
+        assign_lepton_channel(events_dict[year])
+
+    return events_dict
+
+
+def split_channel(
+    events_dict: dict[str, dict[str, LoadedSample]],
+    channel: Channel,
+    tt_pres: bool,
+    test_mode: bool,
+    models: list[str] | None = None,
+    model_dir: Path = MODEL_DIR,
+    bdt_eval_dir: Path = BDT_EVAL_DIR,
+    **bdt_kwargs,
+) -> dict[str, dict[str, LoadedSample]]:
+    """``channel``'s events from the output of ``load_data_all_channels`` (not modified): its
+    trigger selection, its data samples, signals renamed to ``f"{signal}{channel.key}"``, the BDT
+    predictions with the channel's cache, then the a priori ``lepton_channel`` selection."""
+    channel_events_dict = {}
+    for year, year_events in events_dict.items():
+        channel_samples = {
+            key: sample
+            for key, sample in year_events.items()
+            if not sample.sample.isData or key in channel.data_samples
+        }
+        masks = trigger_masks(channel_samples, year, channel)
+        channel_events_dict[year] = {}
+        for key, sample in channel_samples.items():
+            channel_sample = sample.copy_from_selection(masks[key])
+            if sample.sample.isSignal:  # same key and Sample as in load_samples
+                channel_sample.sample = Samples.SAMPLES[f"{key}{channel.key}"]
+                channel_events_dict[year][f"{key}{channel.key}"] = channel_sample
+            else:
+                channel_events_dict[year][key] = channel_sample
+        print(
+            f"{channel.key} {year} events after triggers:",
+            {key: len(sample.events) for key, sample in channel_events_dict[year].items()},
+        )
+
+    if models is not None:
+        # The channel's events are copies (boolean-mask indexing), but pandas flags adding the
+        # BDT columns to them as a possible chained assignment while the union is alive: known
+        # false positive (see assign_production_mode).
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", pd.errors.SettingWithCopyWarning)
+            for model in models:
+                compute_or_load_bdt_preds(
+                    events_dict=channel_events_dict,
+                    modelname=model,
+                    model_dir=model_dir,
+                    tt_pres=tt_pres,
+                    channel=channel,
+                    bdt_preds_dir=bdt_eval_dir,
+                    test_mode=test_mode,
+                    **bdt_kwargs,
+                )
+
+    for year_events in channel_events_dict.values():
+        for key, sample in year_events.items():
+            year_events[key] = sample.copy_from_selection(
+                sample.get_var("lepton_channel") == channel.key
+            )
+
+    return channel_events_dict
 
 
 def singleVarHist(
