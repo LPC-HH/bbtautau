@@ -2145,7 +2145,11 @@ class bbtautauSkimmer(SkimmerABC):
 
         ###################### alpha_S and PDF variations ######################
 
-        if ("HHTobbbb" in dataset or "HHto4B" in dataset) or dataset.startswith("TTTo"):
+        # dataset names carry a year prefix (e.g. "2022_TTto4Q"), so match substrings, not startswith
+        lhe_weight_samples = ("HHTobbbb", "HHto4B", "HHto2B2Tau", "TTto", "TTTo")
+        save_lhe_weights = any(s in dataset for s in lhe_weight_samples)
+
+        if save_lhe_weights:
             scale_weights = get_scale_weights(events)
             if scale_weights is not None:
                 weights_dict["scale_weights"] = (
@@ -2155,7 +2159,7 @@ class bbtautauSkimmer(SkimmerABC):
                     (scale_weights * weight_np[:, np.newaxis])[gen_selected], axis=0
                 )
 
-        if "HHTobbbb" in dataset or "HHto4B" in dataset:
+        if save_lhe_weights:
             pdf_weights = get_pdf_weights(events)
             weights_dict["pdf_weights"] = pdf_weights * weights_dict["weight"][:, np.newaxis]
             totals_dict["np_pdf_weights"] = np.sum(
