@@ -262,6 +262,24 @@ class HLTs:
                 dataset="JetMET",
             ),
         ],
+        # PFJet paths, saved for a possible PNetBB OR PFJet trigger (2022-2023 only for now)
+        "pfjet": [
+            HLT(
+                name="HLT_AK8PFJet425_SoftDropMass40",
+                years=years_2022 + years_2023,
+                dataset="JetMET",
+            ),
+            HLT(
+                name="HLT_AK8PFJet420_MassSD30",
+                years=years_2022 + years_2023,
+                dataset="JetMET",
+            ),
+            HLT(
+                name="HLT_AK8PFJet425_SoftDropMass30",
+                years=years_2024,
+                dataset="JetMET",
+            ),
+        ],
         "ditau": [
             HLT(
                 name="HLT_DoubleMediumDeepTauPFTauHPS35_L2NN_eta2p1",
