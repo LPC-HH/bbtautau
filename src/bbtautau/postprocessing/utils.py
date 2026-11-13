@@ -320,6 +320,7 @@ def get_columns(
             ("MuonPhi", 2),
             ("Muoncharge", 2),
             ("MuonMass", 2),
+            ("TauPt", 2),  # ditau trigger SF
         ]
 
     if vbf:

@@ -37,6 +37,7 @@ from bbtautau.postprocessing.utils import load_data_channel
 from bbtautau.userConfig import (
     CHANNEL_ORDERING,
     MODEL_DIR,
+    PLOT_DIR,
     SHAPE_VAR,
     SIGNAL_ORDERING,
 )
@@ -343,6 +344,13 @@ def make_channel_templates(
             deta_cut=args.vbf_deta_cut,
         )
 
+    if args.trigger_sf:
+        # all MC, once per channel (HH4b's global pnetbb-leg uncertainty uses the whole sample);
+        # the regions below are selections of these events, so every region gets the SF
+        for sample in events_dict.values():
+            if not sample.sample.isData:
+                corrections.apply_trigger_sfs(sample, year_label, CHANNEL)
+
     if not args.a_priori_channels:
         print(
             "WARNING: the validation region (vr) is only supported with --a-priori-channels; "
@@ -427,6 +435,7 @@ def make_channel_templates(
                 a_priori_channels=args.a_priori_channels,
                 a_priori_production_mode=args.a_priori_production_mode is not None,
                 apply_txbb_sf=args.txbb_sf,
+                apply_trigger_sf=args.trigger_sf,
                 selection_region_kwargs={
                     "sensitivity_dir": args.sensitivity_dir,
                     "bmin": bmin,  # Use loop variable, not args.bmin
@@ -754,6 +763,7 @@ def get_templates(
     a_priori_channels: bool = False,
     a_priori_production_mode: bool = False,
     apply_txbb_sf: bool = False,
+    apply_trigger_sf: bool = False,
 ) -> dict[str, Hist]:
     """
     (1) Makes histograms for each region in the ``selection_regions`` dictionary,
@@ -844,6 +854,17 @@ def get_templates(
         ]
         print(f"TXbb SF at cut {txbb_cut:.4f} for {txbb_sf_keys}")
 
+    # Trigger SF: applied to all MC in make_channel_templates (every region); here only the
+    # template variations, from the weight columns added by corrections.apply_trigger_sfs.
+    trigger_sf_keys, trigger_variations = [], []
+    if apply_trigger_sf and not do_jshift:
+        trigger_sf_keys = [key for key, s in events_dict.items() if not s.sample.isData]
+        trigger_variations = [
+            f"trigger{leg}_{shift}"
+            for leg in ["", f"_{corrections.trigger_leg2(channel)}"]
+            for shift in ["down", "up"]
+        ]
+
     for rname, region in selection_regions.items():
         pass_region = rname == "sr"
         region_txbb_sf_keys = txbb_sf_keys if rname == "sr" else []
@@ -899,6 +920,9 @@ def get_templates(
         for skey in region_txbb_sf_keys:
             hist_samples += [f"{skey}_{var}" for var in txbb_variations]
 
+        for skey in trigger_sf_keys:
+            hist_samples += [f"{skey}_{var}" for var in trigger_variations]
+
         # if not do_jshift:
         #     for shift in ["down", "up"]:
         #         for wshift, wsyst in weight_shifts.items():
@@ -935,6 +959,14 @@ def get_templates(
 
             if skey in region_txbb_sf_keys:
                 for var in txbb_variations:
+                    h.fill(
+                        Sample=f"{skey}_{var}",
+                        **fill_data,
+                        weight=sample.get_var(f"{weight_key}_{var}"),
+                    )
+
+            if skey in trigger_sf_keys:
+                for var in trigger_variations:
                     h.fill(
                         Sample=f"{skey}_{var}",
                         **fill_data,
@@ -1189,7 +1221,8 @@ def parse_args(parser=None):
 
     parser.add_argument(
         "--plot-dir",
-        help="If making control or template plots, path to directory to save them in",
+        help="If making control or template plots, path to directory to save them in "
+        "(default: plots/Templates/<template-dir name>)",
         default="",
         type=str,
     )
@@ -1314,6 +1347,13 @@ def parse_args(parser=None):
         "txbb-sf",
         "Apply TXbb tagger SFs (corrections.apply_txbb_sfs) to signal + TXBB_SF_BG_KEYS, with "
         "per-pT-bin up/down template variations",
+        default=False,
+    )
+    add_bool_arg(
+        parser,
+        "trigger-sf",
+        "Apply event trigger SFs (corrections.apply_trigger_sfs) to all MC in every region, with "
+        "pnetbb-leg and second-leg up/down template variations",
         default=False,
     )
 
@@ -1447,6 +1487,11 @@ def parse_args(parser=None):
         args.signal_data_dirs = [Path(sig_dir) for sig_dir in args.signal_data_dirs]
     elif args.data_dir:
         args.signal_data_dirs = [args.data_dir]
+
+    # default plot dir, same layout as MakeTemplates.sh: plots/Templates/<template-dir name>
+    if not args.plot_dir:
+        args.plot_dir = PLOT_DIR / "Templates" / (Path(args.template_dir).name or "untagged")
+        print(f"--plot-dir not given, using {args.plot_dir}")
 
     # save args in args.plot_dir and args.template_dir if they exist
     if args.plot_dir:

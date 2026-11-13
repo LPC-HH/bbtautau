@@ -183,6 +183,13 @@ add_bool_arg(
 )
 add_bool_arg(
     parser,
+    "trigger-sf",
+    "Add trigger SF shape nuisances, pnetbb leg + one per second leg (templates must be made with "
+    "postprocessing.py --trigger-sf)",
+    default=False,
+)
+add_bool_arg(
+    parser,
     "tautau-sf",
     "Apply a rate-only tautau tagger SF to all MC in the pass regions: scale by --tautau-sf-value "
     "and add one correlated asymmetric lnN from --tautau-sf-unc-{up,down}",
@@ -411,7 +418,6 @@ nuisance_params_dict = {
 # dictionary of correlated shape systematics: name in templates -> name in cards, etc.
 corr_year_shape_systs = {
     # "JES": Syst(name="CMS_scale_j", prior="shape", samples=all_mc),
-    "trigger": Syst(name=f"{CMS_PARAMS_LABEL}_trigger", prior="shape", samples=all_mc),
     # "FSRPartonShower": Syst(name="ps_fsr", prior="shape", samples=sig_keys, samples_corr=True),
     # "ISRPartonShower": Syst(name="ps_isr", prior="shape", samples=sig_keys, samples_corr=True),
     "scale": Syst(
@@ -440,6 +446,20 @@ if args.txbb_sf:
             prior="shape",
             samples=sig_keys + single_h_keys,
             pass_only=True,
+        )
+
+# second trigger leg (HLTs.MENU key) of each channel: its nuisance only acts in that channel
+TRIGGER_LEG2_CHANNEL = {"trigger_ditau": "hh", "trigger_muiso24": "hm", "trigger_ele30": "he"}
+
+if args.trigger_sf:
+    # as HH4b: one shape nuisance on all MC, correlated across years, samples and regions
+    # (template variations "<sample>_trigger_{up,down}", see corrections.apply_trigger_sfs)
+    corr_year_shape_systs["trigger"] = Syst(
+        name=f"{CMS_PARAMS_LABEL}_trigger", prior="shape", samples=all_mc
+    )
+    for skey in TRIGGER_LEG2_CHANNEL:
+        corr_year_shape_systs[skey] = Syst(
+            name=f"{CMS_PARAMS_LABEL}_{skey}", prior="shape", samples=all_mc
         )
 
 uncorr_year_shape_systs = {
@@ -775,7 +795,9 @@ def fill_regions(
 
             # correlated shape systematics
             for skey, syst in corr_year_shape_systs.items():
-                if not skey.startswith("txbb_"):
+                if not skey.startswith(("txbb_", "trigger")):
+                    continue
+                if TRIGGER_LEG2_CHANNEL.get(skey, channel.key) != channel.key:
                     continue
                 if sample_name not in syst.samples or (not pass_region and syst.pass_only):
                     continue
