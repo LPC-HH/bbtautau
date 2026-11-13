@@ -126,6 +126,12 @@ VR_LOOSE_CUTS: dict[str, dict[str, float]] = {
 # VR_LOOSE_CUTS so that every SR lies strictly inside the VR box (no SR/CR overlap).
 SR_MIN_CUT = 0.5
 
+# VBF SRs only (signal regions named vbf*): append one "no TXbb cut" point (cut 0, signal
+# efficiency 1) to the bb axis of the SensitivityStudy grid, on top of the >= SR_MIN_CUT scan.
+# The tt axis and the ggF SRs keep SR_MIN_CUT. Such an SR is not inside the VR box: in BDT mode
+# the CR vetoes the SRs so CR/VR/SRs stay disjoint, but in ParT mode SR-VBF and CR overlap.
+VBF_ALLOW_NO_TXBB_CUT = True
+
 
 # Working point bin edges for tt GloParT discriminants
 # Determine using the plot_cuts_hist.py script

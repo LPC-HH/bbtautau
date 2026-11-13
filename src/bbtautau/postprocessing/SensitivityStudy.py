@@ -38,6 +38,7 @@ from bbtautau.userConfig import (
     SHAPE_VAR,
     SIGNAL_ORDERING,
     SR_MIN_CUT,
+    VBF_ALLOW_NO_TXBB_CUT,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -1102,6 +1103,13 @@ class Analyser:
 
         return evals_opt
 
+    def _allow_no_txbb_cut(self) -> bool:
+        """VBF SRs get one extra "no TXbb cut" point (cut 0, sig eff 1) on the bb grid axis."""
+        allow = VBF_ALLOW_NO_TXBB_CUT and self.region_name.startswith("vbf")
+        if allow:
+            print("bb grid: + no-TXbb-cut point (cut 0, sig eff 1) for the VBF SR")
+        return allow
+
     def grid_search_opt(
         self,
         gridsize,
@@ -1184,6 +1192,11 @@ class Analyser:
                 tt_discriminant.get_cut_from_sig_eff(ttcutSigEff), SR_MIN_CUT
             )
 
+            if self._allow_no_txbb_cut():
+                bbcutSigEff = np.append(bbcutSigEff, 1.0)
+                bbcut_thresholds = np.append(bbcut_thresholds, 0.0)
+                BBcutSigEff, TTcutSigEff = np.meshgrid(bbcutSigEff, ttcutSigEff)
+
             # Create threshold meshgrids for actual cuts
             BBcut, TTcut = np.meshgrid(bbcut_thresholds, ttcut_thresholds)
 
@@ -1191,6 +1204,8 @@ class Analyser:
             # for optimization, pass a full grid (cuts capped at >= SR_MIN_CUT)
             bbcut = np.linspace(max(gridlims_x[0], SR_MIN_CUT), gridlims_x[1], gridsize)
             ttcut = np.linspace(max(gridlims_y[0], SR_MIN_CUT), gridlims_y[1], gridsize)
+            if self._allow_no_txbb_cut():
+                bbcut = np.append(bbcut, 0.0)
 
             BBcut, TTcut = np.meshgrid(bbcut, ttcut)
 
@@ -2057,13 +2072,13 @@ Examples:
     )
     disc_group.add_argument(
         "--ggf-modelname",
-        default="May4_optimized_ggf",
+        default="3Nov26_wp0p999_newCA_ggf",
         help="BDT model name for ggF",
     )
     disc_group.add_argument(
         "--vbf-modelname",
         type=str,
-        default="May4_optimized_vbf",
+        default="3Nov26_wp0p999_newCA_vbfk2v0",
         help="BDT model name for VBF",
     )
     disc_group.add_argument(
