@@ -229,6 +229,7 @@ def get_columns(
     vbf: bool = True,
     all_hlts: bool = False,
     gen_leptons=False,
+    trig_match=False,
 ):
     """
     Build per-sample-type column lists for :func:`load_samples`.
@@ -328,6 +329,20 @@ def get_columns(
             ("VBFJetPhi", 2),
             ("VBFJetMass", 2),
         ]
+
+    if trig_match:
+        columns_data += [
+            ("ElectronTrigMatchEGamma", 1),
+            ("MuonTrigMatchMuon", 1),
+            ("TauTrigMatchDiTau", 1),
+            ("TriggerObjectMatched_ak8FatJet0", 4),
+            ("TriggerObjectMatched_ak8FatJet1", 4),
+            ("TriggerObjectPt", 4),
+            ("TriggerObjectEta", 4),
+            ("TriggerObjectPhi", 4),
+            ("TriggerObjectBit", 4),
+        ]
+
     if other:
         columns_data += [
             ("nFatJets", 1),
