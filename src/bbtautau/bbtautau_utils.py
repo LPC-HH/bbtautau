@@ -11,7 +11,7 @@ def parse_common_run_args(parser):
         required=True,
         help="processor",
         type=str,
-        choices=["skimmer"],
+        choices=["skimmer", "ttskimmer"],  # ttskimmer: muon + AK8 region (JMS/JMR, trigger SFs)
     )
 
     parser.add_argument(
