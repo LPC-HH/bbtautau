@@ -44,6 +44,13 @@ def get_processor(
             prescale_factor=prescale_factor,
         )
 
+    if processor == "ttskimmer":
+        from bbtautau.processors import ttSkimmer
+
+        return ttSkimmer(xsecs=xsecs, nano_version=nano_version)
+
+    raise ValueError(f"Unknown processor {processor}")
+
 
 def main(args):
     p = get_processor(
@@ -58,8 +65,8 @@ def main(args):
         args.prescale_factor,
     )
 
-    save_parquet = {"skimmer": True}[args.processor]
-    save_root = {"skimmer": True}[args.processor]
+    save_parquet = {"skimmer": True, "ttskimmer": True}[args.processor]
+    save_root = {"skimmer": True, "ttskimmer": True}[args.processor]
 
     skipbadfiles = True
 
