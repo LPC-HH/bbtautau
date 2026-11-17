@@ -1,7 +1,7 @@
 """
 Creates datacards for Higgs Combine using hist.Hist templates output from postprocessing.py
 (1) Adds systematics for all samples,
-(2) Sets up data-driven QCD background estimate ('rhalphabet' method)
+(2) Sets up the default data-driven QCD background estimate ('rhalphabet' method)
 
 Based on https://github.com/rkansal47/HHbbVV/blob/main/src/HHbbVV/postprocessing/CreateDatacard.py
 
@@ -24,9 +24,8 @@ import rhalphalib as rl
 from boostedhh.hh_vars import (
     LUMI,
     data_key,
-    jecs,
-    jmsr,
     jmsr_keys,
+    qcd_key,
 )
 from boostedhh.hh_vars import years as hh_years
 from hist import Hist
@@ -38,6 +37,7 @@ from bbtautau.postprocessing.datacardHelpers import (
     Syst,
     add_bool_arg,
     combine_templates,
+    floor_empty_bins,
     get_effect_updown,
     rem_neg,
     sum_templates,
@@ -50,6 +50,11 @@ from bbtautau.postprocessing.Samples import (
     sig_keys_vbf,
     single_h_keys,
     ttbar_keys,
+)
+from bbtautau.postprocessing.systematics import (
+    load_manifest,
+    matched_template_tag,
+    template_variation,
 )
 from bbtautau.userConfig import SHAPE_VAR
 
@@ -71,12 +76,41 @@ parser.add_argument(
     "--templates-dir",
     default="",
     type=str,
-    help="input pickle file of dict of hist.Hist templates",
+    help="Template output directory containing the bmin_<N> folders",
+)
+parser.add_argument(
+    "--ak8-matched-only",
+    action="store_true",
+    help="Read diagnostic templates written with --ak8-matched-only",
+)
+parser.add_argument(
+    "--lepton-matched-only",
+    action="store_true",
+    help="Read diagnostic templates written with --lepton-matched-only",
 )
 
 add_bool_arg(parser, "sig-separate", "separate templates for signals and bgs", default=False)
 
 parser.add_argument("--cards-dir", default="cards", type=str, help="output card directory")
+
+add_bool_arg(
+    parser,
+    "template-systematics",
+    "Read generated systematics manifests and attach their nuisances",
+    default=True,
+)
+parser.add_argument(
+    "--syst-correlations",
+    type=str,
+    default=None,
+    help="JSON source -> 'all' or 'year'; overrides provisional manifest correlations",
+)
+parser.add_argument(
+    "--shape-empty-bin-floor",
+    type=float,
+    default=1e-6,
+    help="Positive nominal floor only for bins populated by shape variations",
+)
 
 parser.add_argument("--mcstats-threshold", default=100, type=float, help="mcstats threshold n_eff")
 parser.add_argument(
@@ -103,6 +137,14 @@ parser.add_argument(
     nargs="*",
     type=str,
     help="specify signals",
+)
+parser.add_argument(
+    "--bgs",
+    nargs="+",
+    help=(
+        "Background sample keys to include. Defaults to the full datacard background list. "
+        "Include qcd to use the simulated QCD template."
+    ),
 )
 
 parser.add_argument(
@@ -199,6 +241,9 @@ parser.add_argument(
     help="absolute down uncertainty on the tautau SF",
 )
 args = parser.parse_args()
+
+if (args.ak8_matched_only or args.lepton_matched_only) and args.sig_separate:
+    parser.error("Matched-only modes require templates with signal and backgrounds in one file")
 
 VR_MODE = args.region == "vr"
 if VR_MODE:
@@ -302,7 +347,17 @@ mc_samples_sig = OrderedDict(
     ]
 )
 
+if args.bgs is not None:
+    if qcd_key in args.bgs:
+        mc_samples[qcd_key] = qcd_key
+    unknown_bgs = sorted(set(args.bgs) - mc_samples.keys())
+    if unknown_bgs:
+        parser.error(f"Unknown background(s) for --bgs: {', '.join(unknown_bgs)}")
+    mc_samples = OrderedDict((key, name) for key, name in mc_samples.items() if key in args.bgs)
+
 bg_keys = list(mc_samples.keys())
+if qcd_key in bg_keys:
+    logging.info("Using the simulated QCD template")
 
 if args.only_sm:
     # Important: this only changes which samples some nuisances apply to (via sig_keys_*).
@@ -527,6 +582,41 @@ for skey, syst in uncorr_year_shape_systs.items():
 LEGACY_REGION_ALIASES = {"vrpass": "vr", "pass": "sr", "fail": "cr"}  # "vrpass" checked first
 
 
+def read_template_systematics(templates_dir, years, correlations, parameters, *, template_suffix=""):
+    """Group manifest entries into shared or year-specific shape nuisances."""
+    by_source = {}
+    missing_years = []
+    for year in years:
+        path = Path(templates_dir) / f"{year}{template_suffix}_systematics.json"
+        if not template_suffix and not path.exists():
+            missing_years.append(year)
+            continue
+        manifest = load_manifest(path)
+        if manifest["year"] != year:
+            raise ValueError(f"Wrong year in {path}")
+        for source, spec in manifest["nuisances"].items():
+            by_source.setdefault(source, {})[year] = spec
+
+    if by_source and missing_years:
+        raise ValueError(f"{templates_dir}: missing systematics manifests for {missing_years}")
+    nuisances = []
+    for source, by_year in by_source.items():
+        policy = {correlations.get(source, spec["correlation"]) for spec in by_year.values()}
+        if policy not in ({"all"}, {"year"}):
+            raise ValueError(f"Invalid or inconsistent correlation for {source}: {policy}")
+        name = {"JES": "CMS_scale_j", "JER": "CMS_res_j"}.get(
+            source, f"{CMS_PARAMS_LABEL}_{source}"
+        )
+        groups = {name: by_year} if policy == {"all"} else {
+            f"{name}_{year}": {year: spec} for year, spec in by_year.items()
+        }
+        for name, active_years in groups.items():
+            if name not in parameters:
+                parameters[name] = rl.NuisanceParameter(name, "shape")
+            nuisances.append((source, active_years, parameters[name]))
+    return nuisances
+
+
 def normalize_region_keys(templates: dict[str, Hist], templates_path: str) -> dict[str, Hist]:
     """Rename legacy template keys (pass/fail/vrpass[...]) to physical ones (sr/cr/vr[...])."""
     out = {}
@@ -576,6 +666,8 @@ def get_templates(
     years: list[str],
     sig_separate: bool,
     scale: float | None = None,
+    *,
+    template_suffix: str = "",
 ):
     """Loads templates, combines bg and sig templates if separate, sums across all years"""
     templates_dict: dict[str, dict[str, Hist]] = {}
@@ -583,7 +675,8 @@ def get_templates(
     if not sig_separate:
         # signal and background templates in same hist, just need to load and sum across years
         for year in years:
-            with Path(f"{templates_dir}/{year}_templates.pkl").open("rb") as f:
+            path = Path(templates_dir) / f"{year}{template_suffix}_templates.pkl"
+            with path.open("rb") as f:
                 templates_dict[year] = rem_neg(fit_role_templates(pickle.load(f), f.name))
     else:
         # signal and background in different hists - need to combine them into one hist
@@ -606,38 +699,29 @@ def get_templates(
             for key in templates_dict[year]:
                 templates_dict[year][key] = templates_dict[year][key] * scale
 
-    templates_summed: dict[str, Hist] = sum_templates(templates_dict, years)  # sum across years
+    # Shifted regions are read per year by get_year_updown; only fit roles are summed.
+    nominal_regions = {"pass", "fail", "vrpass"}
+    templates_summed = sum_templates(
+        {
+            year: {k: h for k, h in regions.items() if k.removesuffix(MCB_LABEL) in nominal_regions}
+            for year, regions in templates_dict.items()
+        },
+        years,
+    )
     return templates_dict, templates_summed
 
 
-def get_year_updown(
-    templates_dict, sample, region, region_noblinded, blind_str, years_to_shift, skey
-):
-    """
-    Return templates with only the given year's shapes shifted up and down by the ``skey`` systematic.
-    Returns as [up templates, down templates]
-    """
-    updown = []
-
-    for shift in ["up", "down"]:
-        sshift = f"{skey}_{shift}"
-        # get nominal templates for each year
-        templates = {y: templates_dict[y][region][sample, ...] for y in years}
-
-        # replace template for this year with the shifted template
-        for year in years_to_shift:
-            if skey in jecs or skey in jmsr:
-                # JEC/JMCs saved as different "region" in dict
-                reg_name = f"{region_noblinded}_{sshift}{blind_str}"
-                templates[year] = templates_dict[year][reg_name][sample, ...]
-            else:
-                # weight uncertainties saved as different "sample" in dict
-                templates[year] = templates_dict[year][region][f"{sample}_{sshift}", ...]
-
-        # sum templates with year's template replaced with shifted
-        updown.append(sum(list(templates.values())).values())
-
-    return updown
+def get_year_updown(templates_dict, sample, region, source, active_years):
+    """Sum Up/Down across years, varying only eras that declare this sample."""
+    return [
+        sum(
+            template_variation(regions, region, sample, source, direction, active_years[year]["kind"])
+            if year in active_years and sample in active_years[year]["samples"]
+            else regions[region][sample, ...].values()
+            for year, regions in templates_dict.items()
+        )
+        for direction in ("up", "down")
+    ]
 
 
 def fill_regions(
@@ -645,15 +729,15 @@ def fill_regions(
     sr_key: str,
     channel: rl.Channel,
     regions: list[str],
-    templates_dict: dict,  # noqa: ARG001
+    templates_dict: dict,
     templates_summed: dict,
     mc_samples: dict[str, str],
     nuisance_params: dict[str, Syst],
     nuisance_params_dict: dict[str, rl.NuisanceParameter],
     corr_year_shape_systs: dict[str, Syst],
-    uncorr_year_shape_systs: dict[str, Syst],  # noqa: ARG001
     shape_systs_dict: dict[str, rl.NuisanceParameter],
     bblite: bool = True,
+    template_systs=(),
 ):
     """Fill samples per region including given rate, shape and mcstats systematics.
     Ties "MCBlinded" and "nonblinded" mc stats parameters together.
@@ -671,8 +755,6 @@ def fill_regions(
           and NuisanceParameter object
         corr_year_shape_systs (Dict[str, Tuple]): dict of shape systs (correlated across years)
           and tuple of their (name in cards, samples affected by it)
-        uncorr_year_shape_systs (Dict[str, Tuple]): dict of shape systs (unccorrelated across years)
-          and tuple of their (name in cards, samples affected by it)
         shape_systs_dict (Dict[str, rl.NuisanceParameter]): dict of shape syst names and
           NuisanceParameter object
         pass_only (List[str]): list of systematics which are only applied in the pass region(s)
@@ -685,7 +767,6 @@ def fill_regions(
 
         pass_region = "pass" in region
         region_noblinded = region.split(MCB_LABEL)[0]
-        blind_str = MCB_LABEL if region.endswith(MCB_LABEL) else ""
 
         logging.info(f"\tStarting region: {region}")
         # can't have '_'s in name
@@ -708,6 +789,34 @@ def fill_regions(
             # tautau SF only in the pass regions (fail regions are not tt-tagged)
             rate_sf = TAUTAU_SF if pass_region else 1.0
             sample_template = sample_template * rate_sf
+
+            # Collect variations before creating the TemplateSample, as in HH4b.
+            variations = []
+            for source, syst in corr_year_shape_systs.items():
+                if not source.startswith("txbb_") or sample_name not in syst.samples:
+                    continue
+                if syst.pass_only and not pass_region:
+                    continue
+                up, down = [
+                    region_templates[f"{sample_name}_{source}_{d}", ...].values() * rate_sf
+                    for d in ("up", "down")
+                ]
+                variations.append((shape_systs_dict[source], up, down, syst.convert_shape_to_lnN))
+
+            for source, active_years, param in template_systs:
+                if not any(sample_name in spec["samples"] for spec in active_years.values()):
+                    continue
+                up, down = get_year_updown(templates_dict, sample_name, region, source, active_years)
+                variations.append((param, up * rate_sf, down * rate_sf, False))
+
+            floor_bins = None
+            if variations:
+                nominal, floor_bins = floor_empty_bins(
+                    sample_template.values(),
+                    [(up, down) for _, up, down, lnN in variations if not lnN],
+                    args.shape_empty_bin_floor,
+                )
+                sample_template.values()[...] = nominal
 
             stype = rl.Sample.SIGNAL if sample_name in sig_keys else rl.Sample.BACKGROUND
             sample = rl.TemplateSample(ch.name + "_" + card_name, stype, sample_template)
@@ -773,35 +882,8 @@ def fill_regions(
 
                 sample.setParamEffect(param, val, effect_down=val_down)
 
-            # correlated shape systematics
-            for skey, syst in corr_year_shape_systs.items():
-                if not skey.startswith("txbb_"):
-                    continue
-                if sample_name not in syst.samples or (not pass_region and syst.pass_only):
-                    continue
-
-                logging.info(f"Getting {skey} shapes")
-
-                if skey in jecs or skey in jmsr:
-                    # JEC/JMCs saved as different "region" in dict
-                    up_hist = templates_summed[f"{region_noblinded}_{skey}_up{blind_str}"][
-                        sample_name, :
-                    ]
-                    down_hist = templates_summed[f"{region_noblinded}_{skey}_down{blind_str}"][
-                        sample_name, :
-                    ]
-
-                    values_up = up_hist.values() * rate_sf
-                    values_down = down_hist.values() * rate_sf
-                else:
-                    # weight uncertainties saved as different "sample" in dict
-                    values_up = region_templates[f"{sample_name}_{skey}_up", :].values() * rate_sf
-                    values_down = (
-                        region_templates[f"{sample_name}_{skey}_down", :].values() * rate_sf
-                    )
-
-                logger = logging.getLogger(f"validate_shapes_{region}_{sample_name}_{skey}")
-
+            for param, values_up, values_down, convert_to_lnN in variations:
+                logger = logging.getLogger(f"validate_shapes_{region}_{sample_name}_{param.name}")
                 effect_up, effect_down = get_effect_updown(
                     values_nominal,
                     values_up,
@@ -809,61 +891,10 @@ def fill_regions(
                     mask,
                     logger,
                     args.epsilon,
-                    syst.convert_shape_to_lnN,
+                    convert_to_lnN,
+                    floor_bins=floor_bins,
                 )
-                if not syst.samples_corr:
-                    # separate syst if not correlated across samples
-                    sdkey = f"{skey}_{sample_name}"
-                elif syst.decorrelate_regions:
-                    # separate syst if not correlated across regions
-                    sdkey = f"{skey}_{region_noblinded}"
-                elif syst.separate_prod_modes:
-                    # separate syst if not correlated across production modes
-                    if sample_name in sig_keys_ggf:
-                        prod_mode = "ggHH"
-                    elif sample_name in sig_keys_vbf:
-                        prod_mode = "qqHH"
-                    else:
-                        raise NotImplementedError(
-                            f"Splitting Syst by production mode for Sample {sample_name} not yet implemented"
-                        )
-                    sdkey = f"{skey}_{prod_mode}"
-                else:
-                    sdkey = skey
-                sample.setParamEffect(shape_systs_dict[sdkey], effect_up, effect_down)
-
-            # # uncorrelated shape systematics
-            # for skey, syst in uncorr_year_shape_systs.items():
-            #     if sample_name not in syst.samples or (not pass_region and syst.pass_only):
-            #         continue
-
-            #     logging.info(f"Getting {skey} shapes")
-
-            #     for uncorr_label, years_to_shift in syst.uncorr_years.items():
-
-            #         values_up, values_down = get_year_updown(
-            #             templates_dict,
-            #             sample_name,
-            #             region,
-            #             region_noblinded,
-            #             blind_str,
-            #             years_to_shift,
-            #             skey,
-            #         )
-            #         logger = logging.getLogger(f"validate_shapes_{region}_{sample_name}_{skey}")
-
-            #         effect_up, effect_down = get_effect_updown(
-            #             values_nominal,
-            #             values_up,
-            #             values_down,
-            #             mask,
-            #             logger,
-            #             args.epsilon,
-            #             syst.convert_shape_to_lnN,
-            #         )
-            #         sample.setParamEffect(
-            #             shape_systs_dict[f"{skey}_{uncorr_label}"], effect_up, effect_down
-            #         )
+                sample.setParamEffect(param, effect_up, effect_down)
 
             ch.addSample(sample)
 
@@ -1014,6 +1045,7 @@ def createDatacardAlphabet(
     templates_dict: dict,
     templates_summed: dict,
     shape_vars: list[ShapeVar],
+    template_systs=(),
 ):
     # (pass, fail) x (unblinded, blinded)
     blind_strs = [""] if args.unblinded else ["", MCB_LABEL]
@@ -1034,29 +1066,31 @@ def createDatacardAlphabet(
         nuisance_params,
         nuisance_params_dict,
         corr_year_shape_systs,
-        uncorr_year_shape_systs,
         shape_systs_dict,
         args.bblite,
-    ]
-
-    fit_args = [
-        model,
-        sr_key,
-        channel,
-        shape_vars,
-        templates_summed,
-        args.scale_templates,
-        args.min_qcd_val,
-        args.unblinded,
+        template_systs,
     ]
 
     fill_regions(*fill_args)
-    alphabet_fit(*fit_args)
+    if qcd_key not in bg_keys:
+        alphabet_fit(
+            model,
+            sr_key,
+            channel,
+            shape_vars,
+            templates_summed,
+            args.scale_templates,
+            args.min_qcd_val,
+            args.unblinded,
+        )
 
 
 def main(args):
     # Get all analysis subfolders in the templates directory
-    base_templates_dir = Path(args.templates_dir)
+    correlations = json.loads(Path(args.syst_correlations).read_text()) if args.syst_correlations else {}
+    match_tag = matched_template_tag(args.ak8_matched_only, args.lepton_matched_only)
+    base_templates_dir = Path(args.templates_dir) / match_tag
+    template_suffix = f"_{match_tag}" if match_tag else ""
     analysis_dirs = [d for d in base_templates_dir.iterdir() if d.is_dir()]
 
     # Restrict to requested bmin if specified
@@ -1116,6 +1150,7 @@ def main(args):
 
             # Create a separate model for each analysis/signal region combination
             model = rl.Model(f"HHModel_{analysis_name}_{sr_key}")
+            shape_parameters = {}
 
             for channel in channels:
                 # Check if channel directory exists in this analysis
@@ -1136,7 +1171,11 @@ def main(args):
 
                 # templates per region per year, templates per region summed across years
                 templates_dict, templates_summed = get_templates(
-                    str(channel_path), years, args.sig_separate, args.scale_templates
+                    str(channel_path),
+                    years,
+                    args.sig_separate,
+                    args.scale_templates,
+                    template_suffix=template_suffix,
                 )
 
                 # random template from which to extract shape vars
@@ -1159,8 +1198,22 @@ def main(args):
                     for _, axis in enumerate(sample_templates.axes[1:])
                 ]
 
+                template_systs = (
+                    read_template_systematics(
+                        channel_path,
+                        years,
+                        correlations,
+                        shape_parameters,
+                        template_suffix=template_suffix,
+                    )
+                    if args.template_systematics
+                    else []
+                )
+                if (args.jesr or args.jmsr) and not template_systs:
+                    raise ValueError(f"{channel_path}: regenerate templates with --do-jshifts")
                 createDatacardAlphabet(
-                    args, model, sr_key, channel, templates_dict, templates_summed, shape_vars
+                    args, model, sr_key, channel, templates_dict, templates_summed, shape_vars,
+                    template_systs,
                 )
 
             ##############################################
@@ -1187,4 +1240,5 @@ def main(args):
                 pickle.dump(model, fout, 2)  # use python 2 compatible protocol
 
 
-main(args)
+if __name__ == "__main__":
+    main(args)
