@@ -411,6 +411,11 @@ def load_samples(
     multithread: bool = True,
     loader_n_jobs: int | None = None,
     restrict_signal_to_channel_gen: bool = True,
+    load_systematics: bool = False,
+    weight_sources: tuple = (),
+    background_keys: Iterable[str] | None = None,
+    defer_systematic_filters: bool = False,
+    skip_empty_mc_subsamples: bool = False,
 ) -> dict[str, LoadedSample | pd.DataFrame]:
     """
     Loads and preprocesses physics event samples for a given year and analysis channel.
@@ -496,10 +501,10 @@ def load_samples(
     if samples is None:
         samples = Samples.SAMPLES.copy()
 
-        if not load_bgs:
-            for key in Samples.BGS:
-                if key in samples:
-                    del samples[key]
+        if not load_bgs or background_keys is not None:
+            keep = set(background_keys or ()) if load_bgs else set()
+            for key in set(Samples.BGS) - keep:
+                samples.pop(key, None)
 
         if not load_data:
             for key in Samples.DATASETS:
@@ -534,6 +539,22 @@ def load_samples(
         for sample in samples.values():
             sample.load_columns = load_columns[sample.get_type()]
 
+    def _load_sample(sample: Sample):
+        filters = filters_dict[sample.get_type()] if filters_dict is not None else None
+        if load_systematics:
+            from bbtautau.postprocessing.systematics import load_sample_with_systematics
+
+            return load_sample_with_systematics(
+                sample,
+                year,
+                paths,
+                filters,
+                weight_sources,
+                defer_filters=defer_systematic_filters,
+                skip_empty_mc_subsamples=skip_empty_mc_subsamples,
+            )
+        return utils.load_sample(sample, year, paths, filters)
+
     if multithread:
         if not loaded_samples:
             warnings.warn(
@@ -550,13 +571,11 @@ def load_samples(
             n_jobs = min(max(1, 2 * len(samples)), os.cpu_count() or 1)
 
         def _load_loaded_sample(sample: Sample) -> LoadedSample:
-            filters = filters_dict[sample.get_type()] if filters_dict is not None else None
-            events = utils.load_sample(
-                sample,
-                year,
-                paths,
-                filters,
-            )
+            events = _load_sample(sample)
+            if events is None:
+                raise ValueError(
+                    f"No events loaded for {sample.label}; inspect the input paths/schema"
+                )
             return LoadedSample(sample=sample, events=events)
 
         data_ = Parallel(n_jobs=n_jobs, backend="threading", prefer="threads")(
@@ -571,17 +590,8 @@ def load_samples(
     else:
         # load samples (legacy)
         for key, sample in samples.items():
-
-            filters = filters_dict[sample.get_type()] if filters_dict is not None else None
-
             if sample.selector is not None:
-
-                events = utils.load_sample(
-                    sample,
-                    year,
-                    paths,
-                    filters,
-                )
+                events = _load_sample(sample)
                 print("Loaded sample", key, "in year", year)
 
                 if not loaded_samples:
@@ -897,7 +907,7 @@ def _get_lepton_mask(sample, lepton_type: str, dR_cut: float) -> np.ndarray:
 
     # 1. Calculate dR for all leptons and create an initial mask
     dR = np.sqrt(delta_eta(lepton_eta, jet_eta) ** 2 + delta_phi(lepton_phi, jet_phi) ** 2)
-    initial_mask = dR < dR_cut
+    initial_mask = (dR < dR_cut) & (sample.get_var(f"{lepton_type}Pt") > 0)
 
     # 2. Find events that have at least one passing lepton
     events_with_any_pass = initial_mask.any(axis=1)
@@ -1292,6 +1302,10 @@ def load_data_channel(
     cutflow: bool = False,
     ttvsbb: bool = True,
     unbiased_mc_eval: bool = True,
+    load_systematics: bool = False,
+    event_sfs: tuple = (),
+    weight_sources: tuple = (),
+    data_paths: dict | None = None,
     **kwargs,
 ):
     """Load data for all years and signals for a given channel."""
@@ -1311,7 +1325,7 @@ def load_data_channel(
 
         events_dict[year] = load_samples(
             year=year,
-            paths=DATA_PATHS[year],
+            paths=(data_paths or DATA_PATHS)[year],
             signals=signals,
             channels=[channel],
             filters_dict=filters_dict,
@@ -1319,6 +1333,8 @@ def load_data_channel(
             restrict_data_to_channel=True,
             loaded_samples=True,
             multithread=True,
+            load_systematics=load_systematics,
+            weight_sources=weight_sources,
             **kwargs,
         )
 
@@ -1341,6 +1357,11 @@ def load_data_channel(
         leptons_assignment(events_dict[year], dR_cut=LEPTON_CONE_DR)
         derive_lepton_variables(events_dict[year])
         derive_vbf_variables(events_dict[year])
+        if event_sfs:
+            from bbtautau.postprocessing.systematics import apply_event_sfs
+
+            for sample in events_dict[year].values():
+                apply_event_sfs(sample, event_sfs)
 
     # Load or compute BDT predictions for every requested model.
     if models is not None:
@@ -1609,3 +1630,59 @@ def singleVarHistOld(
         utils.blindBins(h, shape_var.blind_window, data_key)
 
     return h
+
+
+def prepare_systematic_view(events_dict, shift, year, channel, args, models):
+    """An independent HH4b-style inference/selection pass for one nuisance.
+
+    Overlay saved inputs, recompute assignments and derived quantities, then run
+    the SAME trained model(s). Fixed analysis thresholds and vetoes are reused.
+    """
+    from bbtautau.postprocessing.systematics import apply_event_sfs, shifted_sample
+
+    view = {
+        key: shifted_sample(sample, shift) if shift and not sample.sample.isData else sample
+        for key, sample in events_dict.items()
+    }
+    if shift:
+        mc = {key: sample for key, sample in view.items() if not sample.sample.isData}
+        bbtautau_assignment(mc)
+        leptons_assignment(mc, dR_cut=LEPTON_CONE_DR)
+        derive_lepton_variables(mc)
+        derive_vbf_variables(mc)
+        for sample in mc.values():
+            if args.event_sfs:
+                apply_event_sfs(sample, args.event_sfs)
+        for model in dict.fromkeys(models or []):
+            compute_or_load_bdt_preds(
+                events_dict={year: mc},
+                modelname=model,
+                model_dir=args.model_dir,
+                channel=channel,
+                bdt_preds_dir=BDT_EVAL_DIR,
+                tt_pres=args.tt_pres,
+                test_mode=args.test_mode,
+                n_folds=int(BDT_CONFIG[model].get("n_folds", 1)),
+                unbiased_mc_eval=False,
+                jshift=shift,
+            )
+    # Apply nominal parquet preselection independently on each view, after all
+    # potential incoming MC events have survived loading and inference.
+    from bbtautau.postprocessing.systematics import evaluate_filters
+
+    for key, sample in list(view.items()):
+        filters = sample.events.attrs.get("systematics_filters")
+        if filters:
+            view[key] = sample.copy_from_selection(evaluate_filters(sample.events, filters))
+    if args.a_priori_channels:
+        assign_lepton_channel(view)
+        view = filter_samples_by_column(view, "lepton_channel", channel.key)
+    if args.a_priori_production_mode is not None:
+        assign_production_mode(
+            view,
+            channel,
+            args.a_priori_production_mode,
+            args.vbf_mjj_cut,
+            args.vbf_deta_cut,
+        )
+    return view

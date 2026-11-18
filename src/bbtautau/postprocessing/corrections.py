@@ -82,14 +82,16 @@ def apply_txbb_sfs(
     txbb_cut: float,
     bb_disc_col: str,
     weight_key: str = "finalWeight",
-) -> None:
+    *,
+    variations: bool = True,
+) -> np.ndarray:
     """
     In place: multiplies the nominal SF into ``sample.events[weight_key]`` for jets with
     ``bb_disc_col >= txbb_cut`` and adds ``{weight_key}_txbb_<ptlabel>_{up,down}`` columns, each
-    varying only that pT bin.
+    varying only that pT bin when requested. Returns the nominal SF array.
     """
     if not len(sample.events):
-        return
+        return np.empty(0)
 
     sfs = load_txbb_sfs(year)
     at_cut = txbb_sf_at_cut(year, txbb_cut)
@@ -102,11 +104,15 @@ def apply_txbb_sfs(
     for j, mask in enumerate(bin_masks):
         sf_nom[mask] = at_cut["central"][j]
 
-    orig_weight = sample.events[weight_key].to_numpy().copy()
+    orig_weight = sample.get_var(weight_key).copy()
     sample.events[weight_key] = orig_weight * sf_nom
+    if not variations:
+        return sf_nom
 
     for j, (label, mask) in enumerate(zip(sfs["pt_labels"], bin_masks)):
         for shift, comp in [("up", "high"), ("down", "low")]:
             sf_var = sf_nom.copy()
             sf_var[mask] = at_cut[comp][j]
             sample.events[f"{weight_key}_txbb_{label}_{shift}"] = orig_weight * sf_var
+
+    return sf_nom

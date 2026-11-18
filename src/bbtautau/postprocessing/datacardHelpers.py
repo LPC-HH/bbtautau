@@ -206,15 +206,18 @@ def _shape_checks(values_up, values_down, values_nominal, effect_up, effect_down
     norm_up = np.sum(values_up)
     norm_down = np.sum(values_down)
     norm_nominal = np.sum(values_nominal)
-    prob_up = values_up / norm_up
-    prob_down = values_down / norm_down
-    prob_nominal = values_nominal / norm_nominal
-    shapeEffect_up = np.sum(
-        np.abs(prob_up - prob_nominal) / (np.abs(prob_up) + np.abs(prob_nominal))
-    )
-    shapeEffect_down = np.sum(
-        np.abs(prob_down - prob_nominal) / (np.abs(prob_down) + np.abs(prob_nominal))
-    )
+    prob_up = values_up / norm_up if norm_up else values_up
+    prob_down = values_down / norm_down if norm_down else values_down
+    prob_nominal = values_nominal / norm_nominal if norm_nominal else values_nominal
+
+    def shape_effect(varied):
+        denom = np.abs(varied) + np.abs(prob_nominal)
+        return np.divide(
+            np.abs(varied - prob_nominal), denom, out=np.zeros_like(denom), where=denom > 0
+        ).sum()
+
+    shapeEffect_up = shape_effect(prob_up)
+    shapeEffect_down = shape_effect(prob_down)
 
     if np.allclose(effect_up, 1.0) and np.allclose(effect_down, 1.0):
         logger.warning("No shape effect")
@@ -230,10 +233,38 @@ def _shape_checks(values_up, values_down, values_nominal, effect_up, effect_down
         logger.warning("Up and Down vary norm in the same direction")
 
 
+def floor_empty_bins(values_nominal, variations, floor=1e-6):
+    """HH4b empty-bin migration fix: floor only bins populated by a shape variation.
+
+    variations is an iterable of (up, down) arrays. The caller must use the
+    returned nominal in BOTH TemplateSample and get_effect_updown.
+    """
+    if not np.isfinite(floor) or floor <= 0:
+        raise ValueError("The empty-bin floor must be positive")
+    nominal = np.asarray(values_nominal, dtype=float).copy()
+    populated = np.zeros(nominal.shape, dtype=bool)
+    for up, down in variations:
+        populated |= (np.asarray(up) > 0) | (np.asarray(down) > 0)
+    floor_bins = (nominal == 0) & populated
+    nominal[floor_bins] = floor
+    return nominal, floor_bins
+
+
 def get_effect_updown(
-    values_nominal, values_up, values_down, mask, logger, epsilon, convert_shape_to_lnN=False
+    values_nominal,
+    values_up,
+    values_down,
+    mask,
+    logger,
+    epsilon,
+    convert_shape_to_lnN=False,
+    floor_bins=None,
 ):
+    if any(not np.isfinite(v).all() for v in (values_nominal, values_up, values_down)):
+        raise ValueError("Non-finite shape template")
     if convert_shape_to_lnN:
+        if not np.sum(values_nominal):
+            return 1.0, 1.0
         effect_up = np.sum(values_up) / np.sum(values_nominal)
         effect_down = np.sum(values_down) / np.sum(values_nominal)
         logging.debug(f"effect_up  : {effect_up}")
@@ -254,6 +285,15 @@ def get_effect_updown(
 
     effect_up[mask_up & zero_up] = values_nominal[mask_up & zero_up] * epsilon
     effect_down[mask_down & zero_down] = values_nominal[mask_down & zero_down] * epsilon
+    if np.any((values_nominal == 0) & ((values_up > 0) | (values_down > 0))):
+        raise ValueError("Apply floor_empty_bins before calculating shape migration")
+    if floor_bins is not None:
+        for effect, values in ((effect_up, values_up), (effect_down, values_down)):
+            effect[floor_bins] = values[floor_bins] / values_nominal[floor_bins]
+            # rhalphalib drops a nuisance if Up has zero yield. Keep a tiny
+            # yield for a completely empty direction, including Down for Combine.
+            if not np.any(values > 0):
+                effect[floor_bins] = epsilon
 
     _shape_checks(values_up, values_down, values_nominal, effect_up, effect_down, logger)
 
