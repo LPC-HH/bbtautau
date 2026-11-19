@@ -511,6 +511,7 @@ def compute_bdt_preds(
     save_dir: Path = None,
     cache_info: dict[str, dict[str, dict]] | None = None,
     batch_size: int = 200_000,
+    jshift: str = "",
 ) -> None:
     """Compute BDT predictions for multiple years and samples.
 
@@ -657,6 +658,12 @@ def compute_bdt_preds(
                     boosters = load_models(model_dir, modelname, n_folds)
                     print(f"Loaded {len(boosters)} boosters successfully")
 
+                if jshift:
+                    from bbtautau.postprocessing.systematics import (
+                        require_feature_variations,
+                    )
+
+                    require_feature_variations(sample_data, jshift, year, feature_names)
                 feature_arrays = [sample_data.get_var(feat) for feat in feature_names]
 
                 if batch_size is None or batch_size <= 0:
@@ -720,7 +727,11 @@ def compute_bdt_preds(
                 y_pred,
                 sample_order=sample_order,
                 signal_objectives=signal_objectives,
+                jshift=jshift,
             )
+
+            if jshift:
+                _add_bdt_scores(sample_data.events, y_pred, sample_order, signal_objectives)
 
             has_new_events = not use_incremental or n_target_events > 0
             if save_dir is not None and has_new_events:
@@ -1049,6 +1060,7 @@ def compute_or_load_bdt_preds(
     test_mode: bool = False,
     at_inference: bool = False,
     unbiased_mc_eval: bool = True,
+    jshift: str = "",
 ):
     """Wrapper function to compute or load BDT predictions.
 
@@ -1082,8 +1094,36 @@ def compute_or_load_bdt_preds(
             left untouched. Has no effect for k-fold models, which already get
             unbiased predictions via OOF.
     """
+    # Shifted input frames are prepared by utils.prepare_systematic_view.
+    if jshift:
+        for samples in events_dict.values():
+            for sample in samples.values():
+                if (
+                    not sample.sample.isData
+                    and sample.events.attrs.get("kinematic_shift") != jshift
+                ):
+                    raise ValueError(f"{jshift}: BDT inputs have not been shifted")
     if modelname not in BDT_CONFIG:
         raise ValueError(f"Could not find config for modelname {modelname}")
+    if n_folds is None:
+        n_folds = int(BDT_CONFIG[modelname].get("n_folds", 1))
+    datasets = [
+        (year, key, sample.events.attrs.get("systematics_dataset"))
+        for year, samples in sorted(events_dict.items())
+        for key, sample in sorted(samples.items())
+    ]
+    if jshift or any(dataset for _, _, dataset in datasets):
+        digest = hashlib.sha256(repr(datasets).encode())
+        digest.update(json.dumps(BDT_CONFIG[modelname], sort_keys=True, default=str).encode())
+        model_paths = {
+            _resolve_model_path(model_dir, modelname, i, n_folds) for i in range(n_folds)
+        }
+        model_paths.update((model_dir / modelname).glob("*.npz"))
+        for path in sorted(model_paths):
+            digest.update(path.read_bytes())
+        bdt_preds_dir = (
+            Path(bdt_preds_dir) / "systematics_v1" / digest.hexdigest()[:16] / (jshift or "nominal")
+        )
 
     if "signals" not in BDT_CONFIG[modelname]:
         raise ValueError(f"Model '{modelname}' must specify 'signals' in config")
@@ -1094,9 +1134,6 @@ def compute_or_load_bdt_preds(
             f"Model '{modelname}' has invalid 'signals' in config: {signal_objectives}. "
             f"Must be a list with 1 or 2 elements."
         )
-
-    if n_folds is None:
-        n_folds = int(BDT_CONFIG[modelname].get("n_folds", 1))
 
     if n_folds > 1:
         print(f"Using {n_folds}-fold k-fold BDT inference.")
@@ -1140,6 +1177,7 @@ def compute_or_load_bdt_preds(
             tt_pres=tt_pres,
             test_mode=test_mode,
             save_dir=bdt_preds_dir,
+            jshift=jshift,
         )
     else:
         # Use smart cache checking with event-based identification
@@ -1166,6 +1204,7 @@ def compute_or_load_bdt_preds(
             test_mode=test_mode,
             save_dir=bdt_preds_dir,
             cache_info=cache_info,
+            jshift=jshift,
         )
 
 
@@ -1240,8 +1279,14 @@ def _apply_unbiased_mc_eval(
     val_mask = ~is_train
     events = sample_data.events
 
-    weight_series = events["finalWeight"]
-    total_weight_pre = float(np.sum(np.asarray(weight_series).squeeze()))
+    weights = sample_data.get_var("finalWeight")
+    nominal = np.ones(len(events), dtype=bool)
+    if events.attrs.get("systematics_filters"):
+        from bbtautau.postprocessing.systematics import evaluate_filters
+
+        nominal = evaluate_filters(events, events.attrs["systematics_filters"])
+    total_weight_pre = float(weights[nominal].sum())
+    new_sum = float(weights[nominal & val_mask].sum())
 
     sample_data.events = events.iloc[val_mask].reset_index(drop=True)
     if sample_data.bb_mask is not None:
@@ -1253,10 +1298,26 @@ def _apply_unbiased_mc_eval(
     if sample_data.e_mask is not None:
         sample_data.e_mask = sample_data.e_mask[val_mask]
 
-    new_sum = float(np.sum(np.asarray(sample_data.events["finalWeight"]).squeeze()))
     if new_sum > 0 and total_weight_pre > 0:
         scale = total_weight_pre / new_sum
-        sample_data.events["finalWeight"] = sample_data.events["finalWeight"] * scale
+        # The same fixed validation rescaling must accompany every nuisance.
+        # Otherwise reconstructing the shifted SF weight would undo it.
+        from bbtautau.postprocessing.systematics import field_name
+
+        normalized_shifts = {
+            f"weight_{source}{direction}"
+            for source in events.attrs.get("systematics_weight_sources", ())
+            for direction in ("Up", "Down")
+        }
+        columns = [
+            c
+            for c in sample_data.events.columns
+            if field_name(c) == "finalWeight"
+            or field_name(c).startswith("finalWeight_")
+            or field_name(c) == "__weight_before_event_sfs"
+            or field_name(c) in normalized_shifts
+        ]
+        sample_data.events[columns] = sample_data.events[columns] * scale
 
     print(
         f"  [unbiased-mc-eval] {sample_name}: dropped {n_train}/{len(cur_ids)} training events, "
