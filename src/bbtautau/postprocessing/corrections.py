@@ -2,7 +2,7 @@
 TXbb tagger efficiency scale factors, and event-level trigger scale factors (``apply_trigger_sfs``).
 
 Calibration: GloParT XbbVsQCDTop, muon-tagged g->bb method, per era, m_SD > 40 GeV, tau21 < 0.30
-(``SFs/TXbb/AN_context_prompt.md``). JSONs at ``SFs/TXbb/sf_json/<year>/sf_globalParT_tau21_0p30.json``,
+(``SFs/TXbb/AN_context_prompt.md``). JSONs at ``SFs/TXbb/sf_json_v3/<year>/sf_globalParT_tau21_0p30.json``,
 keyed ``WPgt<wp>_pt<lo>to<hi>`` with ``{"final": {"central", "high", "low"}}`` where high/low are the
 *absolute* SF +/- total uncertainty (not deltas).
 
@@ -37,7 +37,7 @@ from boostedhh.processors.corrections import (
 from bbtautau.postprocessing.bbtautau_types import Channel, LoadedSample
 from bbtautau.userConfig import MAIN_DIR
 
-TXBB_SF_DIR = MAIN_DIR / "SFs" / "TXbb" / "sf_json"
+TXBB_SF_DIR = MAIN_DIR / "SFs" / "TXbb" / "sf_json_v3"
 TXBB_SF_FNAME = "sf_globalParT_tau21_0p30"
 
 
