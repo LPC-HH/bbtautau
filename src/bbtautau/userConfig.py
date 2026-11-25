@@ -74,8 +74,10 @@ _repo_name = _REPO_ROOT.name
 #     "/eos/user/j/jinwa/a_2024_small_par"
 # )
 
-_default_data_dir = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
-data_dir_2024 = "/ceph/cms/store/user/lumori/bbtautau/skimmer/25Sep24All_618_v15/"
+_default_data_dir = (
+    "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Nov3_light_v12_private_signal_merged"
+)
+data_dir_2024 = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Nov3_light_v15_signal_merged/"
 DATA_DIR = os.environ.get("BBTAUTAU_DATA_DIR", _default_data_dir)
 DATA_PATHS = path_dict(DATA_DIR, path_2024=data_dir_2024)
 
