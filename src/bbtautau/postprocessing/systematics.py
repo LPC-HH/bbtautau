@@ -8,6 +8,7 @@ No nuisance cross products and no in-place filtering of the source sample.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import logging
@@ -107,9 +108,7 @@ def validate_shifts(sample, sources):
         if anchor:
             for direction in DIRECTIONS:
                 if f"{anchor}_{source}_{direction}" not in names:
-                    raise ValueError(
-                        f"Missing primary variation {anchor}_{source}_{direction}"
-                    )
+                    raise ValueError(f"Missing primary variation {anchor}_{source}_{direction}")
 
 
 def match_object_slots(events, prefix, shift):
@@ -120,7 +119,7 @@ def match_object_slots(events, prefix, shift):
     if prefix != "ak8FatJet":
         # Older lepton inputs sometimes only provide shifted pT.
         varied = tuple(new if new in names else old for old, new in zip(nominal, varied))
-    missing = sorted(set((*nominal, *varied)) - names)
+    missing = sorted({*nominal, *varied} - names)
     if missing:
         raise ValueError(f"{shift}: missing columns for {prefix} direction matching: {missing}")
 
@@ -271,17 +270,12 @@ def shifted_sample(sample, shift):
         result.events.attrs["kinematic_shift"] = ""
         return result
     suffix = "_" + shift
-    replacements = {
-        n[: -len(suffix)]: n for n in branches(sample.events) if n.endswith(suffix)
-    }
+    replacements = {n[: -len(suffix)]: n for n in branches(sample.events) if n.endswith(suffix)}
     if not replacements:
         raise ValueError(f"{sample.sample.label}: missing {shift}")
     for nominal, varied in replacements.items():
         varied_values = values(sample.events, varied)
-        if (
-            np.issubdtype(varied_values.dtype, np.number)
-            and not np.isfinite(varied_values).all()
-        ):
+        if np.issubdtype(varied_values.dtype, np.number) and not np.isfinite(varied_values).all():
             raise ValueError(f"{sample.sample.label}: non-finite values in {varied}")
         assign(result.events, nominal, varied_values)
     _align_auxiliary_columns(sample.events, result.events, shift, sample.sample.label)
@@ -309,18 +303,14 @@ def apply_event_sfs(sample, sf_names):
             or (name.startswith("Tau") and source == "TES")
         )
         if affected and f"{name}_{shift}" not in names:
-            raise ValueError(
-                f"{sample.sample.label}: missing shifted center {name}_{shift}"
-            )
+            raise ValueError(f"{sample.sample.label}: missing shifted center {name}_{shift}")
     if "__weight_before_event_sfs" not in branches(events):
         assign(events, "__weight_before_event_sfs", values(events, "finalWeight"))
     base = values(events, "__weight_before_event_sfs")[:, 0]
     factors = {}
     for name in sf_names:
         if name not in branches(events):
-            raise ValueError(
-                f"{sample.sample.label}: missing requested event SF {name}"
-            )
+            raise ValueError(f"{sample.sample.label}: missing requested event SF {name}")
         factors[name] = values(events, name)[:, 0]
         if not np.isfinite(factors[name]).all() or (factors[name] < 0).any():
             raise ValueError(f"Invalid SF in {name}")
@@ -353,23 +343,13 @@ def weight_variations(sample, sf_names, weight_sources):
         return {}
     out = {}
     for source in sf_names:
-        out[source] = {
-            d: sample.get_var(f"finalWeight_{source}_{d}") for d in DIRECTIONS
-        }
-    sf_product = (
-        np.prod([sample.get_var(name) for name in sf_names], axis=0)
-        if sf_names
-        else 1.0
-    )
+        out[source] = {d: sample.get_var(f"finalWeight_{source}_{d}") for d in DIRECTIONS}
+    sf_product = np.prod([sample.get_var(name) for name in sf_names], axis=0) if sf_names else 1.0
     for source in weight_sources:
         names = [f"weight_{source}{d.title()}" for d in DIRECTIONS]
         if any(n not in branches(sample.events) for n in names):
-            raise ValueError(
-                f"{sample.sample.label}: missing requested weights {names}"
-            )
-        out[source] = {
-            d: sample.get_var(n) * sf_product for d, n in zip(DIRECTIONS, names)
-        }
+            raise ValueError(f"{sample.sample.label}: missing requested weights {names}")
+        out[source] = {d: sample.get_var(n) * sf_product for d, n in zip(DIRECTIONS, names)}
     return out
 
 
@@ -457,16 +437,12 @@ def load_sample_with_systematics(
         if not directory.is_dir():
             continue
         selected = sorted(
-            p
-            for p in directory.iterdir()
-            if p.is_dir() and sample.get_selector(year).match(p.name)
+            p for p in directory.iterdir() if p.is_dir() and sample.get_selector(year).match(p.name)
         )
         if selected:
             break
     if not selected:
-        raise FileNotFoundError(
-            f"No input matched {sample.label} in {roots} for {year}"
-        )
+        raise FileNotFoundError(f"No input matched {sample.label} in {roots} for {year}")
     frames, provenance, skipped = [], [], []
     parquet_filters = None if defer_filters and not sample.isData else filters
     requested_weights = [
@@ -497,9 +473,7 @@ def load_sample_with_systematics(
         parts = [pd.read_parquet(p, filters=parquet_filters) for p in files]
         schemas = [set(p.columns) for p in parts]
         if any(s != schemas[0] for s in schemas[1:]):
-            raise ValueError(
-                f"Mixed parquet schemas in {parquet}; do not mix skim versions"
-            )
+            raise ValueError(f"Mixed parquet schemas in {parquet}; do not mix skim versions")
         frame = pd.concat(parts, ignore_index=True)
         totals_file = utils.get_pickles(directory / "pickles", year, directory.name)
         for branch in requested_weights:
@@ -517,9 +491,7 @@ def load_sample_with_systematics(
             )
         else:
             if weight_sources and not sample.isData:
-                raise ValueError(
-                    f"{directory}: totals are required to normalize weight variations"
-                )
+                raise ValueError(f"{directory}: totals are required to normalize weight variations")
             total = (
                 1
                 if sample.isData
@@ -529,19 +501,21 @@ def load_sample_with_systematics(
         for branch in requested_weights:
             if not np.isfinite(values(frame, branch)).all():
                 raise ValueError(f"{directory}: non-finite normalized {branch}")
+        # dataset identifier, part of the BDT event key (as utils.load_sample_with_dataset_id)
+        from bbtautau.postprocessing.bdt_utils import DATASET_ID_COLUMN, dataset_id
+
+        frame[DATASET_ID_COLUMN] = dataset_id(year, directory.name)
         frames.append(frame)
-        provenance += [
-            (str(p.resolve()), p.stat().st_size, p.stat().st_mtime_ns) for p in files
-        ]
+        provenance += [(str(p.resolve()), p.stat().st_size, p.stat().st_mtime_ns) for p in files]
     if not frames:
-        raise FileNotFoundError(f"No parquet files in any matched {sample.label} subsample for {year}")
+        raise FileNotFoundError(
+            f"No parquet files in any matched {sample.label} subsample for {year}"
+        )
     result = pd.concat(frames, ignore_index=True)
     if defer_filters and not sample.isData:
         result.attrs["systematics_filters"] = filters
     result.attrs["systematics_weight_sources"] = tuple(weight_sources)
-    result.attrs["systematics_dataset"] = hashlib.sha256(
-        repr(provenance).encode()
-    ).hexdigest()[:16]
+    result.attrs["systematics_dataset"] = hashlib.sha256(repr(provenance).encode()).hexdigest()[:16]
     if skipped:
         result.attrs["skipped_empty_mc_subsamples"] = skipped
     return result
@@ -569,10 +543,8 @@ def evaluate_filters(events, filters):
         for column, comparison, value in group:
             key = column
             if key not in events.columns:
-                try:
+                with contextlib.suppress(ValueError, SyntaxError):
                     key = ast.literal_eval(column)
-                except (ValueError, SyntaxError):
-                    pass
             if key not in events.columns and isinstance(key, tuple) and len(key) == 2:
                 branch, slot = key
                 if isinstance(slot, str) and slot.isdecimal():
@@ -592,13 +564,10 @@ def require_feature_variations(sample, shift, year, features):
     source = shift.rsplit("_", 1)[0]
     names = branches(sample.events)
     for feature in features:
-        physical = feature.replace("bbFatJet", "ak8FatJet").replace(
-            "ttFatJet", "ak8FatJet"
-        )
+        physical = feature.replace("bbFatJet", "ak8FatJet").replace("ttFatJet", "ak8FatJet")
         affected = physical.startswith("ak8FatJetCA") and source != "UnclusteredEnergy"
         affected |= physical in {"METPt", "METPhi"} and (
-            source == "UnclusteredEnergy"
-            or (year == "2024" and source not in {"JMS", "JMR"})
+            source == "UnclusteredEnergy" or (year == "2024" and source not in {"JMS", "JMR"})
         )
         if affected and physical + "_" + shift not in names:
             raise ValueError(

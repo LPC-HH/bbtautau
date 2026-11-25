@@ -1476,6 +1476,9 @@ def load_data_all_channels(
     test_mode: bool,
     tt_pres: bool,
     ttvsbb: bool = True,
+    load_systematics: bool = False,
+    event_sfs: tuple = (),
+    weight_sources: tuple = (),
     **kwargs,
 ) -> dict[str, dict[str, LoadedSample]]:
     """Load data for all years and signals once for several channels, with a priori channels.
@@ -1507,6 +1510,8 @@ def load_data_all_channels(
             loaded_samples=True,
             multithread=True,
             split_signals_by_channel=False,
+            load_systematics=load_systematics,
+            weight_sources=weight_sources,
             **kwargs,
         )
 
@@ -1516,6 +1521,11 @@ def load_data_all_channels(
         derive_lepton_variables(events_dict[year])
         derive_vbf_variables(events_dict[year])
         assign_lepton_channel(events_dict[year])
+        if event_sfs:  # channel-agnostic, as in load_data_channel
+            from bbtautau.postprocessing.systematics import apply_event_sfs
+
+            for sample in events_dict[year].values():
+                apply_event_sfs(sample, event_sfs)
 
     return events_dict
 
@@ -1528,11 +1538,14 @@ def split_channel(
     models: list[str] | None = None,
     model_dir: Path = MODEL_DIR,
     bdt_eval_dir: Path = BDT_EVAL_DIR,
+    select_lepton_channel: bool = True,
     **bdt_kwargs,
 ) -> dict[str, dict[str, LoadedSample]]:
     """``channel``'s events from the output of ``load_data_all_channels`` (not modified): its
     trigger selection, its data samples, signals renamed to ``f"{signal}{channel.key}"``, the BDT
-    predictions with the channel's cache, then the a priori ``lepton_channel`` selection."""
+    predictions with the channel's cache, then the a priori ``lepton_channel`` selection (skipped
+    with ``select_lepton_channel=False``: postprocessing.py makes it per systematic view, so events
+    migrating into the channel in a shifted view are kept)."""
     channel_events_dict = {}
     for year, year_events in events_dict.items():
         channel_samples = {
@@ -1572,11 +1585,12 @@ def split_channel(
                     **bdt_kwargs,
                 )
 
-    for year_events in channel_events_dict.values():
-        for key, sample in year_events.items():
-            year_events[key] = sample.copy_from_selection(
-                sample.get_var("lepton_channel") == channel.key
-            )
+    if select_lepton_channel:
+        for year_events in channel_events_dict.values():
+            for key, sample in year_events.items():
+                year_events[key] = sample.copy_from_selection(
+                    sample.get_var("lepton_channel") == channel.key
+                )
 
     return channel_events_dict
 
@@ -1870,4 +1884,18 @@ def prepare_systematic_view(events_dict, shift, year, channel, args, models):
             args.vbf_mjj_cut,
             args.vbf_deta_cut,
         )
+    if getattr(args, "trigger_sf", False):
+        # Trigger SF on this view's channel events and (re-assigned, shifted) bb/tt jets, after the
+        # event SFs. A shifted view starts from a copy of the nominal pool: with --event-sfs,
+        # apply_event_sfs already rebuilt finalWeight without the trigger SF; otherwise undo the
+        # copied nominal SF via the weight it was applied to.
+        from bbtautau.postprocessing import corrections
+
+        for sample in view.values():
+            if sample.sample.isData or not len(sample.events):
+                continue
+            rebuilt = bool(shift and args.event_sfs)
+            if not rebuilt and corrections.TRIGGER_SF_BASE_COL in sample.events:
+                sample.events["finalWeight"] = sample.get_var(corrections.TRIGGER_SF_BASE_COL)
+            corrections.apply_trigger_sfs(sample, year, channel)
     return view

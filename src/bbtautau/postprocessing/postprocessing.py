@@ -283,10 +283,6 @@ def main(args: argparse.Namespace):
         models = [args.ggf_modelname] + ([args.vbf_modelname] if args.do_vbf else [])
 
     if args.channels is not None:
-        if args.do_jshifts or args.event_sfs or args.weight_shifts:
-            raise NotImplementedError(
-                "Systematics (--do-jshifts/--event-sfs/--weight-shifts) need --channel for now"
-            )
         # Load once for all channels, then make each channel's events in memory
         all_events_dict = putils.load_data_all_channels(
             years=years,
@@ -295,6 +291,12 @@ def main(args: argparse.Namespace):
             test_mode=args.test_mode,
             tt_pres=args.tt_pres,
             load_bgs=True,
+            background_keys=args.bgs,
+            load_systematics=args.do_jshifts or bool(args.event_sfs or args.weight_shifts),
+            defer_systematic_filters=args.do_jshifts,
+            skip_empty_mc_subsamples=args.skip_empty_mc_subsamples,
+            event_sfs=args.event_sfs,
+            weight_sources=args.weight_shifts,
         )
         for channel in channels:
             events_dict = putils.split_channel(
@@ -303,6 +305,7 @@ def main(args: argparse.Namespace):
                 tt_pres=args.tt_pres,
                 test_mode=args.test_mode,
                 models=models,
+                select_lepton_channel=False,  # made per systematic view
             )[year_label]
             plot_dir = args.plot_dir / channel.key / year_label if args.plot_dir else ""
             make_channel_templates(args, events_dict, channel, signal_regions, year_label, plot_dir)
@@ -381,12 +384,9 @@ def make_channel_templates(
                 f"Unresolved by shift: {counts['unresolved_events_by_shift']}"
             )
 
-    if args.trigger_sf:
-        # all MC, once per channel (HH4b's global pnetbb-leg uncertainty uses the whole sample);
-        # the regions below are selections of these events, so every region gets the SF
-        for sample in base_events_dict.values():
-            if not sample.sample.isData:
-                corrections.apply_trigger_sfs(sample, year_label, CHANNEL)
+    # Trigger SF (--trigger-sf): applied in every systematic view to the channel's MC
+    # (putils.prepare_systematic_view), so every region gets it; HH4b's global pnetbb-leg
+    # uncertainty uses all of the channel's events of the sample.
 
     if not args.a_priori_channels:
         print(
@@ -1050,11 +1050,15 @@ def get_templates(
                 for source, variations in weight_variations(
                     sample, event_sfs, scalar_weight_sources
                 ).items():
+                    # built before the TXbb and trigger SFs: add their nominal values
+                    trigger_factor = (
+                        sample.get_var(corrections.TRIGGER_SF_COL) if apply_trigger_sf else 1.0
+                    )
                     for direction, raw_weight in variations.items():
                         h.fill(
                             Sample=f"{skey}_{source}_{direction}",
                             **fill_data,
-                            weight=raw_weight * txbb_factors.get(skey, 1.0),
+                            weight=raw_weight * txbb_factors.get(skey, 1.0) * trigger_factor,
                         )
 
             if not do_jshift:

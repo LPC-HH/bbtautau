@@ -147,6 +147,8 @@ def apply_txbb_sfs(
 #######################################################################################
 
 TRIGGER_SF_DIR = MAIN_DIR / "SFs" / "trigger" / "hh4b"
+TRIGGER_SF_COL = "TriggerSF"  # per-event nominal SF, written by apply_trigger_sfs
+TRIGGER_SF_BASE_COL = "__weight_before_trigger_sf"
 TRIGGER_REGION = "QCD"  # HH4b nominal (PostProcess.py: trigger_region = "QCD")
 TRIGGER_TXBB_LABEL = "txbbGloParT"
 TRIGGER_TXBB_VAR = "ParTXbbvsQCD"  # Xbb / (Xbb + QCD), the input of HH4b's txbbGloParT maps
@@ -376,6 +378,10 @@ def apply_trigger_sfs(
 
     sf = get_sf(l_eff["data"], l_eff["mc"])
     sample.events[weight_key] = orig_weight * sf
+    # kept for systematic views: the weight before this SF (to re-apply it on shifted jets) and the
+    # nominal SF (to multiply into weight variations built before it, see get_templates)
+    sample.events[TRIGGER_SF_BASE_COL] = orig_weight
+    sample.events[TRIGGER_SF_COL] = sf
 
     rel_unc = total_err / total
     sample.events[f"{weight_key}_trigger_up"] = orig_weight * sf * (1 + rel_unc)
