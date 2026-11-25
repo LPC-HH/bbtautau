@@ -27,7 +27,9 @@ sigs_values=()  # Can be set with --sigs; empty means let postprocessing.py use 
 # Repo root (parent of src/); works for any user/checkout path
 MAIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 SCRIPT_DIR="${MAIN_DIR}/src/bbtautau/postprocessing"
-DATA_DIR="/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
+# Empty = the data paths of userConfig.py (DATA_PATHS, incl. the separate 2024 path). Set only to
+# override them: postprocessing.py --data-dir replaces data/bg/signal paths for every year.
+DATA_DIR=""
 SENSITIVITY_DIR="${MAIN_DIR}/plots/SensitivityStudy/2026-09-22/"
 COMBINED_SIGNALS="separate_signals"
 TAG=""
@@ -38,6 +40,8 @@ USE_SENSITIVITY_DIR=1  # Flag to control --sensitivity-dir argument (default: on
 TEST_MODE=0
 TT_PRES=0
 TXBB_SF=0  # Apply TXbb SFs + per-pT-bin variations (postprocessing.py --txbb-sf)
+TRIGGER_SF=0  # Apply event trigger SFs + variations (postprocessing.py --trigger-sf)
+PP_ARGS=""  # Extra postprocessing.py flags, e.g. systematics: --pp-args "--do-jshifts --weight-shifts pileup"
 APRIORI_PROD_MODE=""  # --a-priori-production-mode {kinematic,bdt,none}; empty = postprocessing.py default
 GGF_MODEL="May4_optimized_ggf"
 #"19oct25_ak4away_ggfbbtt"
@@ -64,6 +68,8 @@ show_help() {
     echo "                         --a-priori-production-mode to 'kinematic' (a priori"
     echo "                         ggf/vbf split instead of the SIGNAL_ORDERING veto chain)."
     echo "  --txbb-sf              Apply TXbb tagger SFs with per-pT-bin variations"
+    echo "  --trigger-sf           Apply event trigger SFs with variations"
+    echo "  --pp-args \"FLAGS\"      Extra postprocessing.py flags (e.g. systematics)"
     echo "  --a-priori-production-mode MODE  kinematic|bdt|none (none = ggF/VBF veto chain)"
     echo "  --sensitivity-dir DIR  Directory for --sensitivity-dir (default: /home/users/lumori/bbtautau/plots/SensitivityStudy/2025-12-27/)"
     echo "  --no-sensitivity-dir   Disable the --sensitivity-dir argument (default: enabled)"
@@ -167,6 +173,14 @@ while [[ $# -gt 0 ]]; do
             TT_PRES=1
             shift
             ;;
+        --trigger-sf)
+            TRIGGER_SF=1
+            shift
+            ;;
+        --pp-args)
+            PP_ARGS="$2"
+            shift 2
+            ;;
         --txbb-sf)
             TXBB_SF=1
             shift
@@ -254,6 +268,8 @@ echo "SENSITIVITY_DIR: $SENSITIVITY_DIR"
 echo "TEST_MODE: $TEST_MODE"
 echo "TT_PRES: $TT_PRES"
 echo "TXBB_SF: $TXBB_SF"
+echo "TRIGGER_SF: $TRIGGER_SF"
+echo "PP_ARGS: $PP_ARGS"
 echo "APRIORI_PROD_MODE: ${APRIORI_PROD_MODE:-<postprocessing.py default>}"
 echo "GGF_MODEL: $GGF_MODEL"
 echo "VBF_MODEL: $VBF_MODEL"
@@ -263,7 +279,7 @@ echo "TT_GLOPART_CUT: ${TT_GLOPART_CUT:-<postprocessing.py default: None>}"
 echo "SENSITIVITY_DISC_TAG: ${SENSITIVITY_DISC_TAG:-<auto-computed from GGF_MODEL/TT_GLOPART_CUT>}"
 for year in "${years[@]}"
 do
-    echo "Data dir: $DATA_DIR"
+    echo "Data dir: ${DATA_DIR:-userConfig DATA_PATHS}"
 
     echo "Templates for $year, channels ${channels[*]} (data loaded once) with bmin values: ${bmin_values[*]}"
 
@@ -272,7 +288,6 @@ do
         python -u "${SCRIPT_DIR}/postprocessing.py"
         --year "$year"
         --channels "${channels[@]}"
-        --data-dir "$DATA_DIR"
         --plot-dir "${MAIN_DIR}/plots/Templates/$TAG"
         --template-dir "$TEMPLATE_DIR"
         --templates
@@ -310,8 +325,20 @@ do
         cmd+=(--tt-pres)
     fi
 
+    if [[ -n "$DATA_DIR" ]]; then
+        cmd+=(--data-dir "$DATA_DIR")
+    fi
+
     if [[ $TXBB_SF -eq 1 ]]; then
         cmd+=(--txbb-sf)
+    fi
+
+    if [[ $TRIGGER_SF -eq 1 ]]; then
+        cmd+=(--trigger-sf)
+    fi
+
+    if [[ -n "$PP_ARGS" ]]; then
+        cmd+=($PP_ARGS)  # word-split on purpose: a list of flags
     fi
 
     if [[ -n "$APRIORI_PROD_MODE" ]]; then
