@@ -225,6 +225,13 @@ add_bool_arg(
 )
 add_bool_arg(
     parser,
+    "trigger-sf",
+    "Add trigger SF shape nuisances, pnetbb leg + one per second leg (templates must be made with "
+    "postprocessing.py --trigger-sf)",
+    default=False,
+)
+add_bool_arg(
+    parser,
     "tautau-sf",
     "Apply a rate-only tautau tagger SF to all MC in the pass regions: scale by --tautau-sf-value "
     "and add one correlated asymmetric lnN from --tautau-sf-unc-{up,down}",
@@ -466,7 +473,6 @@ nuisance_params_dict = {
 # dictionary of correlated shape systematics: name in templates -> name in cards, etc.
 corr_year_shape_systs = {
     # "JES": Syst(name="CMS_scale_j", prior="shape", samples=all_mc),
-    "trigger": Syst(name=f"{CMS_PARAMS_LABEL}_trigger", prior="shape", samples=all_mc),
     # "FSRPartonShower": Syst(name="ps_fsr", prior="shape", samples=sig_keys, samples_corr=True),
     # "ISRPartonShower": Syst(name="ps_isr", prior="shape", samples=sig_keys, samples_corr=True),
     "scale": Syst(
@@ -495,6 +501,20 @@ if args.txbb_sf:
             prior="shape",
             samples=sig_keys + single_h_keys,
             pass_only=True,
+        )
+
+# second trigger leg (HLTs.MENU key) of each channel: its nuisance only acts in that channel
+TRIGGER_LEG2_CHANNEL = {"trigger_ditau": "hh", "trigger_muiso24": "hm", "trigger_ele30": "he"}
+
+if args.trigger_sf:
+    # as HH4b: one shape nuisance on all MC, correlated across years, samples and regions
+    # (template variations "<sample>_trigger_{up,down}", see corrections.apply_trigger_sfs)
+    corr_year_shape_systs["trigger"] = Syst(
+        name=f"{CMS_PARAMS_LABEL}_trigger", prior="shape", samples=all_mc
+    )
+    for skey in TRIGGER_LEG2_CHANNEL:
+        corr_year_shape_systs[skey] = Syst(
+            name=f"{CMS_PARAMS_LABEL}_{skey}", prior="shape", samples=all_mc
         )
 
 uncorr_year_shape_systs = {
@@ -582,7 +602,9 @@ for skey, syst in uncorr_year_shape_systs.items():
 LEGACY_REGION_ALIASES = {"vrpass": "vr", "pass": "sr", "fail": "cr"}  # "vrpass" checked first
 
 
-def read_template_systematics(templates_dir, years, correlations, parameters, *, template_suffix=""):
+def read_template_systematics(
+    templates_dir, years, correlations, parameters, *, template_suffix=""
+):
     """Group manifest entries into shared or year-specific shape nuisances."""
     by_source = {}
     missing_years = []
@@ -607,9 +629,11 @@ def read_template_systematics(templates_dir, years, correlations, parameters, *,
         name = {"JES": "CMS_scale_j", "JER": "CMS_res_j"}.get(
             source, f"{CMS_PARAMS_LABEL}_{source}"
         )
-        groups = {name: by_year} if policy == {"all"} else {
-            f"{name}_{year}": {year: spec} for year, spec in by_year.items()
-        }
+        groups = (
+            {name: by_year}
+            if policy == {"all"}
+            else {f"{name}_{year}": {year: spec} for year, spec in by_year.items()}
+        )
         for name, active_years in groups.items():
             if name not in parameters:
                 parameters[name] = rl.NuisanceParameter(name, "shape")
@@ -715,9 +739,13 @@ def get_year_updown(templates_dict, sample, region, source, active_years):
     """Sum Up/Down across years, varying only eras that declare this sample."""
     return [
         sum(
-            template_variation(regions, region, sample, source, direction, active_years[year]["kind"])
-            if year in active_years and sample in active_years[year]["samples"]
-            else regions[region][sample, ...].values()
+            (
+                template_variation(
+                    regions, region, sample, source, direction, active_years[year]["kind"]
+                )
+                if year in active_years and sample in active_years[year]["samples"]
+                else regions[region][sample, ...].values()
+            )
             for year, regions in templates_dict.items()
         )
         for direction in ("up", "down")
@@ -793,20 +821,24 @@ def fill_regions(
             # Collect variations before creating the TemplateSample, as in HH4b.
             variations = []
             for source, syst in corr_year_shape_systs.items():
-                if not source.startswith("txbb_") or sample_name not in syst.samples:
+                if not source.startswith(("txbb_", "trigger")) or sample_name not in syst.samples:
+                    continue
+                if TRIGGER_LEG2_CHANNEL.get(source, channel.key) != channel.key:
                     continue
                 if syst.pass_only and not pass_region:
                     continue
-                up, down = [
+                up, down = (
                     region_templates[f"{sample_name}_{source}_{d}", ...].values() * rate_sf
                     for d in ("up", "down")
-                ]
+                )
                 variations.append((shape_systs_dict[source], up, down, syst.convert_shape_to_lnN))
 
             for source, active_years, param in template_systs:
                 if not any(sample_name in spec["samples"] for spec in active_years.values()):
                     continue
-                up, down = get_year_updown(templates_dict, sample_name, region, source, active_years)
+                up, down = get_year_updown(
+                    templates_dict, sample_name, region, source, active_years
+                )
                 variations.append((param, up * rate_sf, down * rate_sf, False))
 
             floor_bins = None
@@ -1087,7 +1119,9 @@ def createDatacardAlphabet(
 
 def main(args):
     # Get all analysis subfolders in the templates directory
-    correlations = json.loads(Path(args.syst_correlations).read_text()) if args.syst_correlations else {}
+    correlations = (
+        json.loads(Path(args.syst_correlations).read_text()) if args.syst_correlations else {}
+    )
     match_tag = matched_template_tag(args.ak8_matched_only, args.lepton_matched_only)
     base_templates_dir = Path(args.templates_dir) / match_tag
     template_suffix = f"_{match_tag}" if match_tag else ""
@@ -1212,7 +1246,13 @@ def main(args):
                 if (args.jesr or args.jmsr) and not template_systs:
                     raise ValueError(f"{channel_path}: regenerate templates with --do-jshifts")
                 createDatacardAlphabet(
-                    args, model, sr_key, channel, templates_dict, templates_summed, shape_vars,
+                    args,
+                    model,
+                    sr_key,
+                    channel,
+                    templates_dict,
+                    templates_summed,
+                    shape_vars,
                     template_systs,
                 )
 

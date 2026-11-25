@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gc
 import json
 import logging
 import shlex
@@ -36,6 +37,8 @@ from bbtautau.userConfig import (
     PT_CUTS,
     SHAPE_VAR,
     SIGNAL_ORDERING,
+    SR_MIN_CUT,
+    VBF_ALLOW_NO_TXBB_CUT,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -122,6 +125,29 @@ FOMS_TO_OPTIMIZE = [FOMS["2sqrtB_S_var"]]
 #    b_qcd_sb = data-ttbar in region B
 #    tf = TF derived from (data-ttbar) in B, C, D
 """
+
+
+def _cap_sig_eff_lims(lims, discriminant, axis):
+    """Lower the upper sig-eff limit ``lims[1]`` to the signal efficiency of a cut at SR_MIN_CUT.
+
+    The SR must lie inside the VR box (``userConfig.VR_LOOSE_CUTS``), so the grid never scans
+    cuts below SR_MIN_CUT. Signal efficiency at a cut c = TPR of the ROC at the threshold >= c.
+    """
+    tpr, thresholds = discriminant.roc.tpr, discriminant.roc.thresholds
+    above = thresholds >= SR_MIN_CUT
+    eff_max = float(np.max(tpr[above])) if np.any(above) else 0.0
+    lo, hi = lims
+    if eff_max <= lo:
+        raise ValueError(
+            f"{axis} discriminant {discriminant.get_name()}: signal efficiency at the cut "
+            f"SR_MIN_CUT={SR_MIN_CUT} is {eff_max:.3f}, below the grid lower limit {lo}."
+        )
+    if eff_max < hi:
+        print(
+            f"{axis} grid: sig-eff upper limit {hi} -> {eff_max:.3f} (cut >= SR_MIN_CUT={SR_MIN_CUT})"
+        )
+        hi = eff_max
+    return (lo, hi)
 
 
 class Analyser:
@@ -1077,6 +1103,13 @@ class Analyser:
 
         return evals_opt
 
+    def _allow_no_txbb_cut(self) -> bool:
+        """VBF SRs get one extra "no TXbb cut" point (cut 0, sig eff 1) on the bb grid axis."""
+        allow = VBF_ALLOW_NO_TXBB_CUT and self.region_name.startswith("vbf")
+        if allow:
+            print("bb grid: + no-TXbb-cut point (cut 0, sig eff 1) for the VBF SR")
+        return allow
+
     def grid_search_opt(
         self,
         gridsize,
@@ -1136,26 +1169,43 @@ class Analyser:
                     f"TT discriminant '{self.tt_disc_name_channel}' (key: '{tt_disc_key}') not found in ROC analyzer. Available: {list(self.rocAnalyzer.discriminants.keys())}"
                 )
 
+            # Get discriminant objects for threshold lookup (using keys from previous check)
+            bb_discriminant = self.rocAnalyzer.discriminants[bb_disc_key]
+            tt_discriminant = self.rocAnalyzer.discriminants[tt_disc_key]
+
+            # Cap the cuts at >= SR_MIN_CUT: the upper sig-eff limit of each axis is lowered to
+            # the signal efficiency of a cut at SR_MIN_CUT (the tight end is unchanged)
+            gridlims_x = _cap_sig_eff_lims(gridlims_x, bb_discriminant, "bb")
+            gridlims_y = _cap_sig_eff_lims(gridlims_y, tt_discriminant, "tt")
+
             # Create signal efficiency grid with separate limits for each axis
             bbcutSigEff = np.linspace(*gridlims_x, gridsize)
             ttcutSigEff = np.linspace(*gridlims_y, gridsize)
             BBcutSigEff, TTcutSigEff = np.meshgrid(bbcutSigEff, ttcutSigEff)
 
-            # Get discriminant objects for threshold lookup (using keys from previous check)
-            bb_discriminant = self.rocAnalyzer.discriminants[bb_disc_key]
-            tt_discriminant = self.rocAnalyzer.discriminants[tt_disc_key]
+            # VECTORIZED threshold computation (the max() only guards against the ROC
+            # interpolation landing a hair below SR_MIN_CUT at the loose end)
+            bbcut_thresholds = np.maximum(
+                bb_discriminant.get_cut_from_sig_eff(bbcutSigEff), SR_MIN_CUT
+            )
+            ttcut_thresholds = np.maximum(
+                tt_discriminant.get_cut_from_sig_eff(ttcutSigEff), SR_MIN_CUT
+            )
 
-            # VECTORIZED threshold computation
-            bbcut_thresholds = bb_discriminant.get_cut_from_sig_eff(bbcutSigEff)
-            ttcut_thresholds = tt_discriminant.get_cut_from_sig_eff(ttcutSigEff)
+            if self._allow_no_txbb_cut():
+                bbcutSigEff = np.append(bbcutSigEff, 1.0)
+                bbcut_thresholds = np.append(bbcut_thresholds, 0.0)
+                BBcutSigEff, TTcutSigEff = np.meshgrid(bbcutSigEff, ttcutSigEff)
 
             # Create threshold meshgrids for actual cuts
             BBcut, TTcut = np.meshgrid(bbcut_thresholds, ttcut_thresholds)
 
         else:
-            # for optimization, pass a full grid
-            bbcut = np.linspace(*gridlims_x, gridsize)
-            ttcut = np.linspace(*gridlims_y, gridsize)
+            # for optimization, pass a full grid (cuts capped at >= SR_MIN_CUT)
+            bbcut = np.linspace(max(gridlims_x[0], SR_MIN_CUT), gridlims_x[1], gridsize)
+            ttcut = np.linspace(max(gridlims_y[0], SR_MIN_CUT), gridlims_y[1], gridsize)
+            if self._allow_no_txbb_cut():
+                bbcut = np.append(bbcut, 0.0)
 
             BBcut, TTcut = np.meshgrid(bbcut, ttcut)
 
@@ -1652,34 +1702,58 @@ def main(args):
 
     run_args_written: set[Path] = set()  # one run_args.txt per run (top dir, see below)
 
+    additional_samples = (
+        {sample: SAMPLES[sample] for sample in NON_QCD_BGS}
+        if (args.dataMinusSimABCD or args.showNonDataDrivenPortion)
+        else None
+    )
+
+    # A priori channels: load the data once for all channels and split it per channel below.
+    # The CHANNEL_ORDERING veto chain and --gen-split still load once per channel (deprecated).
+    load_once = args.a_priori_channels and not args.gen_split
+    if load_once:
+        all_events_dict = utils.load_data_all_channels(
+            years=args.years,
+            signals=SM_SIGNALS,
+            channels=[CHANNELS[channel_key] for channel_key in args.channels],
+            test_mode=args.test_mode,
+            tt_pres=args.tt_pres,
+            additional_samples=additional_samples,
+        )
+
     for channel_key in args.channels:
         print(f"\n{'='*60}\nProcessing channel: {channel_key}\n{'='*60}")
 
-        additional_samples = (
-            {sample: SAMPLES[sample] for sample in NON_QCD_BGS}
-            if (args.dataMinusSimABCD or args.showNonDataDrivenPortion)
-            else None
-        )
+        if load_once:
+            events_dict = utils.split_channel(
+                all_events_dict,
+                CHANNELS[channel_key],
+                tt_pres=args.tt_pres,
+                test_mode=args.test_mode,
+                models=models,
+                at_inference=args.at_inference,
+                unbiased_mc_eval=args.unbiased_mc_eval,
+            )
+        else:
+            events_dict = load_data_channel(
+                years=args.years,
+                signals=SM_SIGNALS,
+                channel=CHANNELS[channel_key],
+                test_mode=args.test_mode,
+                tt_pres=args.tt_pres,
+                models=models,
+                additional_samples=additional_samples,
+                at_inference=args.at_inference,
+                unbiased_mc_eval=args.unbiased_mc_eval,
+                restrict_signal_to_channel_gen=args.gen_split,
+            )
 
-        events_dict = load_data_channel(
-            years=args.years,
-            signals=SM_SIGNALS,
-            channel=CHANNELS[channel_key],
-            test_mode=args.test_mode,
-            tt_pres=args.tt_pres,
-            models=models,
-            additional_samples=additional_samples,
-            at_inference=args.at_inference,
-            unbiased_mc_eval=args.unbiased_mc_eval,
-            restrict_signal_to_channel_gen=args.gen_split,
-        )
-
-        if args.a_priori_channels:
-            for year in events_dict:
-                utils.assign_lepton_channel(events_dict[year])
-                for key, sample in events_dict[year].items():
-                    keep = sample.get_var("lepton_channel") == channel_key
-                    events_dict[year][key] = sample.copy_from_selection(keep)
+            if args.a_priori_channels:
+                for year in events_dict:
+                    utils.assign_lepton_channel(events_dict[year])
+                    for key, sample in events_dict[year].items():
+                        keep = sample.get_var("lepton_channel") == channel_key
+                        events_dict[year][key] = sample.copy_from_selection(keep)
 
         production_events_dict: dict[str, dict[str, dict]] | None = None
         if args.a_priori_production_mode is not None:
@@ -1780,6 +1854,10 @@ def main(args):
                     optimized_regions_by_cut[tt_glopart_cut][
                         f"{sr_config.name}{sr_config.channel}"
                     ] = sr_config
+
+        # free this channel's events before the next one
+        del events_dict, production_events_dict
+        gc.collect()
 
 
 if __name__ == "__main__":
@@ -1994,13 +2072,13 @@ Examples:
     )
     disc_group.add_argument(
         "--ggf-modelname",
-        default="May4_optimized_ggf",
+        default="3Nov26_wp0p999_newCA_ggf",
         help="BDT model name for ggF",
     )
     disc_group.add_argument(
         "--vbf-modelname",
         type=str,
-        default="May4_optimized_vbf",
+        default="3Nov26_wp0p999_newCA_vbfk2v0",
         help="BDT model name for VBF",
     )
     disc_group.add_argument(

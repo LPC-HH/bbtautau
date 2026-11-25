@@ -186,6 +186,9 @@ docker_stderror
 
 !data/*.json
 !src/bbtautau/postprocessing/templates/**/*.json
+# SF inputs read by postprocessing/corrections.py
+!SFs/TXbb/sf_json_v3/**/*.json
+!SFs/trigger/hh4b/*.json
 
 .bashrc
 .condor_config

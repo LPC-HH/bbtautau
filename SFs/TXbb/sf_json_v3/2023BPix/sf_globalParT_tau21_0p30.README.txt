@@ -1,0 +1,15 @@
+globalParT_XbbVsQCDTop scale factors, flavour 'b'
+  era / year key     : 2023_postBPix / 2023BPix
+  msd bin            : 80to170
+  nominal tau21 slice: tau21_0p30
+  entries            : 36
+  generated          : 2026-11-20 by export_sf_json.py
+
+Keys are CUMULATIVE working points: 'WPgt0p80_pt350to425' applies to jets
+with globalParT_XbbVsQCDTop > 0.80 and 350 < pt < 425 GeV. They are NOT
+exclusive score bins -- see the export_sf_json.py docstring.
+
+high/low are central +/- the TOTAL uncertainty:
+  total = hypot(hypot(max(fit_errUp, fit_errDown), syst_tau21), syst_reweight)
+  syst_tau21 convention: maxdev
+The per-bin breakdown is in SF_summary_all.csv next to this tree.

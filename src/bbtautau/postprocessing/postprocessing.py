@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import copy
 import datetime
+import gc
 import logging
 import pickle
 from pathlib import Path
@@ -51,6 +52,7 @@ from bbtautau.postprocessing.utils import load_data_channel
 from bbtautau.userConfig import (
     CHANNEL_ORDERING,
     MODEL_DIR,
+    PLOT_DIR,
     SHAPE_VAR,
     SIGNAL_ORDERING,
 )
@@ -242,7 +244,7 @@ def main(args: argparse.Namespace):
     if args.bgs is None:
         args.bgs = {bkey: b for bkey, b in SAMPLES.items() if b.get_type() == "bg"}
 
-    CHANNEL = CHANNELS[args.channel]
+    channels = [CHANNELS[ch] for ch in ([args.channel] if args.channel else args.channels)]
 
     if args.use_ParT and args.tt_glopart_cut is not None:
         print(
@@ -255,30 +257,64 @@ def main(args: argparse.Namespace):
         # by resolving the same CSV lookup used later for real, before the slow (~1hr/year) data
         # load below -- reuses extract_optimal_cuts_from_csv itself so this can't drift from the
         # real resolution logic.
-        for signal_region in signal_regions:
-            for bmin in args.bmin:
-                Regions.extract_optimal_cuts_from_csv(
-                    args.sensitivity_dir,
-                    signal_region,
-                    CHANNEL.key,
-                    args.combined_signals,
-                    bmin,
-                    args.use_ParT,
-                    args.do_vbf,
-                    test_mode=args.test_mode,
-                    tt_pres=args.tt_pres,
-                    overlapping_channels=args.overlapping_channels,
-                    sensitivity_disc_tag=args.sensitivity_disc_tag,
-                    ggf_modelname=args.ggf_modelname,
-                    tt_glopart_cut=args.tt_glopart_cut,
-                    a_priori_channels=args.a_priori_channels,
-                    a_priori_production_mode=args.a_priori_production_mode,
-                )
+        for channel in channels:
+            for signal_region in signal_regions:
+                for bmin in args.bmin:
+                    Regions.extract_optimal_cuts_from_csv(
+                        args.sensitivity_dir,
+                        signal_region,
+                        channel.key,
+                        args.combined_signals,
+                        bmin,
+                        args.use_ParT,
+                        args.do_vbf,
+                        test_mode=args.test_mode,
+                        tt_pres=args.tt_pres,
+                        overlapping_channels=args.overlapping_channels,
+                        sensitivity_disc_tag=args.sensitivity_disc_tag,
+                        ggf_modelname=args.ggf_modelname,
+                        tt_glopart_cut=args.tt_glopart_cut,
+                        a_priori_channels=args.a_priori_channels,
+                        a_priori_production_mode=args.a_priori_production_mode,
+                    )
 
     models = None
     if not args.use_ParT:
         models = [args.ggf_modelname] + ([args.vbf_modelname] if args.do_vbf else [])
 
+    if args.channels is not None:
+        # Load once for all channels, then make each channel's events in memory
+        all_events_dict = putils.load_data_all_channels(
+            years=years,
+            signals=args.sigs,
+            channels=channels,
+            test_mode=args.test_mode,
+            tt_pres=args.tt_pres,
+            load_bgs=True,
+            background_keys=args.bgs,
+            load_systematics=args.do_jshifts or bool(args.event_sfs or args.weight_shifts),
+            defer_systematic_filters=args.do_jshifts,
+            skip_empty_mc_subsamples=args.skip_empty_mc_subsamples,
+            event_sfs=args.event_sfs,
+            weight_sources=args.weight_shifts,
+        )
+        for channel in channels:
+            events_dict = putils.split_channel(
+                all_events_dict,
+                channel,
+                tt_pres=args.tt_pres,
+                test_mode=args.test_mode,
+                models=models,
+                select_lepton_channel=False,  # made per systematic view
+            )[year_label]
+            plot_dir = args.plot_dir / channel.key / year_label if args.plot_dir else ""
+            make_channel_templates(args, events_dict, channel, signal_regions, year_label, plot_dir)
+            del events_dict
+            gc.collect()
+        return
+
+    # Deprecated: one channel per process
+    CHANNEL = channels[0]
     events_dict, _ = load_data_channel(
         years=years,
         signals=args.sigs,
@@ -302,6 +338,28 @@ def main(args: argparse.Namespace):
     # Keep dictionary structure consistent with legacy code, working out templates one year at a time
     events_dict = events_dict[year_label]
 
+    # The a priori channel selection is made per systematic view (putils.prepare_systematic_view)
+    make_channel_templates(args, events_dict, CHANNEL, signal_regions, year_label, args.plot_dir)
+
+
+def make_channel_templates(
+    args: argparse.Namespace,
+    events_dict: dict[str, LoadedSample],
+    CHANNEL: Channel,
+    signal_regions: list[str],
+    year_label: str,
+    plot_dir: Path,
+):
+    """Templates of one channel and year for every bmin and signal region (main() loads)."""
+    models = None  # BDTs re-evaluated in shifted views, as in main()
+    if not args.use_ParT:
+        models = [args.ggf_modelname] + ([args.vbf_modelname] if args.do_vbf else [])
+    print(
+        f"{CHANNEL.key} events per sample:",
+        {key: len(sample.events) for key, sample in events_dict.items()},
+    )
+
+    # A priori channel and ggf/vbf category are assigned per view (putils.prepare_systematic_view).
     # Every nuisance starts from the same unclassified pool. Selecting the nominal
     # channel first would permanently lose events migrating into this channel.
     base_events_dict = events_dict
@@ -326,13 +384,17 @@ def main(args: argparse.Namespace):
                 f"Unresolved by shift: {counts['unresolved_events_by_shift']}"
             )
 
+    # Trigger SF (--trigger-sf): applied in every systematic view to the channel's MC
+    # (putils.prepare_systematic_view), so every region gets it; HH4b's global pnetbb-leg
+    # uncertainty uses all of the channel's events of the sample.
+
     if not args.a_priori_channels:
         print(
             "WARNING: the validation region (vr) is only supported with --a-priori-channels; "
             "not filling it in this run."
         )
 
-    args.sigs = {s + CHANNEL.key: SAMPLES[s + CHANNEL.key] for s in args.sigs}
+    sigs = {s + CHANNEL.key: SAMPLES[s + CHANNEL.key] for s in args.sigs}
     systematics: dict[str, dict] = {}
     systematics_path: Path | None = None
     if args.template_dir:
@@ -362,7 +424,7 @@ def main(args: argparse.Namespace):
         for signal_key in signal_regions:
             subdir = Path(match_tag) / f"bmin_{bmin}" / signal_key / CHANNEL.key
             template_dir_bmin = Path(args.template_dir) / subdir if args.template_dir else ""
-            plot_dir_bmin = Path(args.plot_dir) / subdir if args.plot_dir else ""
+            plot_dir_bmin = Path(plot_dir) / subdir if plot_dir else ""
             if template_dir_bmin:
                 (template_dir_bmin / "cutflows" / year_label).mkdir(parents=True, exist_ok=True)
             if plot_dir_bmin:
@@ -381,7 +443,7 @@ def main(args: argparse.Namespace):
                 get_templates(
                     view,
                     year_label,
-                    args.sigs,
+                    sigs,
                     args.bgs,
                     CHANNEL,  # Updated channel with new cuts
                     signal_key,
@@ -408,6 +470,7 @@ def main(args: argparse.Namespace):
                     a_priori_channels=args.a_priori_channels,
                     a_priori_production_mode=args.a_priori_production_mode is not None,
                     apply_txbb_sf=args.txbb_sf,
+                    apply_trigger_sf=args.trigger_sf,
                     blind=args.blinded,
                     selection_region_kwargs={
                         "sensitivity_dir": args.sensitivity_dir,
@@ -447,6 +510,8 @@ def main(args: argparse.Namespace):
                 ak8_match_summary=ak8_match_summary,
                 lepton_match_summary=lepton_match_summary,
             )
+
+    print(f"\nCompleted processing all bmin values: {args.bmin} for {CHANNEL.key}")
 
 
 def control_plots(
@@ -730,6 +795,7 @@ def get_templates(
     a_priori_channels: bool = False,
     a_priori_production_mode: bool = False,
     apply_txbb_sf: bool = False,
+    apply_trigger_sf: bool = False,
     event_sfs: tuple = (),
     scalar_weight_sources: tuple = (),
 ) -> dict[str, Hist]:
@@ -833,6 +899,17 @@ def get_templates(
         )
         print(f"TXbb SF at cut {txbb_cut:.4f} for {txbb_sf_keys}")
 
+    # Trigger SF: applied to all MC in make_channel_templates (every region); here only the
+    # template variations, from the weight columns added by corrections.apply_trigger_sfs.
+    trigger_sf_keys, trigger_variations = [], []
+    if apply_trigger_sf and not do_jshift:
+        trigger_sf_keys = [key for key, s in events_dict.items() if not s.sample.isData]
+        trigger_variations = [
+            f"trigger{leg}_{shift}"
+            for leg in ["", f"_{corrections.trigger_leg2(channel)}"]
+            for shift in ["down", "up"]
+        ]
+
     for rname, region in selection_regions.items():
         pass_region = rname == "sr"
         region_txbb_sf_keys = txbb_sf_keys if rname == "sr" else []
@@ -869,7 +946,11 @@ def get_templates(
 
         txbb_factors = {
             skey: corrections.apply_txbb_sfs(
-                sig_events[skey], year, txbb_cut, bb_disc_col, weight_key,
+                sig_events[skey],
+                year,
+                txbb_cut,
+                bb_disc_col,
+                weight_key,
                 variations=not do_jshift,
             )
             for skey in region_txbb_sf_keys
@@ -889,6 +970,9 @@ def get_templates(
 
         for skey in region_txbb_sf_keys:
             hist_samples += [f"{skey}_{var}" for var in txbb_variations]
+
+        for skey in trigger_sf_keys:
+            hist_samples += [f"{skey}_{var}" for var in trigger_variations]
 
         # if not do_jshift:
         #     for shift in ["down", "up"]:
@@ -940,6 +1024,14 @@ def get_templates(
                         weight=sample.get_var(f"{weight_key}_{var}"),
                     )
 
+            if skey in trigger_sf_keys:
+                for var in trigger_variations:
+                    h.fill(
+                        Sample=f"{skey}_{var}",
+                        **fill_data,
+                        weight=sample.get_var(f"{weight_key}_{var}"),
+                    )
+
             if skey in sig_keys:
                 # diagnostic truth-origin breakdown (nominal weight only, no shape
                 # systematics) -- see hist_samples note above
@@ -958,12 +1050,15 @@ def get_templates(
                 for source, variations in weight_variations(
                     sample, event_sfs, scalar_weight_sources
                 ).items():
-                    for direction, varied_weight in variations.items():
-                        varied_weight = varied_weight * txbb_factors.get(skey, 1.0)
+                    # built before the TXbb and trigger SFs: add their nominal values
+                    trigger_factor = (
+                        sample.get_var(corrections.TRIGGER_SF_COL) if apply_trigger_sf else 1.0
+                    )
+                    for direction, raw_weight in variations.items():
                         h.fill(
                             Sample=f"{skey}_{source}_{direction}",
                             **fill_data,
-                            weight=varied_weight,
+                            weight=raw_weight * txbb_factors.get(skey, 1.0) * trigger_factor,
                         )
 
             if not do_jshift:
@@ -1133,11 +1228,21 @@ def parse_args(parser=None):
     if parser is None:
         parser = argparse.ArgumentParser()
 
-    parser.add_argument(
+    channel_group = parser.add_mutually_exclusive_group(required=True)
+    channel_group.add_argument(
         "--channel",
-        required=True,
         choices=list(Samples.CHANNELS.keys()),
-        help="channel",
+        help="channel (deprecated for templates: loads the data once per channel; use --channels)",
+        type=str,
+    )
+    channel_group.add_argument(
+        "--channels",
+        nargs="+",
+        choices=list(Samples.CHANNELS.keys()),
+        help=(
+            "templates for several channels from one data load per year (see "
+            "utils.load_data_all_channels); requires --a-priori-channels, no --gen-split"
+        ),
         type=str,
     )
 
@@ -1189,7 +1294,8 @@ def parse_args(parser=None):
 
     parser.add_argument(
         "--plot-dir",
-        help="If making control or template plots, path to directory to save them in",
+        help="If making control or template plots, path to directory to save them in "
+        "(default: plots/Templates/<template-dir name>)",
         default="",
         type=str,
     )
@@ -1228,8 +1334,7 @@ def parse_args(parser=None):
     add_bool_arg(parser, "blinded", "blind the data in the Higgs mass window", default=True)
     add_bool_arg(parser, "templates", "save m_bb templates", default=False)
     add_bool_arg(
-        parser,
-        "overwrite-template", "if template file already exists, overwrite it", default=False
+        parser, "overwrite-template", "if template file already exists, overwrite it", default=False
     )
     add_bool_arg(
         parser,
@@ -1274,8 +1379,7 @@ def parse_args(parser=None):
     )
     add_bool_arg(parser, "plot-shifts", "Plot systematic variations as well", default=False)
     add_bool_arg(
-        parser,
-        "override-systs", "Override saved systematics file if it exists", default=False
+        parser, "override-systs", "Override saved systematics file if it exists", default=False
     )
 
     parser.add_argument(
@@ -1356,6 +1460,13 @@ def parse_args(parser=None):
         "txbb-sf",
         "Apply TXbb tagger SFs (corrections.apply_txbb_sfs) to signal + TXBB_SF_BG_KEYS, with "
         "per-pT-bin up/down template variations",
+        default=False,
+    )
+    add_bool_arg(
+        parser,
+        "trigger-sf",
+        "Apply event trigger SFs (corrections.apply_trigger_sfs) to all MC in every region, with "
+        "pnetbb-leg and second-leg up/down template variations",
         default=False,
     )
 
@@ -1465,7 +1576,9 @@ def parse_args(parser=None):
     args.event_sfs = list(dict.fromkeys(args.event_sfs))
     args.weight_shifts = list(dict.fromkeys(args.weight_shifts))
     if set(args.weight_shifts) & (set(args.event_sfs) | set(args.kinematic_sources)):
-        parser.error("A nuisance cannot be both a kinematic/event-SF source and a scalar weight source")
+        parser.error(
+            "A nuisance cannot be both a kinematic/event-SF source and a scalar weight source"
+        )
     # save_args = deepcopy(args)
 
     if any(source in {"scale", "pdf"} for source in args.weight_shifts):
@@ -1489,6 +1602,15 @@ def parse_args(parser=None):
     if args.a_priori_production_mode == "none":
         args.a_priori_production_mode = None
 
+    if args.channels is not None and (
+        args.control_plots or not args.a_priori_channels or args.gen_split
+    ):
+        parser.error(
+            "--channels supports templates with --a-priori-channels and without --gen-split "
+            "only; use --channel for --control-plots, the CHANNEL_ORDERING veto chain or "
+            "--gen-split"
+        )
+
     args.model_dir = Path(args.model_dir)
 
     if args.data_dir:
@@ -1504,6 +1626,11 @@ def parse_args(parser=None):
     elif args.data_dir:
         args.signal_data_dirs = [args.data_dir]
 
+    # default plot dir, same layout as MakeTemplates.sh: plots/Templates/<template-dir name>
+    if not args.plot_dir:
+        args.plot_dir = PLOT_DIR / "Templates" / (Path(args.template_dir).name or "untagged")
+        print(f"--plot-dir not given, using {args.plot_dir}")
+
     # save args in args.plot_dir and args.template_dir if they exist
     if args.plot_dir:
         year_label = "+".join(args.years)
@@ -1517,8 +1644,10 @@ def parse_args(parser=None):
                 "test" if args.test_mode else ("tt-presel" if args.tt_pres else "no-presel")
             )
             args.plot_dir = base_plot_dir / today / presel_label / args.channel / year_label
-        else:
+        elif args.channel is not None:
             args.plot_dir = base_plot_dir / args.channel / year_label
+        else:  # --channels: <channel>/<year_label> is added per channel in main()
+            args.plot_dir = base_plot_dir
 
         args.plot_dir.mkdir(parents=True, exist_ok=True)
         # with (args.plot_dir / "args.json").open("w") as f:

@@ -44,6 +44,13 @@ def get_processor(
             prescale_factor=prescale_factor,
         )
 
+    if processor == "ttskimmer":
+        from bbtautau.processors import ttSkimmer
+
+        return ttSkimmer(xsecs=xsecs, nano_version=nano_version)
+
+    raise ValueError(f"Unknown processor {processor}")
+
 
 def main(args):
     p = get_processor(
@@ -58,8 +65,8 @@ def main(args):
         args.prescale_factor,
     )
 
-    save_parquet = {"skimmer": True}[args.processor]
-    save_root = {"skimmer": True}[args.processor]
+    save_parquet = {"skimmer": True, "ttskimmer": True}[args.processor]
+    save_root = {"skimmer": True, "ttskimmer": True}[args.processor]
 
     skipbadfiles = True
 
@@ -119,11 +126,6 @@ if __name__ == "__main__":
     run_utils.parse_common_run_args(parser)
     run_utils.parse_common_hh_args(parser)
     bbtautau_utils.parse_common_run_args(parser)
-    parser.add_argument(
-        "--save-kinematic-systematics",
-        action="store_true",
-        help="Save and propagate kinematic systematic variations (lepton/tau scale and resolution, JES/JER) through object selection, derived variables, and shifted SF matching.",
-    )
     args = parser.parse_args()
 
     if isinstance(args.year, list):

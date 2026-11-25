@@ -74,8 +74,10 @@ _repo_name = _REPO_ROOT.name
 #     "/eos/user/j/jinwa/a_2024_small_par"
 # )
 
-_default_data_dir = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Mar5All_v12_private_signal"
-data_dir_2024 = "/ceph/cms/store/user/lumori/bbtautau/skimmer/25Sep24All_618_v15/"
+_default_data_dir = (
+    "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Nov3_light_v12_private_signal_merged"
+)
+data_dir_2024 = "/ceph/cms/store/user/lumori/bbtautau/skimmer/26Nov3_light_v15_signal_merged/"
 DATA_DIR = os.environ.get("BBTAUTAU_DATA_DIR", _default_data_dir)
 DATA_PATHS = path_dict(DATA_DIR, path_2024=data_dir_2024)
 
@@ -113,11 +115,24 @@ CHANNEL_ORDERING = ["hh", "hm", "he"]  # order of applying selection and vetoes
 SIGNAL_ORDERING = ["ggfbbtt", "vbfbbtt"]  # order of applying selection and vetoes
 
 
+# Loose cut L of the CR/VR (Regions.build_validation_regions): bb, glopart tt and, in BDT mode
+# only, the channel's ggF BDT score ("bdt", added 2026-10-27).
 VR_LOOSE_CUTS: dict[str, dict[str, float]] = {
-    "hh": {"txbb": 0.4, "txtt": 0.4},
-    "hm": {"txbb": 0.4, "txtt": 0.4},
-    "he": {"txbb": 0.4, "txtt": 0.4},
+    "hh": {"txbb": 0.4, "txtt": 0.4, "bdt": 0.4},
+    "hm": {"txbb": 0.4, "txtt": 0.4, "bdt": 0.4},
+    "he": {"txbb": 0.4, "txtt": 0.4, "bdt": 0.4},
 }
+
+# Lower bound on the SR cuts scanned by the SensitivityStudy grid search, on both axes (bb
+# TXbb and the tt discriminant: BDT score or ParT tt; ggF and VBF SRs). Must stay above
+# VR_LOOSE_CUTS so that every SR lies strictly inside the VR box (no SR/CR overlap).
+SR_MIN_CUT = 0.5
+
+# VBF SRs only (signal regions named vbf*): append one "no TXbb cut" point (cut 0, signal
+# efficiency 1) to the bb axis of the SensitivityStudy grid, on top of the >= SR_MIN_CUT scan.
+# The tt axis and the ggF SRs keep SR_MIN_CUT. Such an SR is not inside the VR box: in BDT mode
+# the CR vetoes the SRs so CR/VR/SRs stay disjoint, but in ParT mode SR-VBF and CR overlap.
+VBF_ALLOW_NO_TXBB_CUT = True
 
 
 # Working point bin edges for tt GloParT discriminants
